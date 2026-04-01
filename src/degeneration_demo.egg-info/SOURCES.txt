@@ -3,6 +3,7 @@ pyproject.toml
 src/degeneration_demo/__init__.py
 src/degeneration_demo/metrics.py
 src/degeneration_demo/model_utils.py
+src/degeneration_demo/pipeline.py
 src/degeneration_demo.egg-info/PKG-INFO
 src/degeneration_demo.egg-info/SOURCES.txt
 src/degeneration_demo.egg-info/dependency_links.txt
