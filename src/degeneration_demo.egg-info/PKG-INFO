@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: degeneration-demo
+Version: 0.1.0
+Summary: Small standalone demo for generation and degeneration checking
+Requires-Python: <3.13,>=3.10
+Requires-Dist: torch>=2.4.0
+Requires-Dist: transformers>=4.56.0
+Requires-Dist: accelerate>=0.20.0
+Requires-Dist: datasets>=2.0.0
+Requires-Dist: matplotlib>=3.8.0

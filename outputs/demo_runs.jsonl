@@ -1,0 +1,10 @@
+{"prompt": "Explain why the sky appears blue during the day in two sentences.", 
+"model_name": "Qwen/Qwen2.5-0.5B-Instruct", 
+"generated_text": "The sky appears blue during the day due to the scattering of sunlight by tiny water droplets in the Earth's atmosphere, which reflects and disperses light into different colors. This phenomenon is known as the Rayleigh scattering effect.", 
+"repetition_n": 1, 
+"repetition_threshold": 0.9, 
+"repetition_score": 0.10869565217391308, 
+"degenerating": false,
+"max_new_tokens": 64, 
+"temperature": 0.7, 
+"top_p": 0.9}

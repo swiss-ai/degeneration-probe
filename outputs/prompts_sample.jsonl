@@ -1,0 +1,5 @@
+{"prompt_id": "tatsu-lab_alpaca-train-0", "prompt": "Give three tips for staying healthy.", "source_dataset": "tatsu-lab/alpaca"}
+{"prompt_id": "tatsu-lab_alpaca-train-1", "prompt": "What are the three primary colors?", "source_dataset": "tatsu-lab/alpaca"}
+{"prompt_id": "tatsu-lab_alpaca-train-2", "prompt": "Describe the structure of an atom.", "source_dataset": "tatsu-lab/alpaca"}
+{"prompt_id": "tatsu-lab_alpaca-train-3", "prompt": "How can we reduce air pollution?", "source_dataset": "tatsu-lab/alpaca"}
+{"prompt_id": "tatsu-lab_alpaca-train-4", "prompt": "Describe a time when you had to make a difficult decision.", "source_dataset": "tatsu-lab/alpaca"}
