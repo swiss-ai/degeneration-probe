@@ -9,6 +9,42 @@ from typing import Any, List, Optional
 
 from datasets import load_dataset
 
+# ---------------------------------------------------------------------------
+# Prompt cache helpers
+# ---------------------------------------------------------------------------
+
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+
+def _resolve_cache_dir() -> Path:
+    """Return the prompt cache directory.
+
+    Controlled by the ``PROBE_DATA_CACHE`` env var.  Falls back to
+    ``data/cache/`` relative to the project root so it is shared across runs
+    but excluded from git.
+    """
+    env = os.environ.get("PROBE_DATA_CACHE")
+    return Path(env) if env else _PROJECT_ROOT / "data" / "cache"
+
+
+def _prompt_cache_path(
+    dataset_name: str,
+    subset: Optional[str],
+    split: str,
+    seed: int,
+    max_samples: int,
+    shuffle: bool,
+) -> Path:
+    """Build a deterministic cache file path for a given prompt sample config."""
+    slug = dataset_name.replace("/", "__")
+    subset_part = subset if subset else "none"
+    shuffle_part = "_shuffled" if shuffle else ""
+    filename = f"{slug}_{subset_part}_{split}_s{seed}_n{max_samples}{shuffle_part}.jsonl"
+    return _resolve_cache_dir() / filename
+
+
+# ---------------------------------------------------------------------------
+
 
 def ensure_hf_token(token_path: str = "keys/.hf_token") -> None:
     """Load the HuggingFace token into env vars if not already set.
@@ -91,7 +127,24 @@ def fetch_prompt_sample(
     seed: int,
     output_path: Path,
 ) -> Path:
-    """Fetch prompts from a HuggingFace dataset and save a local JSONL sample."""
+    """Fetch prompts from a HuggingFace dataset and save a local JSONL sample.
+
+    On subsequent calls with identical parameters the prompts are loaded from a
+    local cache (``data/cache/`` by default, or ``$PROBE_DATA_CACHE``) instead
+    of re-downloading from HuggingFace Hub.
+    """
+    cache_path = _prompt_cache_path(dataset_name, subset, split, seed, max_samples, shuffle)
+
+    if cache_path.exists():
+        records = read_jsonl(cache_path)
+        print(f"[cache] Loaded {len(records)} prompts from {cache_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            output_path.unlink()
+        for record in records:
+            append_jsonl(output_path, record)
+        return output_path
+
     print(f"Loading dataset: {dataset_name} (subset={subset}, split={split})")
     dataset = load_dataset(dataset_name, subset, split=split)
 
@@ -101,20 +154,20 @@ def fetch_prompt_sample(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
         output_path.unlink()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     limit = min(max_samples, len(dataset))
-    print(f"Saving {limit} prompts to {output_path}")
+    print(f"Saving {limit} prompts to {output_path} (caching at {cache_path})")
     for idx in range(limit):
         example = dataset[idx]
         prompt = build_prompt_from_example(example, prompt_field=prompt_field)
-        append_jsonl(
-            output_path,
-            {
-                "prompt_id": f"{dataset_name.replace('/', '_')}-{split}-{idx}",
-                "prompt": prompt,
-                "source_dataset": dataset_name,
-            },
-        )
+        record = {
+            "prompt_id": f"{dataset_name.replace('/', '_')}-{split}-{idx}",
+            "prompt": prompt,
+            "source_dataset": dataset_name,
+        }
+        append_jsonl(output_path, record)
+        append_jsonl(cache_path, record)
 
     print(f"Done. Saved {limit} prompts.")
     return output_path

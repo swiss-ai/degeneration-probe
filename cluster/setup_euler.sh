@@ -28,6 +28,14 @@ grep -qxF "export HF_HOME=${HF_CACHE}" ~/.bashrc \
 export HF_HOME="${HF_CACHE}"
 echo "[setup] HF cache → ${HF_CACHE}"
 
+# Point prompt dataset cache to scratch (avoids re-downloading between runs)
+PROBE_CACHE="/cluster/scratch/${USER}/probe_data_cache"
+mkdir -p "${PROBE_CACHE}"
+grep -qxF "export PROBE_DATA_CACHE=${PROBE_CACHE}" ~/.bashrc \
+  || echo "export PROBE_DATA_CACHE=${PROBE_CACHE}" >> ~/.bashrc
+export PROBE_DATA_CACHE="${PROBE_CACHE}"
+echo "[setup] Prompt cache → ${PROBE_CACHE}"
+
 # Remind user to place the HF token
 TOKEN="${HOME}/.hf_token"
 if [[ ! -f "${TOKEN}" ]]; then
