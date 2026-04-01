@@ -1,4 +1,4 @@
-"""Minimal model-loading utilities copied and reduced from feature-probes."""
+"""Utilities for loading Hugging Face causal language models."""
 
 from typing import Optional, Tuple, Union
 

@@ -1,7 +1,7 @@
 [project]
-name = "degeneration-demo"
+name = "degeneration-probe"
 version = "0.1.0"
-description = "Small standalone demo for generation and degeneration checking"
+description = "Research pipeline for measuring LLM text degeneration and building a degeneration probe"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "torch>=2.4.0",
@@ -9,8 +9,12 @@ dependencies = [
   "accelerate>=0.20.0",
   "datasets>=2.0.0",
   "matplotlib>=3.8.0",
+  "pyyaml>=6.0",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

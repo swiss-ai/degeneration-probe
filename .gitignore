@@ -20,6 +20,9 @@ logs/
 # macOS
 .DS_Store
 
+# Local experiment config overrides (copy a config and add .local to gitignore it)
+configs/*.local.yaml
+
 # Editor
 .idea/
 .vscode/

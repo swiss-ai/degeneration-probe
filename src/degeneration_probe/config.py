@@ -1,0 +1,60 @@
+"""YAML config loading and experiment configuration dataclasses."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+import yaml
+
+
+@dataclass
+class ModelConfig:
+    name: str
+    dtype: str = "bfloat16"
+    max_new_tokens: int = 256
+    temperature: float = 0.7
+    top_p: float = 0.9
+
+
+@dataclass
+class DatasetConfig:
+    name: str
+    subset: Optional[str] = None
+    split: str = "train"
+    prompt_field: Optional[str] = None
+    max_samples: int = 25
+    shuffle: bool = False
+    seed: int = 42
+    max_prompts: int = 10
+
+
+@dataclass
+class AnalysisConfig:
+    chunk_size: int = 256
+    n_values: List[int] = field(default_factory=lambda: [1, 3])
+    save_hidden_states: bool = False
+
+
+@dataclass
+class Config:
+    model: ModelConfig
+    dataset: DatasetConfig
+    analysis: AnalysisConfig
+    output_dir: Optional[Path] = None  # set by run.py at runtime, not from YAML
+
+
+def load_config(path: Path) -> Config:
+    """Load a YAML experiment config file and return a Config instance."""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    for key in ("model", "dataset", "analysis"):
+        if key not in raw:
+            raise ValueError(f"Config file '{path}' is missing required top-level key: '{key}'")
+
+    return Config(
+        model=ModelConfig(**raw["model"]),
+        dataset=DatasetConfig(**raw["dataset"]),
+        analysis=AnalysisConfig(**raw["analysis"]),
+    )

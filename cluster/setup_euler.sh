@@ -45,4 +45,4 @@ cd "${PROJ_DIR}"
 uv sync --frozen
 
 echo ""
-echo "[setup] Done. Submit a job with:  sbatch cluster/euler_main.sh"
+echo "[setup] Done. Submit a job with:  CONFIG_FILE=alpaca_qwen05b.yaml sbatch cluster/euler_run.sh"
