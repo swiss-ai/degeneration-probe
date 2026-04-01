@@ -60,6 +60,10 @@ degeneration-probe/
 ├── keys/
 │   └── .hf_token                 # Your HuggingFace token (gitignored)
 │
+├── data/                         # Dataset prompt cache (gitignored, shared across runs)
+│   └── cache/
+│       └── tatsu-lab__alpaca_none_train_s42_n25.jsonl
+│
 └── outputs/                      # All run outputs (gitignored)
     └── runs/
         └── 20260401_143022/      # One folder per run (timestamp)
@@ -73,6 +77,23 @@ degeneration-probe/
                 ├── ttr_n3.png
                 └── repetition_n3.png
 ```
+
+---
+
+## Dataset Caching
+
+Downloaded prompt samples are cached in `data/cache/` (gitignored) so subsequent runs with the same config skip the HuggingFace download entirely.
+
+The cache filename encodes all parameters that affect the sample — dataset, subset, split, seed, size, and shuffle — so changing any of them produces a new cache file automatically.
+
+To override the cache location (e.g. on a shared cluster filesystem):
+
+```bash
+export PROBE_DATA_CACHE=/path/to/shared/cache
+uv run python run.py --config configs/my_experiment.yaml
+```
+
+On ETH Euler, `setup_euler.sh` sets `PROBE_DATA_CACHE` to scratch space automatically.
 
 ---
 
