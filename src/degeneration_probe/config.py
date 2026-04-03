@@ -58,3 +58,49 @@ def load_config(path: Path) -> Config:
         dataset=DatasetConfig(**raw["dataset"]),
         analysis=AnalysisConfig(**raw["analysis"]),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Probe training configuration (used by scripts/train.py via Hydra)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProbeConfig:
+    """Configuration for the probe architecture."""
+
+    layer: int = -1  # -1 = last layer
+    pooling: str = "mean"  # mean | max | last_token
+    threshold: float = 0.5
+
+
+@dataclass
+class TrainingConfig:
+    """Configuration for the probe training loop."""
+
+    # Model
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_dtype: str = "auto"
+
+    # Probe
+    probe: ProbeConfig = field(default_factory=ProbeConfig)
+
+    # Data
+    train_data: str = "tests/fixtures/sample_data.jsonl"
+    eval_data: Optional[str] = None  # if None, split from train
+    eval_fraction: float = 0.2
+    max_length: int = 2048
+
+    # Training
+    learning_rate: float = 1e-3
+    batch_size: int = 4
+    num_epochs: int = 10
+    seed: int = 42
+    pos_weight: Optional[float] = None  # weight for positive class in BCE
+
+    # Logging
+    wandb_project: Optional[str] = None
+    wandb_run_name: Optional[str] = None
+
+    # Output
+    output_dir: str = "outputs/probes"

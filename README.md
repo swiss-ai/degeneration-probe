@@ -8,7 +8,7 @@ The current pipeline:
 3. Scores each completion for repetition using chunk-level n-gram TTR metrics
 4. Saves results and histogram plots
 
-Coming soon: hidden-states extraction and probe training (see [Coming Soon](#coming-soon)).
+**Phase 2** adds probe training: a linear classifier on frozen LLM hidden states that learns to predict the `degenerating` label.
 
 ---
 
@@ -44,14 +44,26 @@ degeneration-probe/
 │   ├── alpaca_qwen05b.yaml       # Small local test: Alpaca dataset + Qwen-0.5B
 │   └── aime_qwen05b.yaml         # AIME math problems + Qwen-0.5B
 │
+├── scripts/
+│   ├── train.py                  # Hydra entry point for probe training
+│   └── evaluate.py               # Standalone probe evaluation
+│
 ├── src/degeneration_probe/       # Core library
-│   ├── config.py                 # Config dataclasses + YAML loader
+│   ├── config.py                 # Config dataclasses (Phase 1 + Phase 2)
 │   ├── data.py                   # Prompt fetching and JSONL I/O
 │   ├── generation.py             # LLM generation + batch processing
 │   ├── metrics.py                # n-gram TTR / repetition metrics
 │   ├── plotting.py               # Histogram plots
 │   ├── representations.py        # Hidden-states extractor (stub — in development)
-│   └── model_utils.py            # Model/tokenizer loading helpers
+│   ├── model_utils.py            # Model/tokenizer loading helpers
+│   ├── types.py                  # Data types (DegenerationItem)
+│   ├── dataset.py                # PyTorch Dataset + collation for probe training
+│   ├── probe.py                  # SequenceProbe (hook → pool → linear head)
+│   ├── training.py               # Training loop
+│   ├── evaluation.py             # Evaluation pipeline + metrics/plots
+│   └── utils/
+│       ├── hooks.py              # Forward hook context manager
+│       └── clf_metrics.py        # Classification metrics + ROC plotting
 │
 ├── cluster/
 │   ├── setup_euler.sh            # One-time setup on ETH Euler login node
@@ -167,7 +179,7 @@ Results appear in `outputs/runs/<timestamp>/` on the cluster. Copy them back wit
 | RAM | 32 GB (4 × 8 GB) |
 | GPU | 1 × ≥ 20 GB VRAM |
 
-Adjust `#SBATCH` directives in `cluster/euler_run.sh` for larger models.
+Adjust `#SBATCH` directives in `cluster/euler_run.sh` (data collection) or `cluster/euler_train.sh` (probe training) for larger models.
 
 ---
 
@@ -223,7 +235,57 @@ One record per generation, with chunk-level degeneration metrics:
 
 ---
 
+## Probe Training (Phase 2)
+
+Once you have labelled generation data (from Phase 1), train a degeneration probe:
+
+### Local
+
+```bash
+# Train with the small Qwen model on synthetic test data (sanity check)
+uv run python scripts/train.py
+
+# Train with a specific dataset and model
+uv run python scripts/train.py model=apertus train_data=outputs/runs/XXXXXXXX/data/generations.jsonl
+
+# Override any parameter
+uv run python scripts/train.py model=apertus num_epochs=20 probe.layer=28 probe.pooling=max
+```
+
+### Cluster (Euler)
+
+```bash
+# Default config
+sbatch cluster/euler_train.sh
+
+# With overrides
+HYDRA_OVERRIDES="model=apertus train_data=/path/to/data.jsonl" sbatch cluster/euler_train.sh
+```
+
+### Evaluate a saved checkpoint
+
+```bash
+uv run python scripts/evaluate.py \
+  --checkpoint outputs/probes/<timestamp>/checkpoint \
+  --eval_data path/to/eval.jsonl \
+  --model_name "Qwen/Qwen2.5-0.5B-Instruct"
+```
+
+Results (metrics JSON, ROC curve, threshold analysis plot) are saved to the checkpoint's `eval/` subdirectory.
+
+### How it works
+
+1. The base LLM is loaded frozen (no gradient updates)
+2. A forward hook captures hidden states from a chosen layer during teacher-forced forward passes over the labelled data
+3. Hidden states are pooled over completion tokens (mean, max, or last-token)
+4. A single `nn.Linear(hidden_size, 1)` head is trained with BCE loss
+5. Evaluation reports accuracy, precision, recall, F1, AUC, and optimal threshold
+
+---
+
 ## Coming Soon
 
-- **Hidden states extraction** (`--save_hidden_states` flag): runs a forward pass with `output_hidden_states=True` and saves per-layer activations alongside each generation record. The field `hidden_states_path` in generations will point to the saved `.pt` file.
-- **Probe training**: a linear classifier trained on the saved hidden states to predict the `degenerating` label, enabling fast degeneration detection at inference time.
+- Multi-layer probing: train probes at every layer to find where degeneration is most detectable
+- Pre-saved hidden states for faster probe iteration
+- Interactive visualization demo
+- Training-time steering integration
