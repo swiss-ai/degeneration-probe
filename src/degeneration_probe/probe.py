@@ -54,7 +54,7 @@ class SequenceProbe(nn.Module):
         hidden_size = get_model_hidden_size(model)
         self.hidden_size = hidden_size
         torch.manual_seed(seed)
-        self.linear = nn.Linear(hidden_size, 1, device=model.device, dtype=model.dtype)
+        self.linear = nn.Linear(hidden_size, 1, device=model.device, dtype=torch.float32)
         nn.init.normal_(self.linear.weight, std=0.01)
         nn.init.zeros_(self.linear.bias)
 
