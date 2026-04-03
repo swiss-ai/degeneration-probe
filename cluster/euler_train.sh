@@ -5,11 +5,8 @@
 # Submit (default config):
 #   sbatch cluster/euler_train.sh
 #
-# Override Hydra parameters:
-#   HYDRA_OVERRIDES="model=apertus num_epochs=20" sbatch cluster/euler_train.sh
-#
-# Override training data:
-#   HYDRA_OVERRIDES="train_data=/path/to/data.jsonl model=apertus" sbatch cluster/euler_train.sh
+# Override config file:
+#   TRAIN_CONFIG=configs/train/my_config.yaml sbatch cluster/euler_train.sh
 # =============================================================================
 #SBATCH --job-name=degen-train
 #SBATCH --output=/cluster/home/%u/degeneration-probe/logs/train_%j.out
@@ -33,13 +30,12 @@ cd "${PROJ_DIR}"
 export HF_HOME="/cluster/scratch/${USER}/hf_cache"
 mkdir -p "${PROJ_DIR}/logs"
 
-# Hydra overrides (pass via environment variable at submit time)
-HYDRA_OVERRIDES="${HYDRA_OVERRIDES:-}"
+TRAIN_CONFIG="${TRAIN_CONFIG:-configs/train/default.yaml}"
 
 echo "[job] HF_HOME  = ${HF_HOME}"
-echo "[job] overrides = ${HYDRA_OVERRIDES}"
+echo "[job] config   = ${TRAIN_CONFIG}"
 echo "[job] GPU      = $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 
-uv run python scripts/train.py ${HYDRA_OVERRIDES}
+uv run python -m degeneration_probe train --config "${TRAIN_CONFIG}"
 
 echo "[job] Done."

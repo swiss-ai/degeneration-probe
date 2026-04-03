@@ -23,15 +23,18 @@ class DegenerationDataset(Dataset):
         prompt, completion, label
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, paths: str | Path | list[str | Path]) -> None:
+        if isinstance(paths, (str, Path)):
+            paths = [paths]
         self.items: List[DegenerationItem] = []
-        with open(path) as f:
-            for line in f:
-                record = json.loads(line)
-                prompt = record["prompt"]
-                completion = record.get("generated_text", record.get("completion", ""))
-                label = float(record.get("degenerating", record.get("label", 0)))
-                self.items.append(DegenerationItem(prompt=prompt, completion=completion, label=label))
+        for path in paths:
+            with open(path) as f:
+                for line in f:
+                    record = json.loads(line)
+                    prompt = record["prompt"]
+                    completion = record.get("generated_text", record.get("completion", ""))
+                    label = float(record.get("degenerating", record.get("label", 0)))
+                    self.items.append(DegenerationItem(prompt=prompt, completion=completion, label=label))
 
     def __len__(self) -> int:
         return len(self.items)

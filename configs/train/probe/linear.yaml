@@ -1,5 +1,0 @@
-# @package _global_
-probe:
-  layer: -1
-  pooling: mean
-  threshold: 0.5

@@ -116,6 +116,39 @@ def build_prompt_from_example(example: dict[str, Any], prompt_field: Optional[st
     raise ValueError("Could not infer a prompt field. Set 'prompt_field' explicitly in your config.")
 
 
+def resolve_model_from_data(paths: list[str | Path]) -> str:
+    """Read the model_name from JSONL data files and validate consistency.
+
+    Returns the shared model name. Raises ValueError if files disagree or
+    if model_name is missing from any file.
+    """
+    model_names: dict[str, str] = {}
+    for p in paths:
+        p = Path(p)
+        with open(p, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+        if not first_line:
+            raise ValueError(f"Data file is empty: {p}")
+        record = json.loads(first_line)
+        name = record.get("model_name")
+        if not name:
+            raise ValueError(
+                f"Data file {p} is missing 'model_name' field. "
+                "Was it generated with an older pipeline version?"
+            )
+        model_names[str(p)] = name
+
+    unique = set(model_names.values())
+    if len(unique) > 1:
+        details = "\n".join(f"  {path}: {name}" for path, name in model_names.items())
+        raise ValueError(
+            f"Model mismatch across training data files:\n{details}\n"
+            "All training data must come from the same model."
+        )
+
+    return unique.pop()
+
+
 def fetch_prompt_sample(
     *,
     dataset_name: str,

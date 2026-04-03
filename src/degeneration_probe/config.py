@@ -78,15 +78,11 @@ class ProbeConfig:
 class TrainingConfig:
     """Configuration for the probe training loop."""
 
-    # Model
-    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"
-    model_dtype: str = "auto"
-
     # Probe
     probe: ProbeConfig = field(default_factory=ProbeConfig)
 
-    # Data
-    train_data: str = "tests/fixtures/sample_data.jsonl"
+    # Data — list of JSONL paths; model is auto-resolved from data
+    train_data: List[str] = field(default_factory=list)
     eval_data: Optional[str] = None  # if None, split from train
     eval_fraction: float = 0.2
     max_length: int = 2048
@@ -104,3 +100,32 @@ class TrainingConfig:
 
     # Output
     output_dir: str = "outputs/probes"
+
+
+def load_training_config(path: Path) -> TrainingConfig:
+    """Load a plain YAML training config and return a TrainingConfig instance."""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    # Normalize train_data: accept a single string or a list
+    train_data = raw.get("train_data", [])
+    if isinstance(train_data, str):
+        train_data = [train_data]
+
+    probe_raw = raw.get("probe", {})
+    probe = ProbeConfig(**probe_raw)
+
+    return TrainingConfig(
+        probe=probe,
+        train_data=train_data,
+        eval_data=raw.get("eval_data"),
+        eval_fraction=raw.get("eval_fraction", 0.2),
+        max_length=raw.get("max_length", 2048),
+        learning_rate=raw.get("learning_rate", 1e-3),
+        batch_size=raw.get("batch_size", 4),
+        num_epochs=raw.get("num_epochs", 10),
+        seed=raw.get("seed", 42),
+        pos_weight=raw.get("pos_weight"),
+        wandb_project=raw.get("wandb_project"),
+        wandb_run_name=raw.get("wandb_run_name"),
+        output_dir=raw.get("output_dir", "outputs/probes"),
+    )

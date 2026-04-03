@@ -26,8 +26,6 @@ logs/
 # Local experiment config overrides (copy a config and add .local to gitignore it)
 configs/*.local.yaml
 
-# Hydra outputs (created in working dir by default)
-hydra_outputs/
 
 # Editor
 .idea/
