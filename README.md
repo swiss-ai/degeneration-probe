@@ -263,6 +263,7 @@ cd ~/degeneration-probe
 bash cluster/setup_euler.sh
 
 # Save your HuggingFace token
+mkdir -p keys
 printf '%s' 'hf_YOUR_TOKEN_HERE' > ~/degeneration-probe/keys/.hf_token
 chmod 600 ~/degeneration-probe/keys/.hf_token
 ```

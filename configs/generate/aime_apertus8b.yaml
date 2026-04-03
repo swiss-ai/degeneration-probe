@@ -6,10 +6,10 @@ model:
   top_p: 0.9
 
 dataset:
-  name: Maxwell-Jia/AIME_1983_2024
+  name: MathArena/aime_2025
   subset: null
   split: train
-  prompt_field: Problem
+  prompt_field: problem
   max_samples: 500
   shuffle: true
   seed: 42
