@@ -102,12 +102,25 @@ def build_prompt_from_example(example: dict[str, Any], prompt_field: Optional[st
                 return f"Instruction: {value.strip()}\nInput: {example['input'].strip()}"
             return value.strip()
 
+    # Standard messages format: [{"role": "user", "content": "..."}]
     messages = example.get("messages")
     if isinstance(messages, list):
         user_messages = []
         for item in messages:
             if isinstance(item, dict) and item.get("role") == "user":
                 content = item.get("content")
+                if isinstance(content, str) and content.strip():
+                    user_messages.append(content.strip())
+        if user_messages:
+            return "\n".join(user_messages)
+
+    # ShareGPT / OpenHermes format: [{"from": "human", "value": "..."}]
+    conversations = example.get("conversations")
+    if isinstance(conversations, list):
+        user_messages = []
+        for item in conversations:
+            if isinstance(item, dict) and item.get("from") == "human":
+                content = item.get("value")
                 if isinstance(content, str) and content.strip():
                     user_messages.append(content.strip())
         if user_messages:

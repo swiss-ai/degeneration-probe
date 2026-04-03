@@ -1,0 +1,23 @@
+probe:
+  layer: -1        # -1 = last transformer layer
+  pooling: mean     # mean | max | last_token
+  threshold: 0.5
+
+# Data — update these paths after running the two generate jobs.
+# Replace the timestamps with the actual output directories.
+train_data:
+  - outputs/generations/AIME_TIMESTAMP/data/generations.jsonl
+  - outputs/generations/OPENHERMES_TIMESTAMP/data/generations.jsonl
+
+eval_data: null       # if null, split from train_data
+eval_fraction: 0.2
+max_length: 2048
+
+learning_rate: 1.0e-3
+batch_size: 4
+num_epochs: 10
+seed: 42
+pos_weight: null      # weight for positive class in BCE loss
+
+wandb_project: null
+output_dir: outputs/probes

@@ -1,0 +1,21 @@
+model:
+  name: Swiss-AI/Apertus-8B-Instruct
+  dtype: bfloat16
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+
+dataset:
+  name: teknium/OpenHermes-2.5
+  subset: null
+  split: train
+  prompt_field: null      # auto-detect
+  max_samples: 1000
+  shuffle: true
+  seed: 42
+  max_prompts: 300
+
+analysis:
+  chunk_size: 256
+  n_values: [1, 3]
+  save_hidden_states: false

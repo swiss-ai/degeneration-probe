@@ -267,6 +267,25 @@ printf '%s' 'hf_YOUR_TOKEN_HERE' > ~/degeneration-probe/keys/.hf_token
 chmod 600 ~/degeneration-probe/keys/.hf_token
 ```
 
+### Submitting a generation job
+
+```bash
+# Default config (Alpaca + Qwen-0.5B)
+sbatch cluster/euler_generate.sh
+
+# Custom config
+GEN_CONFIG=configs/generate/aime_apertus8b.yaml sbatch cluster/euler_generate.sh
+```
+
+Logs go to `logs/generate_<jobid>.out` and `logs/generate_<jobid>.err`.
+
+| Resource | Default |
+|----------|---------|
+| Time limit | 4 hours |
+| CPUs | 4 |
+| RAM | 32 GB (4 x 8 GB) |
+| GPU | 1 x 40 GB VRAM |
+
 ### Submitting a training job
 
 ```bash
@@ -286,7 +305,15 @@ Logs go to `logs/train_<jobid>.out` and `logs/train_<jobid>.err`.
 | RAM | 32 GB (4 x 8 GB) |
 | GPU | 1 x 40 GB VRAM |
 
-Adjust `#SBATCH` directives in `cluster/euler_train.sh` for different needs.
+### Checking job status
+
+```bash
+squeue -u $USER                    # list running/pending jobs
+cat logs/generate_<jobid>.out      # check generation output
+cat logs/train_<jobid>.out         # check training output
+```
+
+Adjust `#SBATCH` directives in `cluster/euler_generate.sh` or `cluster/euler_train.sh` for different needs.
 
 ---
 
