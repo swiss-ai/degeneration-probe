@@ -253,6 +253,39 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    """Start the FastAPI backend server."""
+    import uvicorn
+    from degeneration_probe.server.app import create_app
+
+    app = create_app(db_path=args.db_path)
+    uvicorn.run(app, host=args.host, port=args.port)
+
+
+def cmd_worker(args: argparse.Namespace) -> None:
+    """Start the inference worker."""
+    from degeneration_probe.worker.serve import main as worker_main
+    import sys
+    # Re-inject args so worker's argparse sees them
+    sys.argv = ["worker", "--model", args.model, "--host", args.host, "--port", str(args.port)]
+    if args.probe:
+        sys.argv.extend(["--probe", args.probe])
+    if args.dtype:
+        sys.argv.extend(["--dtype", args.dtype])
+    worker_main()
+
+
+def cmd_ui(args: argparse.Namespace) -> None:
+    """Start the Gradio UI."""
+    from degeneration_probe.ui.app import build_ui
+    demo = build_ui()
+    demo.launch(server_name=args.host, server_port=args.port)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -286,6 +319,25 @@ def main() -> None:
     p_eval.add_argument("--max_length", type=int, default=2048)
     p_eval.add_argument("--output_dir", default=None, help="Where to save results")
     p_eval.set_defaults(func=cmd_evaluate)
+
+    sp_serve = subparsers.add_parser("serve", help="Start the FastAPI backend server")
+    sp_serve.add_argument("--host", default="0.0.0.0")
+    sp_serve.add_argument("--port", type=int, default=8000)
+    sp_serve.add_argument("--db-path", default="data/degeneration_probe.db")
+    sp_serve.set_defaults(func=cmd_serve)
+
+    sp_worker = subparsers.add_parser("worker", help="Start the inference worker")
+    sp_worker.add_argument("--model", required=True, help="HuggingFace model name")
+    sp_worker.add_argument("--probe", default=None, help="Path to saved probe checkpoint")
+    sp_worker.add_argument("--dtype", default=None, help="Model dtype")
+    sp_worker.add_argument("--host", default="0.0.0.0")
+    sp_worker.add_argument("--port", type=int, default=9000)
+    sp_worker.set_defaults(func=cmd_worker)
+
+    sp_ui = subparsers.add_parser("ui", help="Start the Gradio UI")
+    sp_ui.add_argument("--host", default="0.0.0.0")
+    sp_ui.add_argument("--port", type=int, default=7860)
+    sp_ui.set_defaults(func=cmd_ui)
 
     args = parser.parse_args()
     args.func(args)
