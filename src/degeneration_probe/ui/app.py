@@ -6,9 +6,74 @@ import json
 
 import gradio as gr
 import requests
-import websocket  # from websocket-client, bundled with gradio
+import websocket  # from websocket-client
 
 API_BASE = "http://localhost:8000"
+
+# Muted, modern palette
+COLORS = {
+    "safe": (74, 182, 144),       # soft teal-green
+    "mid": (234, 179, 70),        # warm amber
+    "danger": (214, 87, 89),      # muted coral-red
+    "steered": (130, 120, 210),   # soft purple underline
+    "bg": "#f8f9fb",
+    "card": "#ffffff",
+    "border": "#e2e6ea",
+    "text": "#2d3142",
+    "muted": "#8a8fa0",
+    "bar_bg": "#f0f1f4",
+    "threshold_line": "rgba(214,87,89,0.45)",
+}
+
+CSS = """
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+.gradio-container {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace !important;
+    max-width: 1120px !important;
+    background: %(bg)s !important;
+}
+.gr-button-primary {
+    background: #4a6cf7 !important;
+    border: none !important;
+    border-radius: 8px !important;
+}
+.gr-button-secondary, .gr-button {
+    border-radius: 8px !important;
+}
+#output-panel {
+    background: %(card)s;
+    border: 1px solid %(border)s;
+    border-radius: 12px;
+    padding: 20px 24px;
+    min-height: 200px;
+    font-size: 15px;
+    line-height: 1.7;
+    color: %(text)s;
+}
+#score-panel {
+    background: %(card)s;
+    border: 1px solid %(border)s;
+    border-radius: 12px;
+    padding: 14px 20px;
+    margin-top: 8px;
+}
+""" % COLORS
+
+
+def _score_to_color(score: float) -> str:
+    """Map probe score 0-1 to a smooth gradient through the palette."""
+    if score < 0.5:
+        t = score * 2
+        r = int(COLORS["safe"][0] + (COLORS["mid"][0] - COLORS["safe"][0]) * t)
+        g = int(COLORS["safe"][1] + (COLORS["mid"][1] - COLORS["safe"][1]) * t)
+        b = int(COLORS["safe"][2] + (COLORS["mid"][2] - COLORS["safe"][2]) * t)
+    else:
+        t = (score - 0.5) * 2
+        r = int(COLORS["mid"][0] + (COLORS["danger"][0] - COLORS["mid"][0]) * t)
+        g = int(COLORS["mid"][1] + (COLORS["danger"][1] - COLORS["mid"][1]) * t)
+        b = int(COLORS["mid"][2] + (COLORS["danger"][2] - COLORS["mid"][2]) * t)
+    return f"rgb({r},{g},{b})"
 
 
 def connect_worker(host: str, port: int):
@@ -58,7 +123,7 @@ def generate_stream(
     boost_temp: float,
 ):
     """Stream generation from the worker via the backend WebSocket."""
-    ws_url = f"ws://localhost:8000/api/generate"
+    ws_url = "ws://localhost:8000/api/generate"
 
     request = {
         "action": "generate",
@@ -78,9 +143,10 @@ def generate_stream(
 
     tokens_html = ""
     scores = []
+    ws = None
 
     try:
-        ws = websocket.create_connection(ws_url)
+        ws = websocket.create_connection(ws_url, timeout=5)
         ws.send(json.dumps(request))
 
         while True:
@@ -88,7 +154,11 @@ def generate_stream(
             data = json.loads(raw)
 
             if data["type"] == "error":
-                yield tokens_html + f"<br><b>Error:</b> {data['message']}", ""
+                yield (
+                    tokens_html
+                    + f'<span style="color:{_score_to_color(1.0)};font-weight:500;">'
+                    + f' Error: {data["message"]}</span>'
+                ), ""
                 break
 
             if data["type"] == "done":
@@ -99,75 +169,81 @@ def generate_stream(
                 scores.append(score)
                 steered = data["was_steered"]
 
-                # Color: green (0) -> yellow (0.5) -> red (1.0)
-                if score < 0.5:
-                    r = int(255 * score * 2)
-                    g = 200
-                else:
-                    r = 255
-                    g = int(200 * (1 - (score - 0.5) * 2))
-                color = f"rgb({r},{g},0)"
-
+                color = _score_to_color(score)
                 style = f"color:{color};"
                 if steered:
-                    style += "text-decoration:underline;"
+                    sc = COLORS["steered"]
+                    style += (
+                        f"text-decoration:underline;"
+                        f"text-decoration-color:rgb({sc[0]},{sc[1]},{sc[2]});"
+                        f"text-underline-offset:3px;"
+                    )
 
                 token_text = data["token_text"].replace("<", "&lt;").replace(">", "&gt;")
-                tokens_html += f'<span style="{style}" title="score={score:.3f}">{token_text}</span>'
+                tokens_html += (
+                    f'<span style="{style}" title="score={score:.3f}">'
+                    f'{token_text}</span>'
+                )
 
-                # Build sparkline as simple bar chart
                 bar_html = _build_score_bar(scores, threshold)
-
                 yield tokens_html, bar_html
 
-        ws.close()
-
     except Exception as e:
-        yield tokens_html + f"<br><b>Connection error:</b> {e}", ""
+        yield tokens_html + f'<br><span style="color:{COLORS["muted"]};">Connection error: {e}</span>', ""
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 
 def _build_score_bar(scores: list[float], threshold: float) -> str:
     """Build an HTML sparkline bar chart of probe scores."""
     if not scores:
         return ""
-    bar_width = max(2, min(6, 600 // len(scores)))
+    bar_width = max(2, min(5, 580 // len(scores)))
     bars = []
     for s in scores:
-        height = max(2, int(s * 60))
-        if s < 0.5:
-            r = int(255 * s * 2)
-            g = 200
-        else:
-            r = 255
-            g = int(200 * (1 - (s - 0.5) * 2))
-        color = f"rgb({r},{g},0)"
+        height = max(2, int(s * 52))
+        color = _score_to_color(s)
         bars.append(
             f'<div style="display:inline-block;width:{bar_width}px;height:{height}px;'
-            f'background:{color};vertical-align:bottom;"></div>'
+            f'background:{color};vertical-align:bottom;border-radius:1px;'
+            f'margin-right:1px;"></div>'
         )
-    threshold_y = int(threshold * 60)
+    threshold_y = int(threshold * 52)
     return (
-        f'<div style="position:relative;height:65px;overflow-x:auto;white-space:nowrap;'
-        f'border-bottom:1px solid #ccc;padding-top:5px;">'
-        f'<div style="position:absolute;top:{65-threshold_y}px;left:0;right:0;'
-        f'border-top:2px dashed rgba(255,0,0,0.5);"></div>'
+        f'<div style="position:relative;height:58px;overflow-x:auto;white-space:nowrap;'
+        f'background:{COLORS["bar_bg"]};border-radius:8px;padding:4px 8px;">'
+        f'<div style="position:absolute;top:{58-threshold_y}px;left:0;right:0;'
+        f'border-top:1.5px dashed {COLORS["threshold_line"]};"></div>'
         f'{"".join(bars)}'
         f'</div>'
-        f'<div style="font-size:12px;color:#666;">Current: {scores[-1]:.3f} | Threshold: {threshold:.2f}</div>'
+        f'<div style="display:flex;justify-content:space-between;margin-top:6px;'
+        f'font-size:12px;color:{COLORS["muted"]};">'
+        f'<span>Current score: <b style="color:{_score_to_color(scores[-1])}">{scores[-1]:.3f}</b></span>'
+        f'<span>Threshold: {threshold:.2f}</span>'
+        f'</div>'
     )
 
 
 def build_ui():
     """Build and return the Gradio Blocks interface."""
-    with gr.Blocks(title="Degeneration Probe", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# Degeneration Probe — Live Steering")
+    with gr.Blocks(title="Degeneration Probe", css=CSS) as demo:
+        gr.Markdown(
+            '<h1 style="font-weight:600;color:#2d3142;margin-bottom:2px;">'
+            'Degeneration Probe</h1>'
+            '<p style="color:#8a8fa0;font-size:14px;margin-top:0;">'
+            'Real-time degeneration detection and model steering</p>'
+        )
 
         # Connection bar
         with gr.Row():
             host_input = gr.Textbox(value="localhost", label="Worker Host", scale=2)
             port_input = gr.Number(value=9000, label="Port", precision=0, scale=1)
-            connect_btn = gr.Button("Connect", scale=1)
-            disconnect_btn = gr.Button("Disconnect", scale=1)
+            connect_btn = gr.Button("Connect", variant="secondary", scale=1)
+            disconnect_btn = gr.Button("Disconnect", variant="secondary", scale=1)
             status_display = gr.Textbox(label="Status", interactive=False, scale=2)
 
         connect_btn.click(
@@ -176,43 +252,62 @@ def build_ui():
         disconnect_btn.click(disconnect_worker, outputs=[status_display])
         demo.load(get_status, outputs=[status_display])
 
+        gr.Markdown("---")
+
         # Prompt input
+        prompt_input = gr.Textbox(
+            label="Prompt",
+            placeholder="Type a prompt to generate from...",
+            lines=2,
+        )
         with gr.Row():
-            prompt_input = gr.Textbox(
-                label="Prompt",
-                placeholder="Enter a prompt or select from dataset samples...",
-                lines=3,
-                scale=4,
-            )
-        with gr.Row():
-            generate_btn = gr.Button("Generate", variant="primary")
-            stop_btn = gr.Button("Stop")
+            generate_btn = gr.Button("Generate", variant="primary", scale=3)
+            stop_btn = gr.Button("Stop", variant="stop", scale=1)
 
         # Controls + Output
         with gr.Row():
-            # Left: controls
-            with gr.Column(scale=1):
-                gr.Markdown("### Generation Parameters")
-                temperature = gr.Slider(0.0, 2.0, value=0.01, step=0.01, label="Temperature")
+            with gr.Column(scale=1, min_width=260):
+                gr.Markdown(
+                    '<p style="font-weight:600;font-size:14px;color:#2d3142;margin-bottom:4px;">'
+                    'Generation</p>'
+                )
+                temperature = gr.Slider(
+                    0.0, 2.0, value=0.01, step=0.01, label="Temperature",
+                    info="Low = deterministic, high = creative",
+                )
                 top_p = gr.Slider(0.0, 1.0, value=0.9, step=0.05, label="Top-p")
-                max_tokens = gr.Slider(64, 4096, value=512, step=64, label="Max Tokens")
+                max_tokens = gr.Slider(64, 4096, value=512, step=64, label="Max tokens")
 
-                gr.Markdown("### Steering")
-                steering_enabled = gr.Checkbox(label="Enable Steering", value=False)
+                gr.Markdown(
+                    '<p style="font-weight:600;font-size:14px;color:#2d3142;'
+                    'margin-bottom:4px;margin-top:12px;">Steering</p>'
+                )
+                steering_enabled = gr.Checkbox(label="Enable steering", value=False)
                 strategy = gr.Dropdown(
                     choices=["temperature_boost"],
                     value="temperature_boost",
                     label="Strategy",
                 )
-                threshold = gr.Slider(0.0, 1.0, value=0.8, step=0.05, label="Threshold")
-                boost_temp = gr.Slider(1.0, 5.0, value=1.5, step=0.1, label="Boost Temperature")
+                threshold = gr.Slider(
+                    0.0, 1.0, value=0.8, step=0.05, label="Threshold",
+                    info="Probe score above this triggers intervention",
+                )
+                boost_temp = gr.Slider(
+                    1.0, 5.0, value=1.5, step=0.1, label="Boost temperature",
+                )
 
-            # Right: streaming output
             with gr.Column(scale=3):
-                output_html = gr.HTML(label="Generated Text")
-                score_bar = gr.HTML(label="Probe Score")
+                output_html = gr.HTML(
+                    value='<div style="color:#8a8fa0;font-style:italic;">Output will appear here...</div>',
+                    elem_id="output-panel",
+                    label="Generated Text",
+                )
+                score_bar = gr.HTML(
+                    elem_id="score-panel",
+                    label="Probe Score",
+                )
 
-        generate_btn.click(
+        gen_event = generate_btn.click(
             generate_stream,
             inputs=[
                 prompt_input, temperature, top_p, max_tokens,
@@ -220,6 +315,7 @@ def build_ui():
             ],
             outputs=[output_html, score_bar],
         )
+        stop_btn.click(None, cancels=[gen_event])
 
     return demo
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Generator, Optional
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -69,11 +69,11 @@ class GenerationEngine:
         top_p: float = 0.9,
         steering: Optional[SteeringStrategy] = None,
         steering_threshold: float = 0.8,
-    ) -> list[TokenResult]:
-        """Synchronous token-by-token generation. Returns list of TokenResult.
+    ) -> Generator[TokenResult, None, None]:
+        """Token-by-token generation generator. Yields one TokenResult per token.
 
-        Used by the WebSocket worker serve loop, which sends each result as it
-        is produced.
+        The worker streams each yielded result over WebSocket immediately,
+        so the client sees tokens appear in real time.
         """
         self._stop_requested = False
         device = getattr(self.model, "device", torch.device("cpu"))
@@ -97,7 +97,6 @@ class GenerationEngine:
         )
 
         generated_ids: list[int] = []
-        results: list[TokenResult] = []
 
         for pos in range(max_new_tokens):
             if self._stop_requested:
@@ -159,14 +158,13 @@ class GenerationEngine:
             token_text = self.tokenizer.decode([next_token_id], skip_special_tokens=True)
             generated_ids.append(next_token_id)
 
-            result = TokenResult(
+            yield TokenResult(
                 token_id=next_token_id,
                 token_text=token_text,
                 position=pos,
                 probe_score=probe_score,
                 was_steered=was_steered,
             )
-            results.append(result)
 
             # Extend input for next iteration (KV cache is not used here for simplicity)
             next_token_tensor = torch.tensor([[next_token_id]], device=device)
@@ -175,5 +173,3 @@ class GenerationEngine:
                 [attention_mask, torch.ones(1, 1, device=device, dtype=attention_mask.dtype)],
                 dim=1,
             )
-
-        return results

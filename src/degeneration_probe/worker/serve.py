@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from degeneration_probe.model_utils import load_model_and_tokenizer, resolve_torch_dtype
 from degeneration_probe.probe import SequenceProbe
@@ -39,30 +40,37 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
         steering = get_strategy(strategy_name, **strategy_params)
         threshold = steering_cfg.get("threshold", 0.8)
 
-    results = engine.generate(
-        prompt=prompt,
-        max_new_tokens=params.get("max_new_tokens", 4096),
-        temperature=params.get("temperature", 0.01),
-        top_p=params.get("top_p", 0.9),
-        steering=steering,
-        steering_threshold=threshold,
-    )
+    total = 0
+    try:
+        for r in engine.generate(
+            prompt=prompt,
+            max_new_tokens=params.get("max_new_tokens", 4096),
+            temperature=params.get("temperature", 0.01),
+            top_p=params.get("top_p", 0.9),
+            steering=steering,
+            steering_threshold=threshold,
+        ):
+            msg = json.dumps({
+                "type": "token",
+                "token_id": r.token_id,
+                "token_text": r.token_text,
+                "position": r.position,
+                "probe_score": r.probe_score,
+                "was_steered": r.was_steered,
+            })
+            try:
+                await ws.send(msg)
+            except ConnectionClosed:
+                engine.request_stop()
+                return
+            total += 1
 
-    for r in results:
-        msg = json.dumps({
-            "type": "token",
-            "token_id": r.token_id,
-            "token_text": r.token_text,
-            "position": r.position,
-            "probe_score": r.probe_score,
-            "was_steered": r.was_steered,
-        })
-        await ws.send(msg)
-
-    await ws.send(json.dumps({
-        "type": "done",
-        "total_tokens": len(results),
-    }))
+        await ws.send(json.dumps({
+            "type": "done",
+            "total_tokens": total,
+        }))
+    except ConnectionClosed:
+        engine.request_stop()
 
 
 async def handler(ws, engine: GenerationEngine):

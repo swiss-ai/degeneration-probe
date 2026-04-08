@@ -252,6 +252,96 @@ export PROBE_DATA_CACHE=/path/to/shared/cache
 
 ---
 
+## Interactive Visualization & Steering
+
+The project includes a real-time web interface for observing degeneration as it happens and steering the model away from repetitive loops.
+
+The system has three components that run as separate processes:
+
+| Component | Command | Default Port | Purpose |
+|-----------|---------|-------------|---------|
+| **Backend** | `python -m degeneration_probe serve` | 8000 | FastAPI server — REST API + WebSocket relay |
+| **Worker** | `python -m degeneration_probe worker` | 9000 | Loads the model + probe, generates tokens |
+| **UI** | `python -m degeneration_probe ui` | 7861 | Gradio web interface |
+
+### Quick start (local, no GPU needed)
+
+Open three terminal tabs:
+
+```bash
+# Tab 1: Start the backend
+uv run python -m degeneration_probe serve
+
+# Tab 2: Start the worker with a small model
+uv run python -m degeneration_probe worker --model Qwen/Qwen2.5-0.5B-Instruct --dtype float32
+
+# Tab 3: Start the UI
+uv run python -m degeneration_probe ui --port 7861
+```
+
+Open **http://localhost:7861** in your browser. Click **Connect** (defaults to localhost:9000), type a prompt, and click **Generate**.
+
+### Using a trained probe
+
+If you have a trained probe checkpoint from the training pipeline, pass it to the worker:
+
+```bash
+uv run python -m degeneration_probe worker \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --probe outputs/probes/<timestamp>/checkpoint \
+  --dtype float32
+```
+
+The probe scores each token as it is generated. Scores are shown as color-coded tokens in the UI (green = safe, amber = borderline, red = degenerate).
+
+### Steering
+
+Enable steering in the UI sidebar to let the probe intervene during generation. When the probe score exceeds the threshold, the selected strategy modifies the model's output distribution to break out of repetitive loops.
+
+Available strategies:
+- **Temperature Boost** — divides logits by a higher temperature when degeneration is detected, increasing output diversity
+
+### Running with Apertus 8B on Clariden
+
+On the GPU node (via `salloc` or SLURM job):
+
+```bash
+uv run python -m degeneration_probe worker \
+  --model Swiss-AI/Apertus-8B-Instruct \
+  --probe outputs/probes/<timestamp>/checkpoint \
+  --port 9000
+```
+
+On your local machine, set up an SSH tunnel and run the backend + UI:
+
+```bash
+# Tunnel the worker port
+ssh -L 9000:localhost:9000 <user>@<clariden-node>
+
+# Local terminals
+uv run python -m degeneration_probe serve
+uv run python -m degeneration_probe ui --port 7861
+```
+
+The UI connects to `localhost:9000` which tunnels to the GPU worker.
+
+### API Endpoints
+
+The backend exposes a REST API for programmatic access:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/health` | Health check |
+| `GET` | `/api/strategies` | List available steering strategies |
+| `POST` | `/api/sessions` | Connect to a worker (`{"worker_host": "...", "worker_port": ...}`) |
+| `GET` | `/api/sessions/current` | Current connection status |
+| `DELETE` | `/api/sessions/current` | Disconnect from worker |
+| `GET` | `/api/generations` | List past generations |
+| `GET` | `/api/generations/{id}` | Get a generation with per-token probe scores |
+| `WS` | `/api/generate` | WebSocket endpoint for streaming generation |
+
+---
+
 ## Running on the ETH Euler Cluster
 
 ### One-time setup
