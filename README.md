@@ -408,6 +408,72 @@ Adjust `#SBATCH` directives in `cluster/euler_generate.sh` or `cluster/euler_tra
 
 ---
 
+## Running the Worker on CSCS Clariden
+
+This runs the inference worker on a Clariden GPU node. You access the UI from your local browser via SSH tunnel.
+
+### Prerequisites
+
+- SSH access to Clariden configured (see [swiss-ai setup guide](https://github.com/swiss-ai/documentation/blob/main/pages/setup_clariden.md))
+- The repo cloned on Clariden at `~/degeneration-probe`
+- A container environment `my_env` set up in `~/.edf/`
+- HF token saved at `$HOME/.hf-token`
+
+### 1. Submit the worker job
+
+```bash
+ssh clariden
+cd ~/degeneration-probe
+
+# Default (Apertus-8B, no probe)
+sbatch cluster/clariden_worker.sh
+
+# With a trained probe
+PROBE=outputs/probes/20260408/checkpoint sbatch cluster/clariden_worker.sh
+
+# Different model
+MODEL=Qwen/Qwen2.5-7B-Instruct sbatch cluster/clariden_worker.sh
+```
+
+### 2. Find the node hostname
+
+```bash
+# Check the job output for the SSH tunnel command
+cat /iopsstor/scratch/cscs/$USER/logs/worker_<jobid>.out
+# Look for: "ssh -L 9000:nidXXXXXX:9000 clariden"
+```
+
+### 3. Set up the SSH tunnel (on your laptop)
+
+```bash
+ssh -L 9000:<node>:9000 clariden
+```
+
+### 4. Run backend + UI locally (on your laptop)
+
+```bash
+cd degeneration-probe
+uv run python -m degeneration_probe serve &
+uv run python -m degeneration_probe ui &
+```
+
+Open http://localhost:7860 in your browser. In the UI, connect to the worker at `localhost:9000`.
+
+### 5. When done
+
+```bash
+scancel <jobid>   # on Clariden
+```
+
+| Resource | Default |
+|----------|---------|
+| Time limit | 4 hours |
+| CPUs | 4 |
+| RAM | 64 GB |
+| GPU | 1 |
+
+---
+
 ## Output Format
 
 ### `generations.jsonl`
