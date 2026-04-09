@@ -28,7 +28,7 @@ cd "${PROJ_DIR}"
 
 mkdir -p /iopsstor/scratch/cscs/${USER}/logs
 
-export HF_HOME="/iopsstor/scratch/cscs/${USER}/hf_home"
+export HF_HOME="/iopsstor/scratch/cscs/${USER}/hf_cache"
 export HF_HUB_CACHE="/capstor/store/cscs/swissai/infra01/users/${USER}/hf_models"
 mkdir -p "${HF_HOME}"
 
