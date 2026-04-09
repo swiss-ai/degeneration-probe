@@ -417,7 +417,6 @@ This runs the inference worker on a Clariden GPU node. You access the UI from yo
 - SSH access to Clariden configured (see [swiss-ai setup guide](https://github.com/swiss-ai/documentation/blob/main/pages/setup_clariden.md))
 - The repo cloned on Clariden at `~/degeneration-probe`
 - A container environment `my_env` set up in `~/.edf/`
-- HF token saved at `$HOME/.hf-token`
 
 ### 1. Submit the worker job
 
