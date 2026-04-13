@@ -36,7 +36,7 @@ async def ws_generate(ws: WebSocket):
 
         tokens = []
         output_text = ""
-        worker_ws = await websockets.connect(worker_url)
+        worker_ws = await websockets.connect(worker_url, ping_timeout=None)
         await worker_ws.send(json.dumps(request))
 
         async for msg in worker_ws:

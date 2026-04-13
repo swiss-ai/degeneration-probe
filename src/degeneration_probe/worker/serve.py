@@ -93,7 +93,7 @@ async def start_server(host: str, port: int, engine: GenerationEngine):
     async def ws_handler(ws):
         await handler(ws, engine)
 
-    server = await websockets.serve(ws_handler, host, port)
+    server = await websockets.serve(ws_handler, host, port, ping_timeout=None)
     print(f"Inference worker listening on ws://{host}:{port}")
     await server.wait_closed()
 
