@@ -30,3 +30,4 @@ configs/*.local.yaml
 # Editor
 .idea/
 .vscode/
+.worktrees/
