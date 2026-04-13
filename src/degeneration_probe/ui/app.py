@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import gradio as gr
 import requests
 import websocket  # from websocket-client
+
+log = logging.getLogger("ui")
 
 API_BASE = "http://localhost:8000"
 
@@ -146,15 +149,18 @@ def generate_stream(
     ws = None
 
     try:
+        log.info("Connecting to backend WebSocket at %s", ws_url)
         ws = websocket.create_connection(ws_url, timeout=5)
         ws.settimeout(300)  # 5 min recv timeout (token gen can be slow on CPU)
         ws.send(json.dumps(request))
+        log.info("Request sent, waiting for tokens...")
 
         while True:
             raw = ws.recv()
             data = json.loads(raw)
 
             if data["type"] == "error":
+                log.error("Error from backend: %s", data["message"])
                 yield (
                     tokens_html
                     + f'<span style="color:{_score_to_color(1.0)};font-weight:500;">'
@@ -163,6 +169,7 @@ def generate_stream(
                 break
 
             if data["type"] == "done":
+                log.info("Generation complete: %d tokens", len(scores))
                 break
 
             if data["type"] == "token":
@@ -190,6 +197,7 @@ def generate_stream(
                 yield tokens_html, bar_html
 
     except Exception as e:
+        log.exception("Connection error after %d tokens", len(scores))
         yield tokens_html + f'<br><span style="color:{COLORS["muted"]};">Connection error: {e}</span>', ""
     finally:
         if ws is not None:

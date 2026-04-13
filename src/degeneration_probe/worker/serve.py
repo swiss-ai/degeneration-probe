@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import time
 from pathlib import Path
 
 import torch
@@ -15,6 +17,8 @@ from degeneration_probe.model_utils import load_model_and_tokenizer, resolve_tor
 from degeneration_probe.probe import SequenceProbe
 from degeneration_probe.worker.engine import GenerationEngine
 from degeneration_probe.worker.steering import get_strategy
+
+log = logging.getLogger("worker")
 
 
 def handle_message(raw: str) -> dict:
@@ -28,6 +32,9 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
     params = request.get("params", {})
     steering_cfg = request.get("steering", {})
 
+    log.info("Generate: prompt=%d chars, max_new_tokens=%s, temperature=%s",
+             len(prompt), params.get("max_new_tokens", 4096), params.get("temperature", 0.01))
+
     # Build steering strategy if enabled
     steering = None
     threshold = 0.8
@@ -39,8 +46,10 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
         }
         steering = get_strategy(strategy_name, **strategy_params)
         threshold = steering_cfg.get("threshold", 0.8)
+        log.info("Steering enabled: strategy=%s, threshold=%.2f", strategy_name, threshold)
 
     total = 0
+    t0 = time.monotonic()
     try:
         for r in engine.generate(
             prompt=prompt,
@@ -61,31 +70,44 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
             try:
                 await ws.send(msg)
             except ConnectionClosed:
+                log.warning("Client disconnected at token %d", total)
                 engine.request_stop()
                 return
             total += 1
 
+        elapsed = time.monotonic() - t0
+        log.info("Generation complete: %d tokens in %.1fs (%.1f tok/s)",
+                 total, elapsed, total / elapsed if elapsed > 0 else 0)
         await ws.send(json.dumps({
             "type": "done",
             "total_tokens": total,
         }))
     except ConnectionClosed:
+        log.warning("Connection closed during generation at token %d", total)
+        engine.request_stop()
+    except Exception:
+        log.exception("Error during generation at token %d", total)
         engine.request_stop()
 
 
 async def handler(ws, engine: GenerationEngine):
     """Handle a single WebSocket connection."""
-    async for raw in ws:
-        msg = handle_message(raw)
-        action = msg.get("action")
+    remote = ws.remote_address
+    log.info("Client connected: %s", remote)
+    try:
+        async for raw in ws:
+            msg = handle_message(raw)
+            action = msg.get("action")
 
-        if action == "generate":
-            await run_generation(ws, engine, msg)
-        elif action == "stop":
-            engine.request_stop()
-        elif action == "update_steering":
-            # Mid-generation steering updates are handled by the next generate call
-            pass
+            if action == "generate":
+                await run_generation(ws, engine, msg)
+            elif action == "stop":
+                log.info("Stop requested by client")
+                engine.request_stop()
+            elif action == "update_steering":
+                pass
+    finally:
+        log.info("Client disconnected: %s", remote)
 
 
 async def start_server(host: str, port: int, engine: GenerationEngine):
@@ -94,7 +116,7 @@ async def start_server(host: str, port: int, engine: GenerationEngine):
         await handler(ws, engine)
 
     server = await websockets.serve(ws_handler, host, port, ping_timeout=None)
-    print(f"Inference worker listening on ws://{host}:{port}")
+    log.info("Inference worker listening on ws://%s:%d", host, port)
     await server.wait_closed()
 
 

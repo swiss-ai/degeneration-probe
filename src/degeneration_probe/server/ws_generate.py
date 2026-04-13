@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import websockets
 
 router = APIRouter()
+log = logging.getLogger("backend.ws")
 
 
 @router.websocket("/api/generate")
@@ -25,18 +27,22 @@ async def ws_generate(ws: WebSocket):
     try:
         raw = await ws.receive_text()
         request = json.loads(raw)
+        log.info("Generate request: prompt=%d chars", len(request.get("prompt", "")))
 
         session = await db.get_current_session()
         if session is None:
+            log.warning("No worker session — rejecting request")
             await ws.send_json({"type": "error", "message": "No worker connected"})
             await ws.close()
             return
 
         worker_url = f"ws://{session['worker_host']}:{session['worker_port']}"
+        log.info("Connecting to worker at %s", worker_url)
 
         tokens = []
         output_text = ""
         worker_ws = await websockets.connect(worker_url, ping_timeout=None)
+        log.info("Connected to worker")
         await worker_ws.send(json.dumps(request))
 
         async for msg in worker_ws:
@@ -46,6 +52,7 @@ async def ws_generate(ws: WebSocket):
             try:
                 await ws.send_json(data)
             except (WebSocketDisconnect, RuntimeError):
+                log.warning("UI client disconnected at token %d", len(tokens))
                 break
 
             if data["type"] == "token":
@@ -58,6 +65,7 @@ async def ws_generate(ws: WebSocket):
                 })
                 output_text += data["token_text"]
             elif data["type"] == "done":
+                log.info("Generation done: %d tokens", len(tokens))
                 break
 
         # Save whatever we generated (even if stopped early)
@@ -71,16 +79,17 @@ async def ws_generate(ws: WebSocket):
                 tokens=tokens,
                 status="completed",
             )
+            log.info("Saved generation: %d tokens", len(tokens))
 
     except WebSocketDisconnect:
-        pass
+        log.info("UI client disconnected (tokens so far: %d)", len(tokens) if 'tokens' in dir() else 0)
     except Exception as e:
+        log.exception("Error in ws_generate")
         try:
             await ws.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
     finally:
-        # Always close the worker connection to stop generation
         if worker_ws is not None:
             try:
                 await worker_ws.close()
