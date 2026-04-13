@@ -147,6 +147,7 @@ def generate_stream(
 
     try:
         ws = websocket.create_connection(ws_url, timeout=5)
+        ws.settimeout(300)  # 5 min recv timeout (token gen can be slow on CPU)
         ws.send(json.dumps(request))
 
         while True:
