@@ -35,6 +35,9 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_HOST}" true 2>/dev/null; th
     exit 1
 fi
 
+echo "[start] syncing repo on ${SSH_HOST} to origin/serving..."
+ssh "${SSH_HOST}" 'cd ~/degeneration-probe && git fetch --quiet origin serving && git checkout --quiet serving && git reset --quiet --hard origin/serving && git log -1 --oneline'
+
 echo "[start] submitting worker job (model=${MODEL}, partition=${PARTITION}, time=${TIME})..."
 JOBID=$(ssh "${SSH_HOST}" "cd ~/degeneration-probe && MODEL='${MODEL}' PORT='${WORKER_PORT}' sbatch --parsable --partition='${PARTITION}' --time='${TIME}' cluster/clariden_worker.sh")
 if [[ -z "${JOBID}" ]]; then
