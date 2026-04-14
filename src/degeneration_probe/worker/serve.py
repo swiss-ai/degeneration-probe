@@ -131,7 +131,9 @@ async def handler(ws, engine: GenerationEngine):
                         log.exception("Previous generation errored while being preempted")
                 current_gen = asyncio.create_task(run_generation(ws, engine, msg))
             elif action == "update_params":
-                engine.update_live_params(**msg.get("params", {}))
+                params = msg.get("params", {})
+                log.info("update_params received: %s", params)
+                engine.update_live_params(**params)
             elif action == "stop":
                 log.info("Stop requested by client")
                 engine.request_stop()

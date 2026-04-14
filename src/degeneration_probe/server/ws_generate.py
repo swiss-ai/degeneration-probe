@@ -50,9 +50,10 @@ async def ws_generate(ws: WebSocket):
             try:
                 while True:
                     raw_ctrl = await ws.receive_text()
+                    log.info("relay client->worker: %s", raw_ctrl[:200])
                     await worker_ws.send(raw_ctrl)
             except WebSocketDisconnect:
-                pass
+                log.info("client->worker relay: ws disconnected")
             except Exception:
                 log.exception("client->worker relay ended")
 

@@ -32,12 +32,14 @@ def _push_param_update(name: str):
     def _send(value):
         with _live_ws_lock:
             ws = _live_ws
-            if ws is None:
-                return
-            try:
-                ws.send(json.dumps({"action": "update_params", "params": {name: value}}))
-            except Exception as e:
-                log.debug("live param update dropped (%s=%s): %s", name, value, e)
+        if ws is None:
+            log.info("live %s=%s: no active generation, skipping", name, value)
+            return
+        try:
+            ws.send(json.dumps({"action": "update_params", "params": {name: value}}))
+            log.info("live %s=%s: pushed to worker", name, value)
+        except Exception as e:
+            log.warning("live %s=%s: send failed: %s", name, value, e)
     return _send
 
 # Muted, modern palette
