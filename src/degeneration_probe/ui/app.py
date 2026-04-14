@@ -20,6 +20,10 @@ API_BASE = "http://localhost:8000"
 _live_ws: websocket.WebSocket | None = None
 _live_ws_lock = threading.Lock()
 
+# Latest slider values, kept in sync by the .change() handlers. generate_stream
+# reads this to attribute the live-temperature-at-token for the trace chart.
+_current_values: dict[str, float] = {"temperature": 0.01, "top_p": 0.9, "steering_threshold": 0.8}
+
 
 def _set_live_ws(ws: websocket.WebSocket | None) -> None:
     global _live_ws
@@ -30,6 +34,7 @@ def _set_live_ws(ws: websocket.WebSocket | None) -> None:
 def _push_param_update(name: str):
     """Return a Gradio .change() handler that forwards the new value to the worker."""
     def _send(value):
+        _current_values[name] = float(value)
         with _live_ws_lock:
             ws = _live_ws
         if ws is None:
@@ -171,8 +176,15 @@ def generate_stream(
     }
 
     tokens_html = ""
-    scores = []
+    scores: list[float] = []
+    temperatures: list[float] = []
     ws = None
+
+    # Snapshot the launch-time slider values so the mid-stream tracker starts
+    # from the same numbers the user clicked Generate with.
+    _current_values["temperature"] = float(temperature)
+    _current_values["top_p"] = float(top_p)
+    _current_values["steering_threshold"] = float(threshold)
 
     try:
         log.info("Connecting to backend WebSocket at %s", ws_url)
@@ -192,7 +204,7 @@ def generate_stream(
                     tokens_html
                     + f'<span style="color:{_score_to_color(1.0)};font-weight:500;">'
                     + f' Error: {data["message"]}</span>'
-                ), ""
+                ), "", ""
                 break
 
             if data["type"] == "done":
@@ -203,6 +215,7 @@ def generate_stream(
                 for tok in data["tokens"]:
                     score = tok["probe_score"]
                     scores.append(score)
+                    temperatures.append(_current_values["temperature"])
                     steered = tok["was_steered"]
 
                     color = _score_to_color(score)
@@ -222,12 +235,13 @@ def generate_stream(
                     )
 
                 # One yield per batch amortises the Gradio SSE / browser DOM cost.
-                bar_html = _build_score_bar(scores, threshold)
-                yield tokens_html, bar_html
+                bar_html = _build_score_bar(scores, _current_values["steering_threshold"])
+                temp_html = _build_temp_chart(temperatures)
+                yield tokens_html, bar_html, temp_html
 
     except Exception as e:
         log.exception("Connection error after %d tokens", len(scores))
-        yield tokens_html + f'<br><span style="color:{COLORS["muted"]};">Connection error: {e}</span>', ""
+        yield tokens_html + f'<br><span style="color:{COLORS["muted"]};">Connection error: {e}</span>', "", ""
     finally:
         _set_live_ws(None)
         if ws is not None:
@@ -237,32 +251,96 @@ def generate_stream(
                 pass
 
 
+CHART_HEIGHT = 72  # px of usable plot area
+CHART_PAD = 6
+
+
 def _build_score_bar(scores: list[float], threshold: float) -> str:
     """Build an HTML sparkline bar chart of probe scores."""
     if not scores:
-        return ""
-    bar_width = max(2, min(5, 580 // len(scores)))
+        return (
+            f'<div style="color:{COLORS["muted"]};font-style:italic;font-size:13px;'
+            f'padding:20px;text-align:center;background:{COLORS["bar_bg"]};'
+            f'border-radius:8px;">No tokens yet — scores will stream here</div>'
+        )
+    bar_width = max(2, min(6, 580 // len(scores)))
     bars = []
     for s in scores:
-        height = max(2, int(s * 52))
+        height = max(2, int(s * CHART_HEIGHT))
         color = _score_to_color(s)
         bars.append(
             f'<div style="display:inline-block;width:{bar_width}px;height:{height}px;'
             f'background:{color};vertical-align:bottom;border-radius:1px;'
             f'margin-right:1px;"></div>'
         )
-    threshold_y = int(threshold * 52)
+    threshold_y = int(threshold * CHART_HEIGHT)
+    avg_score = sum(scores) / len(scores)
+    over = sum(1 for s in scores if s >= threshold)
+    pct_over = 100.0 * over / len(scores)
+    plot_h = CHART_HEIGHT + CHART_PAD * 2
+    current_color = _score_to_color(scores[-1])
     return (
-        f'<div style="position:relative;height:58px;overflow-x:auto;white-space:nowrap;'
-        f'background:{COLORS["bar_bg"]};border-radius:8px;padding:4px 8px;">'
-        f'<div style="position:absolute;top:{58-threshold_y}px;left:0;right:0;'
+        f'<div style="position:relative;height:{plot_h}px;overflow-x:auto;'
+        f'white-space:nowrap;background:{COLORS["bar_bg"]};border-radius:8px;'
+        f'padding:{CHART_PAD}px 10px;">'
+        f'<div style="position:absolute;top:{plot_h-CHART_PAD-threshold_y}px;left:0;right:0;'
         f'border-top:1.5px dashed {COLORS["threshold_line"]};"></div>'
+        f'<div style="position:absolute;top:{CHART_PAD}px;right:10px;font-size:11px;'
+        f'color:{COLORS["muted"]};">1.0</div>'
+        f'<div style="position:absolute;bottom:{CHART_PAD}px;right:10px;font-size:11px;'
+        f'color:{COLORS["muted"]};">0.0</div>'
         f'{"".join(bars)}'
         f'</div>'
-        f'<div style="display:flex;justify-content:space-between;margin-top:6px;'
+        f'<div style="display:flex;justify-content:space-between;margin-top:8px;'
+        f'font-size:12px;color:{COLORS["muted"]};flex-wrap:wrap;gap:12px;">'
+        f'<span>Latest: <b style="color:{current_color}">{scores[-1]:.3f}</b></span>'
+        f'<span>Mean: <b>{avg_score:.3f}</b></span>'
+        f'<span>Above threshold ({threshold:.2f}): <b>{over}/{len(scores)}</b> '
+        f'({pct_over:.0f}%)</span>'
+        f'</div>'
+    )
+
+
+def _build_temp_chart(temperatures: list[float], max_temp: float = 2.0) -> str:
+    """Build a sparkline of the temperature used at each token."""
+    if not temperatures:
+        return (
+            f'<div style="color:{COLORS["muted"]};font-style:italic;font-size:13px;'
+            f'padding:16px;text-align:center;background:{COLORS["bar_bg"]};'
+            f'border-radius:8px;">Temperature trace appears once generation starts</div>'
+        )
+    bar_width = max(2, min(6, 580 // len(temperatures)))
+    bars = []
+    for t in temperatures:
+        t_clamped = min(max(t, 0.0), max_temp)
+        norm = t_clamped / max_temp
+        height = max(2, int(norm * CHART_HEIGHT))
+        # Cool teal at low T -> warm coral at high T.
+        r = int(74 + norm * 140)
+        g = int(182 - norm * 95)
+        b = int(144 - norm * 55)
+        bars.append(
+            f'<div style="display:inline-block;width:{bar_width}px;height:{height}px;'
+            f'background:rgb({r},{g},{b});vertical-align:bottom;border-radius:1px;'
+            f'margin-right:1px;"></div>'
+        )
+    plot_h = CHART_HEIGHT + CHART_PAD * 2
+    mean_t = sum(temperatures) / len(temperatures)
+    return (
+        f'<div style="position:relative;height:{plot_h}px;overflow-x:auto;'
+        f'white-space:nowrap;background:{COLORS["bar_bg"]};border-radius:8px;'
+        f'padding:{CHART_PAD}px 10px;">'
+        f'<div style="position:absolute;top:{CHART_PAD}px;right:10px;font-size:11px;'
+        f'color:{COLORS["muted"]};">{max_temp:.1f}</div>'
+        f'<div style="position:absolute;bottom:{CHART_PAD}px;right:10px;font-size:11px;'
+        f'color:{COLORS["muted"]};">0.0</div>'
+        f'{"".join(bars)}'
+        f'</div>'
+        f'<div style="display:flex;justify-content:space-between;margin-top:8px;'
         f'font-size:12px;color:{COLORS["muted"]};">'
-        f'<span>Current score: <b style="color:{_score_to_color(scores[-1])}">{scores[-1]:.3f}</b></span>'
-        f'<span>Threshold: {threshold:.2f}</span>'
+        f'<span>Current: <b>{temperatures[-1]:.2f}</b></span>'
+        f'<span>Mean: <b>{mean_t:.2f}</b></span>'
+        f'<span>Tokens: <b>{len(temperatures)}</b></span>'
         f'</div>'
     )
 
@@ -328,10 +406,29 @@ def build_ui():
                     elem_id="output-panel",
                     label="Generated Text",
                 )
-                score_bar = gr.HTML(
-                    elem_id="score-panel",
-                    label="Probe Score",
+
+                gr.Markdown(
+                    '<div style="font-weight:600;font-size:14px;color:#2d3142;'
+                    'margin-top:18px;margin-bottom:2px;">Degeneration Score</div>'
+                    '<div style="font-size:12px;color:#8a8fa0;margin-bottom:8px;">'
+                    'Per-token probe output (0 = natural, 1 = degenerate). '
+                    'The dashed line marks the steering threshold.</div>'
                 )
+                score_bar = gr.HTML(
+                    value=_build_score_bar([], 0.8),
+                    elem_id="score-panel",
+                )
+
+                with gr.Accordion("Temperature trace", open=False):
+                    gr.Markdown(
+                        '<div style="font-size:12px;color:#8a8fa0;margin-bottom:8px;">'
+                        'Sampling temperature at each generated token. '
+                        'Moves when you slide the Temperature control mid-stream.</div>'
+                    )
+                    temp_chart = gr.HTML(
+                        value=_build_temp_chart([]),
+                        elem_id="temp-panel",
+                    )
 
         gen_event = generate_btn.click(
             generate_stream,
@@ -339,7 +436,7 @@ def build_ui():
                 prompt_input, temperature, top_p, max_tokens,
                 steering_enabled, strategy, threshold, boost_temp,
             ],
-            outputs=[output_html, score_bar],
+            outputs=[output_html, score_bar, temp_chart],
         )
         stop_btn.click(None, cancels=[gen_event])
 
