@@ -32,6 +32,10 @@ export HF_HOME="/iopsstor/scratch/cscs/${USER}/hf_cache"
 export HF_HUB_CACHE="/capstor/store/cscs/swissai/infra01/users/${USER}/hf_models"
 mkdir -p "${HF_HOME}"
 
+# Apertus-8B fits in a single GH200 (96GB); single-GPU avoids the cross-GPU
+# sync tax that `device_map="auto"` pays on every forward pass.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
 MODEL="${MODEL:-swiss-ai/Apertus-8B-Instruct-2509}"
 PROBE="${PROBE:-}"
 DTYPE="${DTYPE:-bfloat16}"
@@ -50,6 +54,10 @@ echo "  ssh -L ${PORT}:$(hostname):${PORT} clariden"
 echo "============================================="
 
 pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
+
+# xIELU is Apertus' custom activation. Without the CUDA kernel transformers
+# falls back to a pure-Python implementation that dominates per-token latency.
+pip install --quiet git+https://github.com/nickjbrowning/XIELU 2>&1 | tail -5 || true
 
 WORKER_ARGS=(
     --model "${MODEL}"
