@@ -67,15 +67,40 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
         batch.clear()
         return True
 
+    # Run the sync PyTorch generation loop in a worker thread and funnel
+    # TokenResults back through an asyncio.Queue. This keeps the event loop
+    # free to process incoming control messages (update_params, stop) in
+    # real time.
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+    _SENTINEL = object()
+
+    def producer() -> None:
+        try:
+            for r in engine.generate(
+                prompt=prompt,
+                max_new_tokens=params.get("max_new_tokens", 4096),
+                temperature=params.get("temperature", 0.01),
+                top_p=params.get("top_p", 0.9),
+                steering=steering,
+                steering_threshold=threshold,
+            ):
+                asyncio.run_coroutine_threadsafe(queue.put(r), loop).result()
+        except BaseException as exc:
+            asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+            return
+        asyncio.run_coroutine_threadsafe(queue.put(_SENTINEL), loop).result()
+
+    producer_task = loop.run_in_executor(None, producer)
+
     try:
-        for r in engine.generate(
-            prompt=prompt,
-            max_new_tokens=params.get("max_new_tokens", 4096),
-            temperature=params.get("temperature", 0.01),
-            top_p=params.get("top_p", 0.9),
-            steering=steering,
-            steering_threshold=threshold,
-        ):
+        while True:
+            item = await queue.get()
+            if item is _SENTINEL:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            r = item
             batch.append({
                 "token_id": r.token_id,
                 "token_text": r.token_text,
@@ -104,6 +129,12 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
     except Exception:
         log.exception("Error during generation at token %d", total)
         engine.request_stop()
+    finally:
+        # Wait for the producer thread to wind down so we don't leak it.
+        try:
+            await producer_task
+        except Exception:
+            log.exception("Producer thread finished with error")
 
 
 async def handler(ws, engine: GenerationEngine):
