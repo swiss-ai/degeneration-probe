@@ -47,7 +47,7 @@ fi
 echo "${JOBID}" > "${RUN_DIR}/jobid"
 echo "[start] submitted job ${JOBID}"
 
-QUEUE_WAIT_SECS="${QUEUE_WAIT_SECS:-1800}"  # default 30 min; debug partition can queue past 5 min
+QUEUE_WAIT_SECS="${QUEUE_WAIT_SECS:-600}"  # default 10 min; debug partition can queue past 5 min
 echo "[start] waiting up to ${QUEUE_WAIT_SECS}s for job to start running..."
 iters=$(( QUEUE_WAIT_SECS / 10 ))
 for _ in $(seq 1 ${iters}); do
