@@ -79,40 +79,20 @@ def _score_to_color(score: float) -> str:
     return f"rgb({r},{g},{b})"
 
 
-def connect_worker(host: str, port: int):
-    """Connect to an inference worker."""
+def ensure_session():
+    """Ensure the backend has a session pointing at the local tunnel.
+
+    The worker is always reached through the SSH tunnel on localhost:9000
+    that cluster/start.sh sets up, so the UI no longer exposes host/port.
+    """
     try:
-        resp = requests.post(
+        requests.post(
             f"{API_BASE}/api/sessions",
-            json={"worker_host": host, "worker_port": int(port)},
+            json={"worker_host": "localhost", "worker_port": 9000},
             timeout=5,
         )
-        if resp.ok:
-            return f"Connected to {host}:{int(port)}"
-        return f"Failed: {resp.text}"
     except Exception as e:
-        return f"Connection error: {e}"
-
-
-def disconnect_worker():
-    """Disconnect from the current worker."""
-    try:
-        resp = requests.delete(f"{API_BASE}/api/sessions/current", timeout=5)
-        return "Disconnected" if resp.ok else f"Failed: {resp.text}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def get_status():
-    """Check current connection status."""
-    try:
-        resp = requests.get(f"{API_BASE}/api/sessions/current", timeout=2)
-        if resp.ok:
-            s = resp.json()
-            return f"Connected to {s['worker_host']}:{s['worker_port']}"
-        return "Disconnected"
-    except Exception:
-        return "Backend unavailable"
+        log.warning("Could not create backend session: %s", e)
 
 
 def generate_stream(
@@ -249,21 +229,7 @@ def build_ui():
             'Real-time degeneration detection and model steering</p>'
         )
 
-        # Connection bar
-        with gr.Row():
-            host_input = gr.Textbox(value="localhost", label="Worker Host", scale=2)
-            port_input = gr.Number(value=9000, label="Port", precision=0, scale=1)
-            connect_btn = gr.Button("Connect", variant="secondary", scale=1)
-            disconnect_btn = gr.Button("Disconnect", variant="secondary", scale=1)
-            status_display = gr.Textbox(label="Status", interactive=False, scale=2)
-
-        connect_btn.click(
-            connect_worker, inputs=[host_input, port_input], outputs=[status_display]
-        )
-        disconnect_btn.click(disconnect_worker, outputs=[status_display])
-        demo.load(get_status, outputs=[status_display])
-
-        gr.Markdown("---")
+        demo.load(ensure_session)
 
         # Prompt input
         prompt_input = gr.Textbox(
