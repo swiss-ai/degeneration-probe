@@ -75,8 +75,15 @@ fi
 echo "[start] worker listening"
 
 echo "[start] opening SSH tunnel localhost:${WORKER_PORT} -> ${NODE}:${WORKER_PORT}..."
-ssh -N -L "${WORKER_PORT}:${NODE}:${WORKER_PORT}" "${SSH_HOST}" >"${LOG_DIR}/tunnel.log" 2>&1 &
-echo $! > "${RUN_DIR}/tunnel.pid"
+# -f: fork to background after auth; keepalive flags prevent idle timeouts
+# killing the tunnel mid-session.
+ssh -f -N \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -L "${WORKER_PORT}:${NODE}:${WORKER_PORT}" \
+    "${SSH_HOST}"
+pgrep -f "ssh -f -N.*-L ${WORKER_PORT}:${NODE}:${WORKER_PORT}" > "${RUN_DIR}/tunnel.pid"
 
 echo "[start] starting local backend on :${BACKEND_PORT}..."
 cd "${REPO_DIR}"
