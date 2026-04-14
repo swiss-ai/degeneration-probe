@@ -43,10 +43,12 @@ class GenerationEngine:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
         probe: Optional[SequenceProbe] = None,
+        model_name: str = "",
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.probe = probe
+        self.model_name = model_name
         self._stop_requested = False
         self._hook_handle = None
         # Mutable view of the current generation's sampling + steering params.

@@ -124,6 +124,23 @@ def ensure_session():
         log.warning("Could not create backend session: %s", e)
 
 
+def fetch_model_label() -> str:
+    """Ask the backend which model the worker is serving."""
+    try:
+        resp = requests.get(f"{API_BASE}/api/worker/info", timeout=10)
+        if resp.ok:
+            info = resp.json()
+            probe = " + probe" if info.get("has_probe") else ""
+            return (
+                f'<span style="color:#8a8fa0;font-size:13px;">Model:</span> '
+                f'<code style="background:#eef1f6;padding:2px 6px;border-radius:4px;'
+                f'font-size:13px;">{info.get("model", "unknown")}{probe}</code>'
+            )
+        return f'<span style="color:#a05050;font-size:13px;">Worker info: {resp.text[:80]}</span>'
+    except Exception as e:
+        return f'<span style="color:#a05050;font-size:13px;">Worker unreachable: {e}</span>'
+
+
 def generate_stream(
     prompt: str,
     temperature: float,
@@ -259,8 +276,9 @@ def build_ui():
             '<p style="color:#8a8fa0;font-size:14px;margin-top:0;">'
             'Real-time degeneration detection and model steering</p>'
         )
+        model_label = gr.HTML(value="")
 
-        demo.load(ensure_session)
+        demo.load(ensure_session).then(fetch_model_label, outputs=[model_label])
 
         # Prompt input
         prompt_input = gr.Textbox(

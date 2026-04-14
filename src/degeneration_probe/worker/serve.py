@@ -134,6 +134,12 @@ async def handler(ws, engine: GenerationEngine):
                 params = msg.get("params", {})
                 log.info("update_params received: %s", params)
                 engine.update_live_params(**params)
+            elif action == "info":
+                await ws.send(json.dumps({
+                    "type": "info",
+                    "model": engine.model_name,
+                    "has_probe": engine.probe is not None,
+                }))
             elif action == "stop":
                 log.info("Stop requested by client")
                 engine.request_stop()
@@ -175,7 +181,7 @@ def main():
         print(f"Loading probe from {args.probe}...")
         probe = SequenceProbe.load(args.probe, model)
 
-    engine = GenerationEngine(model=model, tokenizer=tokenizer, probe=probe)
+    engine = GenerationEngine(model=model, tokenizer=tokenizer, probe=probe, model_name=args.model)
     print("Model loaded. Starting server...")
     asyncio.run(start_server(args.host, args.port, engine))
 
