@@ -100,6 +100,8 @@ class GenerationEngine:
         )
 
         generated_ids: list[int] = []
+        past_key_values = None
+        current_input_ids = input_ids
 
         for pos in range(max_new_tokens):
             if self._stop_requested:
@@ -109,12 +111,16 @@ class GenerationEngine:
             if self.probe is not None:
                 self.probe._hooked = None
 
-            # Forward pass
+            # Forward pass with KV cache: first iteration processes the full
+            # prompt; subsequent iterations feed only the newly sampled token.
             with torch.no_grad():
                 outputs = self.model(
-                    input_ids=input_ids,
+                    input_ids=current_input_ids,
                     attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True,
                 )
+            past_key_values = outputs.past_key_values
 
             # Get logits for the last position
             logits = outputs.logits[:, -1, :]  # [1, vocab_size]
@@ -169,9 +175,9 @@ class GenerationEngine:
                 was_steered=was_steered,
             )
 
-            # Extend input for next iteration (KV cache is not used here for simplicity)
-            next_token_tensor = torch.tensor([[next_token_id]], device=device)
-            input_ids = torch.cat([input_ids, next_token_tensor], dim=1)
+            # Next iteration: feed only the new token; attention_mask grows
+            # to cover the cached context plus the new position.
+            current_input_ids = torch.tensor([[next_token_id]], device=device)
             attention_mask = torch.cat(
                 [attention_mask, torch.ones(1, 1, device=device, dtype=attention_mask.dtype)],
                 dim=1,
