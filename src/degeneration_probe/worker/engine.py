@@ -78,15 +78,18 @@ class GenerationEngine:
         self._stop_requested = False
         device = getattr(self.model, "device", torch.device("cpu"))
 
-        # Encode prompt
-        messages = [{"role": "user", "content": prompt}]
-        encoded = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            return_tensors="pt",
-            add_generation_prompt=True,
-            return_dict=True,
-        )
+        # Encode prompt. Base (non-instruct) models have no chat template; tokenize raw.
+        if self.tokenizer.chat_template:
+            messages = [{"role": "user", "content": prompt}]
+            encoded = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                return_tensors="pt",
+                add_generation_prompt=True,
+                return_dict=True,
+            )
+        else:
+            encoded = self.tokenizer(prompt, return_tensors="pt")
         if hasattr(encoded, "to"):
             encoded = encoded.to(device)
         input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
