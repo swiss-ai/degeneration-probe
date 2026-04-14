@@ -172,27 +172,29 @@ def generate_stream(
                 log.info("Generation complete: %d tokens", len(scores))
                 break
 
-            if data["type"] == "token":
-                score = data["probe_score"]
-                scores.append(score)
-                steered = data["was_steered"]
+            if data["type"] == "tokens":
+                for tok in data["tokens"]:
+                    score = tok["probe_score"]
+                    scores.append(score)
+                    steered = tok["was_steered"]
 
-                color = _score_to_color(score)
-                style = f"color:{color};"
-                if steered:
-                    sc = COLORS["steered"]
-                    style += (
-                        f"text-decoration:underline;"
-                        f"text-decoration-color:rgb({sc[0]},{sc[1]},{sc[2]});"
-                        f"text-underline-offset:3px;"
+                    color = _score_to_color(score)
+                    style = f"color:{color};"
+                    if steered:
+                        sc = COLORS["steered"]
+                        style += (
+                            f"text-decoration:underline;"
+                            f"text-decoration-color:rgb({sc[0]},{sc[1]},{sc[2]});"
+                            f"text-underline-offset:3px;"
+                        )
+
+                    token_text = tok["token_text"].replace("<", "&lt;").replace(">", "&gt;")
+                    tokens_html += (
+                        f'<span style="{style}" title="score={score:.3f}">'
+                        f'{token_text}</span>'
                     )
 
-                token_text = data["token_text"].replace("<", "&lt;").replace(">", "&gt;")
-                tokens_html += (
-                    f'<span style="{style}" title="score={score:.3f}">'
-                    f'{token_text}</span>'
-                )
-
+                # One yield per batch amortises the Gradio SSE / browser DOM cost.
                 bar_html = _build_score_bar(scores, threshold)
                 yield tokens_html, bar_html
 

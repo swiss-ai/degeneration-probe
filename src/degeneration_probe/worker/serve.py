@@ -49,7 +49,23 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
         log.info("Steering enabled: strategy=%s, threshold=%.2f", strategy_name, threshold)
 
     total = 0
+    batch: list[dict] = []
+    batch_size = int(params.get("batch_size", 4))
     t0 = time.monotonic()
+
+    async def flush_batch() -> bool:
+        """Send the current batch. Returns False if the client disconnected."""
+        if not batch:
+            return True
+        try:
+            await ws.send(json.dumps({"type": "tokens", "tokens": batch}))
+        except ConnectionClosed:
+            log.warning("Client disconnected at token %d", total)
+            engine.request_stop()
+            return False
+        batch.clear()
+        return True
+
     try:
         for r in engine.generate(
             prompt=prompt,
@@ -59,21 +75,20 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
             steering=steering,
             steering_threshold=threshold,
         ):
-            msg = json.dumps({
-                "type": "token",
+            batch.append({
                 "token_id": r.token_id,
                 "token_text": r.token_text,
                 "position": r.position,
                 "probe_score": r.probe_score,
                 "was_steered": r.was_steered,
             })
-            try:
-                await ws.send(msg)
-            except ConnectionClosed:
-                log.warning("Client disconnected at token %d", total)
-                engine.request_stop()
-                return
             total += 1
+            if len(batch) >= batch_size:
+                if not await flush_batch():
+                    return
+
+        if not await flush_batch():
+            return
 
         elapsed = time.monotonic() - t0
         log.info("Generation complete: %d tokens in %.1fs (%.1f tok/s)",

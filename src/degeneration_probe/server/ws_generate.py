@@ -55,15 +55,16 @@ async def ws_generate(ws: WebSocket):
                 log.warning("UI client disconnected at token %d", len(tokens))
                 break
 
-            if data["type"] == "token":
-                tokens.append({
-                    "token_id": data["token_id"],
-                    "token_text": data["token_text"],
-                    "position": data["position"],
-                    "probe_score": data["probe_score"],
-                    "was_steered": data["was_steered"],
-                })
-                output_text += data["token_text"]
+            if data["type"] == "tokens":
+                for t in data["tokens"]:
+                    tokens.append({
+                        "token_id": t["token_id"],
+                        "token_text": t["token_text"],
+                        "position": t["position"],
+                        "probe_score": t["probe_score"],
+                        "was_steered": t["was_steered"],
+                    })
+                    output_text += t["token_text"]
             elif data["type"] == "done":
                 log.info("Generation done: %d tokens", len(tokens))
                 break
