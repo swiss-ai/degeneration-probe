@@ -34,3 +34,4 @@ configs/*.local.yaml
 
 # Planning/spec artifacts from superpowers skills
 docs/superpowers/
+.run/
