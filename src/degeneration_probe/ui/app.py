@@ -251,46 +251,88 @@ def generate_stream(
                 pass
 
 
-CHART_HEIGHT = 72  # px of usable plot area
-CHART_PAD = 6
+CHART_W = 600
+CHART_H = 90
+
+
+def _placeholder(msg: str) -> str:
+    return (
+        f'<div style="color:{COLORS["muted"]};font-style:italic;font-size:13px;'
+        f'padding:22px;text-align:center;background:{COLORS["bar_bg"]};'
+        f'border-radius:8px;">{msg}</div>'
+    )
+
+
+def _line_points(values: list[float], value_range: tuple[float, float]) -> str:
+    """Map a series of values to SVG polyline points across CHART_W x CHART_H."""
+    lo, hi = value_range
+    span = max(hi - lo, 1e-9)
+    n = len(values)
+    if n == 1:
+        y = CHART_H - ((values[0] - lo) / span) * CHART_H
+        return f"0,{y:.2f} {CHART_W},{y:.2f}"
+    parts = []
+    for i, v in enumerate(values):
+        x = i * CHART_W / (n - 1)
+        y = CHART_H - (max(min(v, hi), lo) - lo) / span * CHART_H
+        parts.append(f"{x:.2f},{y:.2f}")
+    return " ".join(parts)
+
+
+def _chart_frame(svg_body: str) -> str:
+    return (
+        f'<div style="background:{COLORS["bar_bg"]};border-radius:8px;padding:10px 12px;">'
+        f'<svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" '
+        f'width="100%" height="{CHART_H}px" style="display:block;overflow:visible;">'
+        f'{svg_body}'
+        f'</svg>'
+        f'</div>'
+    )
+
+
+def _gridline(y: float, stroke: str = "#dde2ec", dashed: bool = False) -> str:
+    dash = ' stroke-dasharray="4 3"' if dashed else ""
+    return f'<line x1="0" y1="{y:.2f}" x2="{CHART_W}" y2="{y:.2f}" stroke="{stroke}" stroke-width="1"{dash}/>'
+
+
+def _axis_tick(y: float, label: str, anchor: str = "end") -> str:
+    x = CHART_W - 4 if anchor == "end" else 4
+    return (
+        f'<text x="{x}" y="{y:.2f}" dy="3" text-anchor="{anchor}" '
+        f'font-size="10" fill="{COLORS["muted"]}" font-family="system-ui,sans-serif">'
+        f'{label}</text>'
+    )
 
 
 def _build_score_bar(scores: list[float], threshold: float) -> str:
-    """Build an HTML sparkline bar chart of probe scores."""
+    """Build a clean line chart of probe scores per token."""
     if not scores:
-        return (
-            f'<div style="color:{COLORS["muted"]};font-style:italic;font-size:13px;'
-            f'padding:20px;text-align:center;background:{COLORS["bar_bg"]};'
-            f'border-radius:8px;">No tokens yet — scores will stream here</div>'
-        )
-    bar_width = max(2, min(6, 580 // len(scores)))
-    bars = []
-    for s in scores:
-        height = max(2, int(s * CHART_HEIGHT))
-        color = _score_to_color(s)
-        bars.append(
-            f'<div style="display:inline-block;width:{bar_width}px;height:{height}px;'
-            f'background:{color};vertical-align:bottom;border-radius:1px;'
-            f'margin-right:1px;"></div>'
-        )
-    threshold_y = int(threshold * CHART_HEIGHT)
+        return _placeholder("No tokens yet — scores will stream here")
+
+    points = _line_points(scores, (0.0, 1.0))
+    thresh_y = CHART_H - threshold * CHART_H
+    current_color = _score_to_color(scores[-1])
+
+    svg = "".join([
+        # background gridlines
+        _gridline(CHART_H * 0.5),
+        # threshold
+        f'<line x1="0" y1="{thresh_y:.2f}" x2="{CHART_W}" y2="{thresh_y:.2f}" '
+        f'stroke="{COLORS["threshold_line"]}" stroke-width="1.2" stroke-dasharray="5 3"/>',
+        # subtle fill below the line
+        f'<polygon fill="{current_color}" fill-opacity="0.12" '
+        f'points="0,{CHART_H} {points} {CHART_W},{CHART_H}"/>',
+        # the line itself
+        f'<polyline fill="none" stroke="{current_color}" stroke-width="1.6" '
+        f'stroke-linejoin="round" stroke-linecap="round" points="{points}"/>',
+        _axis_tick(10, "1.0"),
+        _axis_tick(CHART_H - 2, "0.0"),
+    ])
+
     avg_score = sum(scores) / len(scores)
     over = sum(1 for s in scores if s >= threshold)
     pct_over = 100.0 * over / len(scores)
-    plot_h = CHART_HEIGHT + CHART_PAD * 2
-    current_color = _score_to_color(scores[-1])
-    return (
-        f'<div style="position:relative;height:{plot_h}px;overflow-x:auto;'
-        f'white-space:nowrap;background:{COLORS["bar_bg"]};border-radius:8px;'
-        f'padding:{CHART_PAD}px 10px;">'
-        f'<div style="position:absolute;top:{plot_h-CHART_PAD-threshold_y}px;left:0;right:0;'
-        f'border-top:1.5px dashed {COLORS["threshold_line"]};"></div>'
-        f'<div style="position:absolute;top:{CHART_PAD}px;right:10px;font-size:11px;'
-        f'color:{COLORS["muted"]};">1.0</div>'
-        f'<div style="position:absolute;bottom:{CHART_PAD}px;right:10px;font-size:11px;'
-        f'color:{COLORS["muted"]};">0.0</div>'
-        f'{"".join(bars)}'
-        f'</div>'
+    footer = (
         f'<div style="display:flex;justify-content:space-between;margin-top:8px;'
         f'font-size:12px;color:{COLORS["muted"]};flex-wrap:wrap;gap:12px;">'
         f'<span>Latest: <b style="color:{current_color}">{scores[-1]:.3f}</b></span>'
@@ -299,43 +341,33 @@ def _build_score_bar(scores: list[float], threshold: float) -> str:
         f'({pct_over:.0f}%)</span>'
         f'</div>'
     )
+    return _chart_frame(svg) + footer
 
 
 def _build_temp_chart(temperatures: list[float], max_temp: float = 2.0) -> str:
-    """Build a sparkline of the temperature used at each token."""
+    """Build a clean line chart of the sampling temperature at each token."""
     if not temperatures:
-        return (
-            f'<div style="color:{COLORS["muted"]};font-style:italic;font-size:13px;'
-            f'padding:16px;text-align:center;background:{COLORS["bar_bg"]};'
-            f'border-radius:8px;">Temperature trace appears once generation starts</div>'
-        )
-    bar_width = max(2, min(6, 580 // len(temperatures)))
-    bars = []
-    for t in temperatures:
-        t_clamped = min(max(t, 0.0), max_temp)
-        norm = t_clamped / max_temp
-        height = max(2, int(norm * CHART_HEIGHT))
-        # Cool teal at low T -> warm coral at high T.
-        r = int(74 + norm * 140)
-        g = int(182 - norm * 95)
-        b = int(144 - norm * 55)
-        bars.append(
-            f'<div style="display:inline-block;width:{bar_width}px;height:{height}px;'
-            f'background:rgb({r},{g},{b});vertical-align:bottom;border-radius:1px;'
-            f'margin-right:1px;"></div>'
-        )
-    plot_h = CHART_HEIGHT + CHART_PAD * 2
+        return _placeholder("Temperature trace appears once generation starts")
+
+    points = _line_points(temperatures, (0.0, max_temp))
+    norm = min(max(temperatures[-1], 0.0), max_temp) / max_temp
+    r = int(74 + norm * 140)
+    g = int(182 - norm * 95)
+    b = int(144 - norm * 55)
+    current_color = f"rgb({r},{g},{b})"
+
+    svg = "".join([
+        _gridline(CHART_H * 0.5),
+        f'<polygon fill="{current_color}" fill-opacity="0.12" '
+        f'points="0,{CHART_H} {points} {CHART_W},{CHART_H}"/>',
+        f'<polyline fill="none" stroke="{current_color}" stroke-width="1.6" '
+        f'stroke-linejoin="round" stroke-linecap="round" points="{points}"/>',
+        _axis_tick(10, f"{max_temp:.1f}"),
+        _axis_tick(CHART_H - 2, "0.0"),
+    ])
+
     mean_t = sum(temperatures) / len(temperatures)
-    return (
-        f'<div style="position:relative;height:{plot_h}px;overflow-x:auto;'
-        f'white-space:nowrap;background:{COLORS["bar_bg"]};border-radius:8px;'
-        f'padding:{CHART_PAD}px 10px;">'
-        f'<div style="position:absolute;top:{CHART_PAD}px;right:10px;font-size:11px;'
-        f'color:{COLORS["muted"]};">{max_temp:.1f}</div>'
-        f'<div style="position:absolute;bottom:{CHART_PAD}px;right:10px;font-size:11px;'
-        f'color:{COLORS["muted"]};">0.0</div>'
-        f'{"".join(bars)}'
-        f'</div>'
+    footer = (
         f'<div style="display:flex;justify-content:space-between;margin-top:8px;'
         f'font-size:12px;color:{COLORS["muted"]};">'
         f'<span>Current: <b>{temperatures[-1]:.2f}</b></span>'
@@ -343,6 +375,7 @@ def _build_temp_chart(temperatures: list[float], max_temp: float = 2.0) -> str:
         f'<span>Tokens: <b>{len(temperatures)}</b></span>'
         f'</div>'
     )
+    return _chart_frame(svg) + footer
 
 
 def build_ui():
