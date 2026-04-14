@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 
 import gradio as gr
 import requests
@@ -12,6 +13,32 @@ import websocket  # from websocket-client
 log = logging.getLogger("ui")
 
 API_BASE = "http://localhost:8000"
+
+# Module-level handle on the currently open generation WebSocket so the slider
+# .change() handlers (which run outside generate_stream's scope) can push live
+# parameter updates through it.
+_live_ws: websocket.WebSocket | None = None
+_live_ws_lock = threading.Lock()
+
+
+def _set_live_ws(ws: websocket.WebSocket | None) -> None:
+    global _live_ws
+    with _live_ws_lock:
+        _live_ws = ws
+
+
+def _push_param_update(name: str):
+    """Return a Gradio .change() handler that forwards the new value to the worker."""
+    def _send(value):
+        with _live_ws_lock:
+            ws = _live_ws
+            if ws is None:
+                return
+            try:
+                ws.send(json.dumps({"action": "update_params", "params": {name: value}}))
+            except Exception as e:
+                log.debug("live param update dropped (%s=%s): %s", name, value, e)
+    return _send
 
 # Muted, modern palette
 COLORS = {
@@ -132,6 +159,7 @@ def generate_stream(
         log.info("Connecting to backend WebSocket at %s", ws_url)
         ws = websocket.create_connection(ws_url, timeout=5)
         ws.settimeout(300)  # 5 min recv timeout (token gen can be slow on CPU)
+        _set_live_ws(ws)
         ws.send(json.dumps(request))
         log.info("Request sent, waiting for tokens...")
 
@@ -182,6 +210,7 @@ def generate_stream(
         log.exception("Connection error after %d tokens", len(scores))
         yield tokens_html + f'<br><span style="color:{COLORS["muted"]};">Connection error: {e}</span>', ""
     finally:
+        _set_live_ws(None)
         if ws is not None:
             try:
                 ws.close()
@@ -293,6 +322,12 @@ def build_ui():
             outputs=[output_html, score_bar],
         )
         stop_btn.click(None, cancels=[gen_event])
+
+        # Live-update sliders: push the new value to the worker via the open
+        # generation WebSocket. No-op when nothing is running.
+        temperature.change(_push_param_update("temperature"), inputs=[temperature], show_progress="hidden")
+        top_p.change(_push_param_update("top_p"), inputs=[top_p], show_progress="hidden")
+        threshold.change(_push_param_update("steering_threshold"), inputs=[threshold], show_progress="hidden")
 
     return demo
 

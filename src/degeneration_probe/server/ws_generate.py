@@ -45,29 +45,45 @@ async def ws_generate(ws: WebSocket):
         log.info("Connected to worker")
         await worker_ws.send(json.dumps(request))
 
-        async for msg in worker_ws:
-            data = json.loads(msg)
-
-            # Try to send to client — if client disconnected, break out
+        async def forward_client_to_worker() -> None:
+            """Relay mid-stream control messages (slider updates, stop) to the worker."""
             try:
-                await ws.send_json(data)
-            except (WebSocketDisconnect, RuntimeError):
-                log.warning("UI client disconnected at token %d", len(tokens))
-                break
+                while True:
+                    raw_ctrl = await ws.receive_text()
+                    await worker_ws.send(raw_ctrl)
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                log.exception("client->worker relay ended")
 
-            if data["type"] == "tokens":
-                for t in data["tokens"]:
-                    tokens.append({
-                        "token_id": t["token_id"],
-                        "token_text": t["token_text"],
-                        "position": t["position"],
-                        "probe_score": t["probe_score"],
-                        "was_steered": t["was_steered"],
-                    })
-                    output_text += t["token_text"]
-            elif data["type"] == "done":
-                log.info("Generation done: %d tokens", len(tokens))
-                break
+        relay_task = asyncio.create_task(forward_client_to_worker())
+
+        try:
+            async for msg in worker_ws:
+                data = json.loads(msg)
+
+                # Try to send to client — if client disconnected, break out
+                try:
+                    await ws.send_json(data)
+                except (WebSocketDisconnect, RuntimeError):
+                    log.warning("UI client disconnected at token %d", len(tokens))
+                    break
+
+                if data["type"] == "tokens":
+                    for t in data["tokens"]:
+                        tokens.append({
+                            "token_id": t["token_id"],
+                            "token_text": t["token_text"],
+                            "position": t["position"],
+                            "probe_score": t["probe_score"],
+                            "was_steered": t["was_steered"],
+                        })
+                        output_text += t["token_text"]
+                elif data["type"] == "done":
+                    log.info("Generation done: %d tokens", len(tokens))
+                    break
+        finally:
+            relay_task.cancel()
 
         # Save whatever we generated (even if stopped early)
         if tokens:

@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import Optional
 
 import torch
 import websockets
@@ -106,22 +107,41 @@ async def run_generation(ws, engine: GenerationEngine, request: dict):
 
 
 async def handler(ws, engine: GenerationEngine):
-    """Handle a single WebSocket connection."""
+    """Handle a single WebSocket connection.
+
+    The handler multiplexes incoming messages: `generate` kicks off a
+    generation task and `update_params` / `stop` mutate the running engine
+    so the UI sliders can retune temperature, top_p, and steering threshold
+    mid-stream.
+    """
     remote = ws.remote_address
     log.info("Client connected: %s", remote)
+    current_gen: Optional[asyncio.Task] = None
     try:
         async for raw in ws:
             msg = handle_message(raw)
             action = msg.get("action")
 
             if action == "generate":
-                await run_generation(ws, engine, msg)
+                if current_gen is not None and not current_gen.done():
+                    engine.request_stop()
+                    try:
+                        await current_gen
+                    except Exception:
+                        log.exception("Previous generation errored while being preempted")
+                current_gen = asyncio.create_task(run_generation(ws, engine, msg))
+            elif action == "update_params":
+                engine.update_live_params(**msg.get("params", {}))
             elif action == "stop":
                 log.info("Stop requested by client")
                 engine.request_stop()
-            elif action == "update_steering":
-                pass
     finally:
+        if current_gen is not None and not current_gen.done():
+            engine.request_stop()
+            try:
+                await current_gen
+            except Exception:
+                pass
         log.info("Client disconnected: %s", remote)
 
 

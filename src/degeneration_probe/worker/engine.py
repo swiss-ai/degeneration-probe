@@ -49,6 +49,10 @@ class GenerationEngine:
         self.probe = probe
         self._stop_requested = False
         self._hook_handle = None
+        # Mutable view of the current generation's sampling + steering params.
+        # The loop reads this every iteration, so external code can update the
+        # sliders mid-stream.
+        self._live_params: Optional[dict] = None
 
         if probe is not None:
             self._hook_handle = probe.target_module.register_forward_hook(probe._hook_fn)
@@ -60,6 +64,14 @@ class GenerationEngine:
     def request_stop(self):
         """Signal the generation loop to stop after the current token."""
         self._stop_requested = True
+
+    def update_live_params(self, **updates) -> None:
+        """Patch the running generation's params. No-op if nothing is running."""
+        if self._live_params is None:
+            return
+        for key, value in updates.items():
+            if key in self._live_params and value is not None:
+                self._live_params[key] = value
 
     def generate(
         self,
@@ -76,6 +88,11 @@ class GenerationEngine:
         so the client sees tokens appear in real time.
         """
         self._stop_requested = False
+        self._live_params = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "steering_threshold": steering_threshold,
+        }
         device = getattr(self.model, "device", torch.device("cpu"))
 
         # Encode prompt. Base (non-instruct) models have no chat template; tokenize raw.
@@ -134,9 +151,15 @@ class GenerationEngine:
                 logit = self.probe.linear(hidden)  # [1, 1]
                 probe_score = torch.sigmoid(logit).item()
 
+            # Re-read live params every iteration so mid-stream UI slider
+            # updates take effect on subsequent tokens.
+            live_temperature = self._live_params["temperature"]
+            live_top_p = self._live_params["top_p"]
+            live_threshold = self._live_params["steering_threshold"]
+
             # Steering
             was_steered = False
-            if steering is not None and steering.should_intervene(probe_score, steering_threshold):
+            if steering is not None and steering.should_intervene(probe_score, live_threshold):
                 ctx = SteeringContext(
                     recent_token_ids=generated_ids[-50:],
                     position=pos,
@@ -145,14 +168,14 @@ class GenerationEngine:
                 was_steered = True
 
             # Sample
-            if temperature < 0.02:
+            if live_temperature < 0.02:
                 next_token_id = logits.argmax(dim=-1).item()
             else:
-                probs = torch.softmax(logits / temperature, dim=-1)
-                if top_p < 1.0:
+                probs = torch.softmax(logits / live_temperature, dim=-1)
+                if live_top_p < 1.0:
                     sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
                     cumulative = sorted_probs.cumsum(dim=-1)
-                    mask = cumulative - sorted_probs > top_p
+                    mask = cumulative - sorted_probs > live_top_p
                     sorted_probs[mask] = 0.0
                     sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
                     idx = torch.multinomial(sorted_probs, 1)
@@ -182,3 +205,5 @@ class GenerationEngine:
                 [attention_mask, torch.ones(1, 1, device=device, dtype=attention_mask.dtype)],
                 dim=1,
             )
+
+        self._live_params = None
