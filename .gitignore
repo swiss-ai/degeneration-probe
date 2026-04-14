@@ -31,3 +31,6 @@ configs/*.local.yaml
 .idea/
 .vscode/
 .worktrees/
+
+# Planning/spec artifacts from superpowers skills
+docs/superpowers/
