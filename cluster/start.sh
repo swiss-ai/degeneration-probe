@@ -47,14 +47,16 @@ fi
 echo "${JOBID}" > "${RUN_DIR}/jobid"
 echo "[start] submitted job ${JOBID}"
 
-echo "[start] waiting for job to start running..."
-for _ in $(seq 1 60); do
+QUEUE_WAIT_SECS="${QUEUE_WAIT_SECS:-1800}"  # default 30 min; debug partition can queue past 5 min
+echo "[start] waiting up to ${QUEUE_WAIT_SECS}s for job to start running..."
+iters=$(( QUEUE_WAIT_SECS / 10 ))
+for _ in $(seq 1 ${iters}); do
     state=$(ssh "${SSH_HOST}" "squeue -h -j ${JOBID} -o %T" 2>/dev/null || true)
     [[ "${state}" == "RUNNING" ]] && break
-    sleep 5
+    sleep 10
 done
 if [[ "${state}" != "RUNNING" ]]; then
-    echo "error: job ${JOBID} did not enter RUNNING within 5 min (state=${state})" >&2
+    echo "error: job ${JOBID} did not enter RUNNING within ${QUEUE_WAIT_SECS}s (state=${state})" >&2
     echo "check: ssh ${SSH_HOST} 'squeue -j ${JOBID}; scontrol show job ${JOBID}'" >&2
     exit 1
 fi
