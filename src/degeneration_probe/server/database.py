@@ -70,13 +70,6 @@ class Database:
         )
         return dict(rows[0]) if rows else None
 
-    async def disconnect_session(self, session_id: int):
-        """Mark a session as disconnected."""
-        await self._db.execute(
-            "UPDATE sessions SET status = 'disconnected' WHERE id = ?", (session_id,)
-        )
-        await self._db.commit()
-
     async def save_generation(
         self,
         session_id: int,
@@ -114,23 +107,3 @@ class Database:
         result["steering"] = json.loads(result.pop("steering_json"))
         return result
 
-    async def list_generations(self, limit: int = 20, offset: int = 0) -> list[dict]:
-        """List generations, most recent first."""
-        rows = await self._db.execute_fetchall(
-            "SELECT id, session_id, prompt, status, created_at FROM generations ORDER BY id DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        )
-        return [dict(r) for r in rows]
-
-    async def get_generation(self, gen_id: int) -> dict | None:
-        """Get a single generation with full token data."""
-        rows = await self._db.execute_fetchall(
-            "SELECT * FROM generations WHERE id = ?", (gen_id,)
-        )
-        if not rows:
-            return None
-        result = dict(rows[0])
-        result["tokens"] = json.loads(result.pop("tokens_json"))
-        result["params"] = json.loads(result.pop("params_json"))
-        result["steering"] = json.loads(result.pop("steering_json"))
-        return result
