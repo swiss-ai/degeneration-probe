@@ -10,12 +10,17 @@ __pycache__/
 # Outputs
 outputs/
 
+# Experiment artifacts (pilot runs, label outputs, ad-hoc analyses)
+artifacts/
+
 # Dataset prompt cache (shared across runs, not version-controlled)
 data/
 
 # Credentials
 keys/
 *.hf_token
+.env
+.env.*
 
 # Logs
 logs/
@@ -35,3 +40,12 @@ configs/*.local.yaml
 # Planning/spec artifacts from superpowers skills
 docs/superpowers/
 .run/
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+docs/**/*.log
