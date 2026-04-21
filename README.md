@@ -1,32 +1,54 @@
 # degeneration-probe
 
-A research pipeline for collecting labelled LLM generation data to train a **degeneration probe** — a lightweight classifier that detects repetitive model outputs from internal hidden states, without needing to re-run the full metrics pipeline at inference time.
+A research pipeline for collecting labelled LLM generation data and training a **degeneration probe** — a lightweight classifier that detects repetitive model outputs from internal hidden states, without needing to re-run the full metrics pipeline at inference time.
 
-The pipeline has three steps:
-1. **Generate**: fetch prompts from a HuggingFace dataset, run an LLM to produce completions, and score each completion for repetition using chunk-level n-gram TTR metrics
-2. **Train**: attach a lightweight linear probe to a hidden layer of the same LLM and train it to predict whether a generation is degenerating, using the labelled data from step 1
-3. **Evaluate**: assess probe quality on held-out data (AUC, F1, ROC curve, threshold analysis)
+The repo has two tracks:
 
-All three steps are run through a single CLI: `python -m degeneration_probe {generate,train,evaluate}`.
+- **Data pipeline** (CLI): generate labelled completions → train a probe on hidden states → evaluate on held-out data.
+- **Interactive UI** (backend + worker + Gradio UI): stream tokens from a live model while the probe scores each token, with optional steering to break out of degenerate loops.
 
----
+Both tracks share the same codebase and CLI (`python -m degeneration_probe …`).
 
-## Prerequisites
+## Contents
 
-- **Python 3.10–3.12**
-- **[uv](https://docs.astral.sh/uv/)** (Python package manager)
-- **A HuggingFace account** with an [access token](https://huggingface.co/settings/tokens) (needed to download models and datasets)
-- **GPU recommended** for generation and training. The small Qwen-0.5B model runs on CPU/MPS but is slow.
+- [Setup](#setup)
+- [Building a probe (data pipeline)](#building-a-probe-data-pipeline)
+  - [Step 1: Generate labelled data](#step-1-generate-labelled-data)
+  - [Step 2: Train a probe](#step-2-train-a-probe)
+  - [Step 3: Evaluate on new data](#step-3-evaluate-on-new-data)
+  - [Creating your own configs](#creating-your-own-configs)
+  - [Training on multiple datasets](#training-on-multiple-datasets)
+  - [Dataset caching](#dataset-caching)
+  - [Running pipeline jobs on ETH Euler](#running-pipeline-jobs-on-eth-euler)
+- [Interactive UI](#interactive-ui)
+  - [Quick start (local)](#quick-start-local)
+  - [Using a trained probe](#using-a-trained-probe)
+  - [Steering](#steering)
+  - [Running on CSCS Clariden](#running-on-cscs-clariden)
+- [Reference](#reference)
+  - [CLI commands](#cli-commands)
+  - [API endpoints](#api-endpoints)
+  - [Output format](#output-format)
+  - [Metrics](#metrics)
+  - [How probe training works](#how-probe-training-works)
 
 ---
 
 ## Setup
 
+**Prerequisites**
+
+- Python 3.10–3.12
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- A HuggingFace account with an [access token](https://huggingface.co/settings/tokens) — needed to download models and datasets
+- GPU recommended. The small Qwen-0.5B model runs on CPU/MPS but is slow.
+
+**Install**
+
 ```bash
 git clone <repo-url>
 cd degeneration-probe
 
-# Install all dependencies
 uv sync
 
 # Save your HuggingFace token (the pipeline reads it from here automatically)
@@ -36,15 +58,17 @@ printf '%s' 'hf_YOUR_TOKEN_HERE' > keys/.hf_token
 
 ---
 
-## Step 1: Generate labelled data
+## Building a probe (data pipeline)
 
-This step downloads prompts from a HuggingFace dataset, generates LLM completions, computes repetition metrics per completion, and labels each one as `degenerating: true/false`.
+### Step 1: Generate labelled data
+
+Downloads prompts from a HuggingFace dataset, generates LLM completions, computes repetition metrics per completion, and labels each one as `degenerating: true/false`.
 
 ```bash
 uv run python -m degeneration_probe generate --config configs/generate/alpaca_qwen05b.yaml
 ```
 
-This uses the config at `configs/generate/alpaca_qwen05b.yaml`, which generates 10 completions from **Qwen-0.5B** on prompts from the **Alpaca** dataset. You can look at this file to see all available options (model, dataset, generation parameters, etc.).
+The config at `configs/generate/alpaca_qwen05b.yaml` generates 10 completions from **Qwen-0.5B** on **Alpaca** prompts. Open it to see all available options.
 
 When the run finishes, it prints the output directory:
 
@@ -52,49 +76,48 @@ When the run finishes, it prints the output directory:
 Run complete. Results saved to: outputs/generations/20260403_115426
 ```
 
-Inside that directory you'll find:
-- `data/generations.jsonl` — the labelled data (this is what you need for training)
+Inside that directory:
+
+- `data/generations.jsonl` — the labelled data (what you feed to training)
 - `data/prompts.jsonl` — the raw prompts that were fetched
 - `plots/` — histograms of TTR and repetition metrics
 - `config.json` — exact config snapshot for reproducibility
 
----
+### Step 2: Train a probe
 
-## Step 2: Train a probe
-
-Before training, you need to tell the training config where your generated data is. Open `configs/train/default.yaml` and update the `train_data` path to point to the `generations.jsonl` file from step 1:
+Point the training config at the `generations.jsonl` from step 1. Open `configs/train/default.yaml` and update `train_data`:
 
 ```yaml
 train_data:
   - outputs/generations/20260403_115426/data/generations.jsonl
 ```
 
-You can also list multiple JSONL files here if you ran generation multiple times (e.g., with different datasets). All files must have been generated with the **same model** — this is validated automatically.
+You can list multiple JSONL files if you ran generation multiple times (see [Training on multiple datasets](#training-on-multiple-datasets)). All files must come from the **same model** — this is validated automatically.
 
-Then run:
+Then:
 
 ```bash
 uv run python -m degeneration_probe train --config configs/train/default.yaml
 ```
 
-**Note:** you don't need to specify which model to use. The training script reads the `model_name` field from the JSONL data and loads the same model automatically. This prevents accidentally training a probe on representations from a different model than the one that generated the data.
+You don't need to specify a model: the training script reads `model_name` from the JSONL data and loads the same model. This prevents accidentally training a probe on hidden states from a different model than the one that generated the data.
 
-When training finishes, it prints the output directory (e.g., `outputs/probes/20260403_115847`). Inside you'll find:
-- `checkpoint/` — the trained probe weights (`probe_head.pt`) and config
-- `eval/` — evaluation metrics, ROC curve plot, and threshold analysis plot
-- `config.json` — full training config snapshot (including the auto-resolved model name)
+Output directory (e.g. `outputs/probes/20260403_115847`):
 
-Key training config options (in `configs/train/default.yaml`):
-- `probe.layer`: which transformer layer to probe (`-1` = last layer)
-- `probe.pooling`: how to aggregate hidden states over tokens (`mean`, `max`, or `last_token`)
-- `num_epochs`, `learning_rate`, `batch_size`: standard training hyperparameters
-- `eval_fraction`: fraction of data to hold out for evaluation (default: 0.2). Set `eval_data` to a separate JSONL path if you want to evaluate on entirely different data.
+- `checkpoint/` — trained probe weights (`probe_head.pt`) and config
+- `eval/` — evaluation metrics, ROC curve plot, threshold analysis plot
+- `config.json` — full training config snapshot (includes the auto-resolved model name)
 
----
+Key config options (in `configs/train/default.yaml`):
 
-## Step 3: Evaluate a probe on new data
+- `probe.layer` — which transformer layer to probe (`-1` = last)
+- `probe.pooling` — how to aggregate hidden states over tokens (`mean`, `max`, or `last_token`)
+- `num_epochs`, `learning_rate`, `batch_size` — standard training hyperparameters
+- `eval_fraction` — fraction of data to hold out for evaluation (default 0.2). Set `eval_data` to a separate JSONL path to evaluate on entirely different data.
 
-To evaluate a trained probe on a different dataset:
+### Step 3: Evaluate on new data
+
+Evaluate a trained probe on a different dataset:
 
 ```bash
 uv run python -m degeneration_probe evaluate \
@@ -102,188 +125,199 @@ uv run python -m degeneration_probe evaluate \
   --eval_data outputs/generations/20260403_120000/data/generations.jsonl
 ```
 
-The model is loaded automatically from the saved training config. Results (metrics JSON, ROC curve, threshold plot) are saved to the checkpoint's `eval/` subdirectory by default, or to a custom location with `--output_dir`.
+The model is loaded automatically from the saved training config. Results (metrics JSON, ROC curve, threshold plot) go to the checkpoint's `eval/` subdirectory by default, or to a custom location with `--output_dir`.
 
 Additional options:
+
 - `--batch_size N` (default: 4)
 - `--max_length N` (default: 2048)
 - `--model_name NAME` — override the model (only needed if the saved config is missing)
-- `--output_dir PATH` — save results to a custom directory instead of `checkpoint/eval/`
+- `--output_dir PATH` — save to a custom directory instead of `checkpoint/eval/`
 
----
+### Creating your own configs
 
-## Creating your own experiment configs
-
-### Generation config
-
-1. Copy an existing config:
-   ```bash
-   cp configs/generate/alpaca_qwen05b.yaml configs/generate/my_experiment.yaml
-   ```
-
-2. Edit the model and dataset sections:
-   ```yaml
-   model:
-     name: Qwen/Qwen2.5-7B-Instruct    # any HuggingFace causal LM
-     dtype: bfloat16                      # bfloat16 (GPU), float32 (CPU/MPS), or auto
-     max_new_tokens: 512                  # how many tokens to generate per prompt
-     temperature: 0.7
-     top_p: 0.9
-
-   dataset:
-     name: openai/gsm8k                  # any HuggingFace dataset
-     subset: main                         # dataset subset (null if none)
-     split: test
-     prompt_field: question               # which field contains the prompt (null = auto-detect)
-     max_samples: 100                     # how many prompts to download
-     max_prompts: 50                      # how many to actually generate for
-
-   analysis:
-     chunk_size: 256                      # tokens per chunk for metrics
-     n_values: [1, 3]                     # n-gram sizes for TTR computation
-   ```
-
-3. Run:
-   ```bash
-   uv run python -m degeneration_probe generate --config configs/generate/my_experiment.yaml
-   ```
-
-### Training config
-
-1. Copy the default:
-   ```bash
-   cp configs/train/default.yaml configs/train/my_training.yaml
-   ```
-
-2. Update `train_data` and any hyperparameters you want to change:
-   ```yaml
-   probe:
-     layer: -1              # transformer layer to probe (-1 = last)
-     pooling: mean           # mean | max | last_token
-     threshold: 0.5          # classification threshold
-
-   train_data:
-     - outputs/generations/20260401_120000/data/generations.jsonl
-
-   eval_fraction: 0.2        # hold-out fraction (ignored if eval_data is set)
-   learning_rate: 1.0e-3
-   batch_size: 4
-   num_epochs: 10
-   ```
-
-3. Train:
-   ```bash
-   uv run python -m degeneration_probe train --config configs/train/my_training.yaml
-   ```
-
-For local-only configs you don't want to commit to git, name the file `*.local.yaml` — it will be gitignored automatically.
-
----
-
-## Using multiple datasets
-
-You may want to train a probe on data from multiple HuggingFace datasets (e.g., Alpaca + AIME) to make it more robust. Here's the workflow:
-
-### 1. Generate data separately for each dataset
-
-Each generation run uses one dataset and one model. Run the generate step once per dataset:
+**Generation config.** Copy an existing one:
 
 ```bash
-# Generate with Alpaca prompts
-uv run python -m degeneration_probe generate --config configs/generate/alpaca_qwen05b.yaml
-# -> outputs/generations/20260403_100000/data/generations.jsonl
-
-# Generate with AIME prompts (same model, different dataset)
-uv run python -m degeneration_probe generate --config configs/generate/aime_qwen05b.yaml
-# -> outputs/generations/20260403_100500/data/generations.jsonl
+cp configs/generate/alpaca_qwen05b.yaml configs/generate/my_experiment.yaml
 ```
 
-**Important:** all generation configs must use the **same model** (e.g., `Qwen/Qwen2.5-0.5B-Instruct`). The training step validates this and will refuse to proceed if the data files come from different models.
-
-### 2. List all data files in the training config
-
-Point `train_data` to all the JSONL files you want to combine:
+Then edit the model and dataset sections:
 
 ```yaml
+model:
+  name: Qwen/Qwen2.5-7B-Instruct     # any HuggingFace causal LM
+  dtype: bfloat16                     # bfloat16 (GPU), float32 (CPU/MPS), or auto
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+
+dataset:
+  name: openai/gsm8k                  # any HuggingFace dataset
+  subset: main                        # dataset subset (null if none)
+  split: test
+  prompt_field: question              # which field holds the prompt (null = auto-detect)
+  max_samples: 100                    # how many prompts to download
+  max_prompts: 50                     # how many to actually generate for
+
+analysis:
+  chunk_size: 256                     # tokens per chunk for metrics
+  n_values: [1, 3]                    # n-gram sizes for TTR
+```
+
+Then `uv run python -m degeneration_probe generate --config configs/generate/my_experiment.yaml`.
+
+**Training config.** Same pattern:
+
+```bash
+cp configs/train/default.yaml configs/train/my_training.yaml
+```
+
+```yaml
+probe:
+  layer: -1                # transformer layer to probe (-1 = last)
+  pooling: mean            # mean | max | last_token
+  threshold: 0.5           # classification threshold
+
 train_data:
-  - outputs/generations/20260403_100000/data/generations.jsonl   # Alpaca
-  - outputs/generations/20260403_100500/data/generations.jsonl   # AIME
+  - outputs/generations/20260401_120000/data/generations.jsonl
+
+eval_fraction: 0.2         # ignored if eval_data is set
+learning_rate: 1.0e-3
+batch_size: 4
+num_epochs: 10
 ```
 
-The training script concatenates all records into a single dataset. The train/eval split (controlled by `eval_fraction`) is applied to the combined data.
+For local-only configs you don't want committed, name the file `*.local.yaml` — gitignored automatically.
 
-### 3. Train as usual
+### Training on multiple datasets
 
-```bash
-uv run python -m degeneration_probe train --config configs/train/my_training.yaml
-```
+To make a probe more robust, train it on data from multiple datasets (e.g. Alpaca + AIME):
 
-### 4. Evaluate on specific datasets
+1. **Generate data separately for each dataset** — each run uses one dataset and one model. All runs must use the **same model** (e.g. `Qwen/Qwen2.5-0.5B-Instruct`); training validates this and will refuse to proceed if it's violated.
 
-To see how the probe performs on a specific dataset, pass that dataset's JSONL to the evaluate command:
+    ```bash
+    uv run python -m degeneration_probe generate --config configs/generate/alpaca_qwen05b.yaml
+    uv run python -m degeneration_probe generate --config configs/generate/aime_qwen05b.yaml
+    ```
 
-```bash
-# Evaluate on Alpaca data only
-uv run python -m degeneration_probe evaluate \
-  --checkpoint outputs/probes/20260403_110000/checkpoint \
-  --eval_data outputs/generations/20260403_100000/data/generations.jsonl \
-  --output_dir outputs/probes/20260403_110000/eval_alpaca
+2. **List all JSONLs in `train_data`:**
 
-# Evaluate on AIME data only
-uv run python -m degeneration_probe evaluate \
-  --checkpoint outputs/probes/20260403_110000/checkpoint \
-  --eval_data outputs/generations/20260403_100500/data/generations.jsonl \
-  --output_dir outputs/probes/20260403_110000/eval_aime
-```
+    ```yaml
+    train_data:
+      - outputs/generations/20260403_100000/data/generations.jsonl   # Alpaca
+      - outputs/generations/20260403_100500/data/generations.jsonl   # AIME
+    ```
 
-Use `--output_dir` to save each evaluation to a separate directory so results don't overwrite each other.
+    The training script concatenates all records. `eval_fraction` is applied to the combined dataset.
 
----
+3. **Train:** `uv run python -m degeneration_probe train --config …`.
 
-## Dataset Caching
+4. **Evaluate per dataset** by passing one JSONL at a time to `evaluate`, with `--output_dir` so results don't overwrite each other:
 
-Downloaded prompt samples are cached in `data/cache/` (gitignored) so subsequent runs with the same config skip the HuggingFace download entirely. The cache filename encodes all parameters that affect the sample, so changing any of them produces a new cache file automatically.
+    ```bash
+    uv run python -m degeneration_probe evaluate \
+      --checkpoint outputs/probes/20260403_110000/checkpoint \
+      --eval_data outputs/generations/20260403_100000/data/generations.jsonl \
+      --output_dir outputs/probes/20260403_110000/eval_alpaca
+    ```
 
-To override the cache location (e.g., on a shared cluster filesystem):
+### Dataset caching
+
+Prompt samples are cached in `data/cache/` (gitignored) so subsequent runs with the same config skip the HuggingFace download. The cache filename encodes all parameters that affect the sample — changing any of them produces a new cache file automatically.
+
+Override the cache location (e.g. for a shared cluster filesystem):
 
 ```bash
 export PROBE_DATA_CACHE=/path/to/shared/cache
 ```
 
----
+### Running pipeline jobs on ETH Euler
 
-## Interactive Visualization & Steering
-
-The project includes a real-time web interface for observing degeneration as it happens and steering the model away from repetitive loops.
-
-The system has three components that run as separate processes:
-
-| Component | Command | Default Port | Purpose |
-|-----------|---------|-------------|---------|
-| **Backend** | `python -m degeneration_probe serve` | 8000 | FastAPI server — REST API + WebSocket relay |
-| **Worker** | `python -m degeneration_probe worker` | 9000 | Loads the model + probe, generates tokens |
-| **UI** | `python -m degeneration_probe ui` | 7861 | Gradio web interface |
-
-### Quick start (local, no GPU needed)
-
-Open three terminal tabs:
+**One-time setup**
 
 ```bash
-# Tab 1: Start the backend
-uv run python -m degeneration_probe serve
+ssh <nethz>@euler.ethz.ch
+git clone <repo-url> ~/degeneration-probe
+cd ~/degeneration-probe
+bash cluster/setup_euler.sh
 
-# Tab 2: Start the worker with a small model
-uv run python -m degeneration_probe worker --model Qwen/Qwen2.5-0.5B-Instruct --dtype float32
-
-# Tab 3: Start the UI
-uv run python -m degeneration_probe ui --port 7861
+mkdir -p keys
+printf '%s' 'hf_YOUR_TOKEN_HERE' > ~/degeneration-probe/keys/.hf_token
+chmod 600 ~/degeneration-probe/keys/.hf_token
 ```
 
-Open **http://localhost:7861** in your browser. Click **Connect** (defaults to localhost:9000), type a prompt, and click **Generate**.
+**Submit a generation job**
+
+```bash
+# Default (Alpaca + Qwen-0.5B)
+sbatch cluster/euler_generate.sh
+
+# Custom config
+GEN_CONFIG=configs/generate/aime_apertus8b.yaml sbatch cluster/euler_generate.sh
+```
+
+Logs go to `logs/generate_<jobid>.{out,err}`.
+
+**Submit a training job**
+
+```bash
+sbatch cluster/euler_train.sh
+TRAIN_CONFIG=configs/train/my_training.yaml sbatch cluster/euler_train.sh
+```
+
+Logs go to `logs/train_<jobid>.{out,err}`.
+
+**Check status**
+
+```bash
+squeue -u $USER
+cat logs/generate_<jobid>.out
+```
+
+Adjust `#SBATCH` directives in `cluster/euler_generate.sh` / `cluster/euler_train.sh` for different resource needs.
+
+| Resource  | Generate default | Train default |
+|-----------|------------------|---------------|
+| Time      | 4 hours          | 8 hours       |
+| CPUs      | 4                | 4             |
+| RAM       | 32 GB            | 32 GB         |
+| GPU       | 1 × 40 GB VRAM   | 1 × 40 GB VRAM |
+
+---
+
+## Interactive UI
+
+The UI streams tokens from a live model and colours each one by its probe score. It has three components that run as separate processes:
+
+| Component | Command                                     | Default port | Purpose                                  |
+|-----------|---------------------------------------------|--------------|------------------------------------------|
+| Backend   | `python -m degeneration_probe serve`        | 8000         | FastAPI server — REST + WebSocket relay  |
+| Worker    | `python -m degeneration_probe worker --model …` | 9000     | Loads the model + probe, generates tokens |
+| UI        | `python -m degeneration_probe ui`           | 7860         | Gradio web interface                     |
+
+The UI connects to the backend on `localhost:8000` and expects the worker reachable at `localhost:9000` (either a local worker, or an SSH tunnel to a remote one).
+
+### Quick start (local)
+
+Open three terminals:
+
+```bash
+# Tab 1: backend
+uv run python -m degeneration_probe serve
+
+# Tab 2: worker (small CPU/MPS-friendly model)
+uv run python -m degeneration_probe worker --model Qwen/Qwen2.5-0.5B-Instruct --dtype float32
+
+# Tab 3: UI
+uv run python -m degeneration_probe ui
+```
+
+Open **http://localhost:7860** in your browser, type a prompt, click **Generate**. The UI auto-connects to the local worker on startup — no manual connect step.
 
 ### Using a trained probe
 
-If you have a trained probe checkpoint from the training pipeline, pass it to the worker:
+Pass a checkpoint from the data pipeline to the worker:
 
 ```bash
 uv run python -m degeneration_probe worker \
@@ -292,192 +326,102 @@ uv run python -m degeneration_probe worker \
   --dtype float32
 ```
 
-The probe scores each token as it is generated. Scores are shown as color-coded tokens in the UI (green = safe, amber = borderline, red = degenerate).
+Tokens are coloured by probe score in the UI (green = safe, amber = borderline, red = degenerate).
 
 ### Steering
 
 Enable steering in the UI sidebar to let the probe intervene during generation. When the probe score exceeds the threshold, the selected strategy modifies the model's output distribution to break out of repetitive loops.
 
 Available strategies:
-- **Temperature Boost** — divides logits by a higher temperature when degeneration is detected, increasing output diversity
 
-### Running with Apertus 8B on Clariden
+- **Temperature Boost** — divides logits by a higher temperature when degeneration is detected, increasing output diversity.
 
-On the GPU node (via `salloc` or SLURM job):
+### Running on CSCS Clariden
+
+For running Apertus-8B (or larger) on a Clariden GPU node, the repo ships a one-shot launcher that brings up the worker job, the SSH tunnel, the local backend, and the local UI:
 
 ```bash
-uv run python -m degeneration_probe worker \
-  --model Swiss-AI/Apertus-8B-Instruct \
-  --probe outputs/probes/<timestamp>/checkpoint \
-  --port 9000
+./cluster/start.sh
 ```
 
-On your local machine, set up an SSH tunnel and run the backend + UI:
+Defaults target the `debug` partition with Apertus-8B. Override via env vars:
 
 ```bash
-# Tunnel the worker port
-ssh -L 9000:localhost:9000 <user>@<clariden-node>
-
-# Local terminals
-uv run python -m degeneration_probe serve
-uv run python -m degeneration_probe ui --port 7861
+MODEL=Qwen/Qwen2.5-7B-Instruct PARTITION=normal TIME=04:00:00 ./cluster/start.sh
 ```
 
-The UI connects to `localhost:9000` which tunnels to the GPU worker.
+Available overrides: `MODEL`, `PARTITION`, `TIME`, `WORKER_PORT`, `BACKEND_PORT`, `UI_PORT`, `SSH_HOST`, `QUEUE_WAIT_SECS`.
 
-### API Endpoints
+The script prints the UI URL, backend URL, worker URL, SLURM job ID, and node name when the stack is up. Runtime state (PIDs, job ID, logs) lives in `.run/`.
 
-The backend exposes a REST API for programmatic access:
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/health` | Health check |
-| `GET` | `/api/strategies` | List available steering strategies |
-| `POST` | `/api/sessions` | Connect to a worker (`{"worker_host": "...", "worker_port": ...}`) |
-| `GET` | `/api/sessions/current` | Current connection status |
-| `DELETE` | `/api/sessions/current` | Disconnect from worker |
-| `GET` | `/api/generations` | List past generations |
-| `GET` | `/api/generations/{id}` | Get a generation with per-token probe scores |
-| `WS` | `/api/generate` | WebSocket endpoint for streaming generation |
-
----
-
-## Running on the ETH Euler Cluster
-
-### One-time setup
+**Tear down:**
 
 ```bash
-ssh <nethz>@euler.ethz.ch
-git clone <repo-url> ~/degeneration-probe
-cd ~/degeneration-probe
-bash cluster/setup_euler.sh
-
-# Save your HuggingFace token
-mkdir -p keys
-printf '%s' 'hf_YOUR_TOKEN_HERE' > ~/degeneration-probe/keys/.hf_token
-chmod 600 ~/degeneration-probe/keys/.hf_token
+./cluster/stop.sh
 ```
 
-### Submitting a generation job
+This kills the local processes, closes the tunnel, and cancels the SLURM job.
+
+**Prerequisites**
+
+- SSH access to Clariden configured (see the [swiss-ai setup guide](https://github.com/swiss-ai/documentation/blob/main/pages/setup_clariden.md)).
+- The repo cloned on Clariden at `~/degeneration-probe` (`start.sh` hard-resets it to `origin/serving` on every launch).
+- A container environment `my_env` set up in `~/.edf/`.
+- Your `cscs-key` loaded in the SSH agent: `ssh-add -t 1d ~/.ssh/cscs-key`.
+
+**Manual launch (fallback)**
+
+If you want to launch the pieces by hand — e.g. to debug the worker in isolation — submit the worker job directly and wire up the tunnel yourself:
 
 ```bash
-# Default config (Alpaca + Qwen-0.5B)
-sbatch cluster/euler_generate.sh
-
-# Custom config
-GEN_CONFIG=configs/generate/aime_apertus8b.yaml sbatch cluster/euler_generate.sh
-```
-
-Logs go to `logs/generate_<jobid>.out` and `logs/generate_<jobid>.err`.
-
-| Resource | Default |
-|----------|---------|
-| Time limit | 4 hours |
-| CPUs | 4 |
-| RAM | 32 GB (4 x 8 GB) |
-| GPU | 1 x 40 GB VRAM |
-
-### Submitting a training job
-
-```bash
-# Default config
-sbatch cluster/euler_train.sh
-
-# Custom config
-TRAIN_CONFIG=configs/train/my_training.yaml sbatch cluster/euler_train.sh
-```
-
-Logs go to `logs/train_<jobid>.out` and `logs/train_<jobid>.err`.
-
-| Resource | Default |
-|----------|---------|
-| Time limit | 8 hours |
-| CPUs | 4 |
-| RAM | 32 GB (4 x 8 GB) |
-| GPU | 1 x 40 GB VRAM |
-
-### Checking job status
-
-```bash
-squeue -u $USER                    # list running/pending jobs
-cat logs/generate_<jobid>.out      # check generation output
-cat logs/train_<jobid>.out         # check training output
-```
-
-Adjust `#SBATCH` directives in `cluster/euler_generate.sh` or `cluster/euler_train.sh` for different needs.
-
----
-
-## Running the Worker on CSCS Clariden
-
-This runs the inference worker on a Clariden GPU node. You access the UI from your local browser via SSH tunnel.
-
-### Prerequisites
-
-- SSH access to Clariden configured (see [swiss-ai setup guide](https://github.com/swiss-ai/documentation/blob/main/pages/setup_clariden.md))
-- The repo cloned on Clariden at `~/degeneration-probe`
-- A container environment `my_env` set up in `~/.edf/`
-
-### 1. Submit the worker job
-
-```bash
+# On Clariden
 ssh clariden
 cd ~/degeneration-probe
-
-# Default (Apertus-8B, no probe)
-sbatch cluster/clariden_worker.sh
-
-# With a trained probe
+sbatch cluster/clariden_worker.sh                       # defaults: Apertus-8B, no probe
 PROBE=outputs/probes/20260408/checkpoint sbatch cluster/clariden_worker.sh
-
-# Different model
 MODEL=Qwen/Qwen2.5-7B-Instruct sbatch cluster/clariden_worker.sh
-```
 
-### 2. Find the node hostname
-
-```bash
-# Check the job output for the SSH tunnel command
-cat /iopsstor/scratch/cscs/$USER/logs/worker_<jobid>.out
-# Look for: "ssh -L 9000:nidXXXXXX:9000 clariden"
-```
-
-### 3. Set up the SSH tunnel (on your laptop)
-
-```bash
+# Find the node and open a tunnel (on your laptop)
+cat /iopsstor/scratch/cscs/$USER/logs/worker_<jobid>.out   # look for the tunnel hint line
 ssh -L 9000:<node>:9000 clariden
-```
 
-### 4. Run backend + UI locally (on your laptop)
-
-```bash
-cd degeneration-probe
+# Start backend + UI locally
 uv run python -m degeneration_probe serve &
 uv run python -m degeneration_probe ui &
 ```
 
-Open http://localhost:7860 in your browser. In the UI, connect to the worker at `localhost:9000`.
-
-### 5. When done
-
-```bash
-scancel <jobid>   # on Clariden
-```
-
-| Resource | Default |
-|----------|---------|
-| Time limit | 4 hours |
-| CPUs | 4 |
-| RAM | 64 GB |
-| GPU | 1 |
+Clean up with `scancel <jobid>` on Clariden.
 
 ---
 
-## Output Format
+## Reference
 
-### `generations.jsonl`
+### CLI commands
 
-Each line is a JSON object with the prompt, completion, metrics, and label:
+All commands share the same entry point: `python -m degeneration_probe {generate,train,evaluate,serve,worker,ui}`.
+
+| Command  | Purpose                                                              |
+|----------|----------------------------------------------------------------------|
+| `generate` | Download prompts, generate completions, compute metrics, label data |
+| `train`    | Train a probe head on hidden states from labelled data              |
+| `evaluate` | Evaluate a trained probe on a new JSONL file                        |
+| `serve`    | Start the FastAPI backend (default `0.0.0.0:8000`)                  |
+| `worker`   | Start the inference worker (default `0.0.0.0:9000`)                 |
+| `ui`       | Start the Gradio UI (default `0.0.0.0:7860`)                        |
+
+### API endpoints
+
+The backend exposes:
+
+| Method | Path                 | Purpose                                                                  |
+|--------|----------------------|--------------------------------------------------------------------------|
+| `POST` | `/api/sessions`      | Register the current worker — body: `{"worker_host": "...", "worker_port": 9000}` |
+| `GET`  | `/api/worker/info`   | Ask the active worker which model it's serving                           |
+| `WS`   | `/api/generate`      | Streaming generation endpoint consumed by the UI                         |
+
+### Output format
+
+`generations.jsonl` — one JSON object per line with prompt, completion, metrics, and label:
 
 ```json
 {
@@ -499,21 +443,17 @@ Each line is a JSON object with the prompt, completion, metrics, and label:
 
 A generation is labelled `degenerating: true` when `max_repetition > 0.9` for unigrams.
 
----
-
-## Metrics
+### Metrics
 
 - **TTR (Type-Token Ratio):** `unique_ngrams / total_ngrams`. 1.0 = fully diverse, 0.0 = fully repetitive.
-- **Repetition:** `1 - TTR`.
+- **Repetition:** `1 − TTR`.
 - Computed over non-overlapping chunks of `chunk_size` tokens (default 256).
-- Tracked for `n=1` (unigrams) and `n=3` (trigrams) by default.
+- Tracked for `n = 1` (unigrams) and `n = 3` (trigrams) by default.
 
----
+### How probe training works
 
-## How Probe Training Works
-
-1. The base LLM is loaded frozen (no gradient updates to the LLM)
-2. A forward hook captures hidden states from the chosen layer during teacher-forced forward passes
-3. Hidden states are pooled over completion tokens (mean, max, or last-token pooling)
-4. A single `nn.Linear(hidden_size, 1)` head is trained with binary cross-entropy loss
-5. Evaluation reports accuracy, precision, recall, F1, AUC, and optimal threshold
+1. The base LLM is loaded frozen — no gradient updates flow to it.
+2. A forward hook captures hidden states from the chosen layer during teacher-forced forward passes.
+3. Hidden states are pooled over completion tokens (`mean`, `max`, or `last_token`).
+4. A single `nn.Linear(hidden_size, 1)` head is trained with binary cross-entropy loss.
+5. Evaluation reports accuracy, precision, recall, F1, AUC, and optimal threshold.
