@@ -14,8 +14,8 @@ import torch
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from degeneration_probe._fork_path import ensure_fork_on_syspath
 from degeneration_probe.model_utils import load_model_and_tokenizer, resolve_torch_dtype
-from degeneration_probe.probe import SequenceProbe
 from degeneration_probe.worker.engine import GenerationEngine
 from degeneration_probe.worker.steering import get_strategy
 
@@ -210,7 +210,9 @@ def main():
     probe = None
     if args.probe:
         print(f"Loading probe from {args.probe}...")
-        probe = SequenceProbe.load(args.probe, model)
+        ensure_fork_on_syspath()
+        from degeneration.probe_loader import load_probe
+        probe = load_probe(args.probe, model)
 
     engine = GenerationEngine(model=model, tokenizer=tokenizer, probe=probe, model_name=args.model)
     print("Model loaded. Starting server...")

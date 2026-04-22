@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generator, Optional
+from typing import Any, Generator, Optional
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from degeneration_probe.probe import SequenceProbe
 from degeneration_probe.worker.steering import SteeringContext, SteeringStrategy
 
 
@@ -25,8 +24,8 @@ class TokenResult:
 class GenerationEngine:
     """Runs token-by-token generation with probe scoring and optional steering.
 
-    The engine holds the model, tokenizer, and optionally a trained probe.
-    For each generation request it:
+    The engine holds the model, tokenizer, and optionally a trained probe
+    (a fork `ValueHeadProbe`). For each generation request it:
     1. Encodes the prompt
     2. In a loop: runs one forward pass, hooks the probe layer, scores,
        optionally steers logits, samples the next token, yields the result.
@@ -34,15 +33,15 @@ class GenerationEngine:
     When a probe is provided the engine permanently registers the probe's
     forward hook on the target layer at construction time.  This means the
     hook fires during every ``model()`` call made by the engine, so we can
-    read ``probe._hooked`` after each forward pass without re-running the
-    model through ``probe.forward()``.
+    read ``probe._hooked_hidden_states`` after each forward pass without
+    re-running the model through ``probe.forward()``.
     """
 
     def __init__(
         self,
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
-        probe: Optional[SequenceProbe] = None,
+        probe: Optional[Any] = None,
         model_name: str = "",
     ):
         self.model = model
@@ -128,7 +127,7 @@ class GenerationEngine:
 
             # Clear hook capture before each forward pass
             if self.probe is not None:
-                self.probe._hooked = None
+                self.probe._hooked_hidden_states = None
 
             # Forward pass with KV cache: first iteration processes the full
             # prompt; subsequent iterations feed only the newly sampled token.
@@ -146,11 +145,11 @@ class GenerationEngine:
 
             # Probe scoring
             probe_score = 0.0
-            if self.probe is not None and self.probe._hooked is not None:
-                hidden = self.probe._hooked[:, -1, :]  # [1, H]
-                if hidden.dtype != self.probe.linear.weight.dtype:
-                    hidden = hidden.to(self.probe.linear.weight.dtype)
-                logit = self.probe.linear(hidden)  # [1, 1]
+            if self.probe is not None and self.probe._hooked_hidden_states is not None:
+                hidden = self.probe._hooked_hidden_states[:, -1, :]  # [1, H]
+                if hidden.dtype != self.probe.value_head.weight.dtype:
+                    hidden = hidden.to(self.probe.value_head.weight.dtype)
+                logit = self.probe.value_head(hidden)  # [1, 1]
                 probe_score = torch.sigmoid(logit).item()
 
             # Re-read live params every iteration so mid-stream UI slider

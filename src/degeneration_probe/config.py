@@ -34,7 +34,6 @@ class DatasetConfig:
 class AnalysisConfig:
     chunk_size: int = 256
     n_values: List[int] = field(default_factory=lambda: [1, 3])
-    save_hidden_states: bool = False
 
 
 @dataclass
@@ -61,58 +60,83 @@ def load_config(path: Path) -> Config:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Probe training configuration (used by scripts/train.py via Hydra)
+# Probe training configuration (degeneration regression probe)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class ProbeConfig:
-    """Configuration for the probe architecture."""
+class LoRAConfig:
+    """LoRA adapter configuration."""
 
-    layer: int = -1  # -1 = last layer
-    pooling: str = "mean"  # mean | max | last_token
-    threshold: float = 0.5
+    enabled: bool = True
+    rank: int = 16
+    alpha: int = 32
+    dropout: float = 0.0
+
+
+@dataclass
+class ProbeConfig:
+    """Probe architecture / hook configuration."""
+
+    layer: int = 12  # middle-ish layer; override per model
+    lora: LoRAConfig = field(default_factory=LoRAConfig)
+
+
+@dataclass
+class LabelConfig:
+    """How per-token 1 - TTR labels are computed from the completion."""
+
+    window_size: int = 256  # TTR computed over next N tokens
+    primary_n: int = 1  # n-gram size for TTR
+
+
+@dataclass
+class LearningRateConfig:
+    """Per-component learning rates."""
+
+    head: float = 5.0e-3
+    lora: float = 5.0e-5
 
 
 @dataclass
 class TrainingConfig:
-    """Configuration for the probe training loop."""
-
-    # Probe
     probe: ProbeConfig = field(default_factory=ProbeConfig)
 
-    # Data — list of JSONL paths; model is auto-resolved from data
     train_data: List[str] = field(default_factory=list)
-    eval_data: Optional[str] = None  # if None, split from train
+    eval_data: Optional[str] = None
     eval_fraction: float = 0.2
     max_length: int = 2048
 
-    # Training
-    learning_rate: float = 1e-3
+    label: LabelConfig = field(default_factory=LabelConfig)
+    learning_rate: LearningRateConfig = field(default_factory=LearningRateConfig)
     batch_size: int = 4
     num_epochs: int = 10
     seed: int = 42
-    pos_weight: Optional[float] = None  # weight for positive class in BCE
 
-    # Logging
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
 
-    # Output
     output_dir: str = "outputs/probes"
+
+
+def _probe_from_raw(raw: dict) -> ProbeConfig:
+    lora_raw = raw.get("lora", {}) or {}
+    lora = LoRAConfig(**lora_raw)
+    kwargs = {k: v for k, v in raw.items() if k != "lora"}
+    return ProbeConfig(lora=lora, **kwargs)
 
 
 def load_training_config(path: Path) -> TrainingConfig:
     """Load a plain YAML training config and return a TrainingConfig instance."""
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    # Normalize train_data: accept a single string or a list
     train_data = raw.get("train_data", [])
     if isinstance(train_data, str):
         train_data = [train_data]
 
-    probe_raw = raw.get("probe", {})
-    probe = ProbeConfig(**probe_raw)
+    probe = _probe_from_raw(raw.get("probe", {}) or {})
+    label = LabelConfig(**(raw.get("label", {}) or {}))
+    learning_rate = LearningRateConfig(**(raw.get("learning_rate", {}) or {}))
 
     return TrainingConfig(
         probe=probe,
@@ -120,11 +144,11 @@ def load_training_config(path: Path) -> TrainingConfig:
         eval_data=raw.get("eval_data"),
         eval_fraction=raw.get("eval_fraction", 0.2),
         max_length=raw.get("max_length", 2048),
-        learning_rate=raw.get("learning_rate", 1e-3),
+        label=label,
+        learning_rate=learning_rate,
         batch_size=raw.get("batch_size", 4),
         num_epochs=raw.get("num_epochs", 10),
         seed=raw.get("seed", 42),
-        pos_weight=raw.get("pos_weight"),
         wandb_project=raw.get("wandb_project"),
         wandb_run_name=raw.get("wandb_run_name"),
         output_dir=raw.get("output_dir", "outputs/probes"),
