@@ -1,0 +1,3 @@
+[submodule "third_party/hallucination_probes"]
+	path = third_party/hallucination_probes
+	url = git@github.com:mreihs/hallucination_probes.git
