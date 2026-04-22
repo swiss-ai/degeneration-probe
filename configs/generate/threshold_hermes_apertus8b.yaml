@@ -18,4 +18,3 @@ dataset:
 analysis:
   chunk_size: 256
   n_values: [1, 2, 3]
-  save_hidden_states: false
