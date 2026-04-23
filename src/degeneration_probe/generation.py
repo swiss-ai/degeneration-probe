@@ -23,14 +23,18 @@ def generate_for_prompt(
     top_p: float,
 ) -> tuple[list[int], str]:
     """Generate token ids and decoded text for one prompt."""
-    messages = [{"role": "user", "content": prompt}]
-    model_inputs = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        return_tensors="pt",
-        add_generation_prompt=True,
-        return_dict=True,
-    )
+    if tokenizer.chat_template:
+        messages = [{"role": "user", "content": prompt}]
+        model_inputs = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_tensors="pt",
+            add_generation_prompt=True,
+            return_dict=True,
+        )
+    else:
+        # Base models without a chat template: tokenize the raw prompt.
+        model_inputs = tokenizer(prompt, return_tensors="pt")
 
     device = getattr(model, "device", torch.device("cpu"))
     if isinstance(model_inputs, BatchEncoding):
