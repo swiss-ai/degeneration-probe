@@ -10,7 +10,7 @@ probe:
     dropout: 0.0
 
 train_data:
-  - PLACEHOLDER_REPLACE_WITH_REAL_GENERATIONS_JSONL_PATH
+  - outputs/generations/20260424_144656/data/generations.jsonl
 
 eval_data: null
 eval_fraction: 0.2
