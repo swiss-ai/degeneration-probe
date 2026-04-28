@@ -46,27 +46,19 @@ def _prompt_cache_path(
 # ---------------------------------------------------------------------------
 
 
-def ensure_hf_token(token_path: str = "keys/.hf_token") -> None:
-    """Load the HuggingFace token into env vars if not already set.
+def ensure_hf_token() -> None:
+    """Mirror ``HF_TOKEN`` into ``HUGGINGFACE_HUB_TOKEN`` (and vice versa) so
+    both forms work regardless of which one the user / sbatch script set.
 
-    Checks ``token_path`` first (project-local ``keys/.hf_token``), then falls
-    back to ``~/.hf_token`` so the cluster workflow (which stores the token in
-    the home directory) continues to work without changes.
+    The canonical place to define the token is the project-root ``.env`` file
+    (loaded by ``cluster/clariden_*.sh`` automatically; locally, source it
+    yourself or add it to your shell rc).
     """
-    if os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_TOKEN"):
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if not token:
         return
-
-    candidates = [Path(token_path), Path.home() / ".hf_token"]
-    for candidate in candidates:
-        try:
-            token = candidate.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            continue
-        if token:
-            os.environ["HUGGINGFACE_HUB_TOKEN"] = token
-            os.environ["HF_TOKEN"] = token
-            print(f"Loaded HF token from {candidate}")
-            return
+    os.environ.setdefault("HF_TOKEN", token)
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
