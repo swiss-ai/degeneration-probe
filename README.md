@@ -19,7 +19,6 @@ Both tracks share the same codebase and CLI (`python -m degeneration_probe …`)
   - [Creating your own configs](#creating-your-own-configs)
   - [Training on multiple datasets](#training-on-multiple-datasets)
   - [Dataset caching](#dataset-caching)
-  - [Running pipeline jobs on ETH Euler](#running-pipeline-jobs-on-eth-euler)
 - [Interactive UI](#interactive-ui)
   - [Quick start (local)](#quick-start-local)
   - [Using a trained probe](#using-a-trained-probe)
@@ -51,9 +50,8 @@ cd degeneration-probe
 
 uv sync
 
-# Save your HuggingFace token (the pipeline reads it from here automatically)
-mkdir -p keys
-printf '%s' 'hf_YOUR_TOKEN_HERE' > keys/.hf_token
+# Save your HuggingFace token to .env (read by both local runs and cluster jobs).
+echo 'HF_TOKEN=hf_YOUR_TOKEN_HERE' >> .env
 ```
 
 ---
@@ -85,35 +83,30 @@ Inside that directory:
 
 ### Step 2: Train a probe
 
-Point the training config at the `generations.jsonl` from step 1. Open `configs/train/default.yaml` and update `train_data`:
+Two ready-to-go training configs live in `configs/train/`:
 
-```yaml
-train_data:
-  - outputs/generations/20260403_115426/data/generations.jsonl
-```
+- `qwen05b_hf.yaml` — Qwen-0.5B base, runs locally (CPU/MPS) or on cluster
+- `apertus8b_hf.yaml` — Apertus-8B-Instruct, cluster-only (uses ~16 GB GPU)
 
-You can list multiple JSONL files if you ran generation multiple times (see [Training on multiple datasets](#training-on-multiple-datasets)). All files must come from the **same model** — this is validated automatically.
-
-Then:
+Both pull data from the gated HF dataset `luca-sartori/degeneration-probe-instruct`. To train on your own `generations.jsonl` instead, copy one of them and replace the `hf_dataset:` block with `train_data: [path/to/generations.jsonl]`.
 
 ```bash
-uv run python -m degeneration_probe train --config configs/train/default.yaml
+uv run python -m degeneration_probe train --config configs/train/qwen05b_hf.yaml
 ```
 
-You don't need to specify a model: the training script reads `model_name` from the JSONL data and loads the same model. This prevents accidentally training a probe on hidden states from a different model than the one that generated the data.
+Output directory (e.g. `outputs/probes/20260428_123456`):
 
-Output directory (e.g. `outputs/probes/20260403_115847`):
+- `checkpoint/` — `probe_head.bin`, `adapter_model.safetensors`, `probe_config.json`, `degeneration_meta.json`
+- `config.json` — full training config snapshot
 
-- `checkpoint/` — trained probe weights (`probe_head.pt`) and config
-- `eval/` — evaluation metrics, ROC curve plot, threshold analysis plot
-- `config.json` — full training config snapshot (includes the auto-resolved model name)
+Key config options:
 
-Key config options (in `configs/train/default.yaml`):
-
-- `probe.layer` — which transformer layer to probe (`-1` = last)
-- `probe.pooling` — how to aggregate hidden states over tokens (`mean`, `max`, or `last_token`)
-- `num_epochs`, `learning_rate`, `batch_size` — standard training hyperparameters
-- `eval_fraction` — fraction of data to hold out for evaluation (default 0.2). Set `eval_data` to a separate JSONL path to evaluate on entirely different data.
+- `probe.layer` — which transformer layer to probe (12 = middle of Qwen-0.5B; 16 = middle of Apertus-8B)
+- `probe.lora.{rank,alpha,dropout}` — LoRA adapter config
+- `label.{window_size,primary_n}` — sliding window (256 tokens) and n-gram size (1) for the per-token 1 - TTR target
+- `learning_rate.{head,lora}` — separate LRs for the value head vs LoRA params
+- `num_epochs`, `batch_size`, `max_length` — standard training hyperparameters
+- `model.name` — required when training from `hf_dataset`; auto-resolved from JSONL records otherwise.
 
 ### Step 3: Evaluate on new data
 
@@ -170,23 +163,10 @@ Then `uv run python -m degeneration_probe generate --config configs/generate/my_
 **Training config.** Same pattern:
 
 ```bash
-cp configs/train/default.yaml configs/train/my_training.yaml
+cp configs/train/qwen05b_hf.yaml configs/train/my_training.yaml
 ```
 
-```yaml
-probe:
-  layer: -1                # transformer layer to probe (-1 = last)
-  pooling: mean            # mean | max | last_token
-  threshold: 0.5           # classification threshold
-
-train_data:
-  - outputs/generations/20260401_120000/data/generations.jsonl
-
-eval_fraction: 0.2         # ignored if eval_data is set
-learning_rate: 1.0e-3
-batch_size: 4
-num_epochs: 10
-```
+Then edit `model.name`, `probe.layer`, and either `hf_dataset` or `train_data` (see the comments inside the file).
 
 For local-only configs you don't want committed, name the file `*.local.yaml` — gitignored automatically.
 
@@ -231,58 +211,6 @@ Override the cache location (e.g. for a shared cluster filesystem):
 ```bash
 export PROBE_DATA_CACHE=/path/to/shared/cache
 ```
-
-### Running pipeline jobs on ETH Euler
-
-**One-time setup**
-
-```bash
-ssh <nethz>@euler.ethz.ch
-git clone <repo-url> ~/degeneration-probe
-cd ~/degeneration-probe
-bash cluster/setup_euler.sh
-
-mkdir -p keys
-printf '%s' 'hf_YOUR_TOKEN_HERE' > ~/degeneration-probe/keys/.hf_token
-chmod 600 ~/degeneration-probe/keys/.hf_token
-```
-
-**Submit a generation job**
-
-```bash
-# Default (Alpaca + Qwen-0.5B)
-sbatch cluster/euler_generate.sh
-
-# Custom config
-GEN_CONFIG=configs/generate/aime_apertus8b.yaml sbatch cluster/euler_generate.sh
-```
-
-Logs go to `logs/generate_<jobid>.{out,err}`.
-
-**Submit a training job**
-
-```bash
-sbatch cluster/euler_train.sh
-TRAIN_CONFIG=configs/train/my_training.yaml sbatch cluster/euler_train.sh
-```
-
-Logs go to `logs/train_<jobid>.{out,err}`.
-
-**Check status**
-
-```bash
-squeue -u $USER
-cat logs/generate_<jobid>.out
-```
-
-Adjust `#SBATCH` directives in `cluster/euler_generate.sh` / `cluster/euler_train.sh` for different resource needs.
-
-| Resource  | Generate default | Train default |
-|-----------|------------------|---------------|
-| Time      | 4 hours          | 8 hours       |
-| CPUs      | 4                | 4             |
-| RAM       | 32 GB            | 32 GB         |
-| GPU       | 1 × 40 GB VRAM   | 1 × 40 GB VRAM |
 
 ---
 

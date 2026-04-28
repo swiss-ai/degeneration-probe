@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SLURM job: generate threshold data on CSCS Clariden
+# SLURM job: generate completions on CSCS Clariden.
 #
-# Submit all three datasets:
-#   sbatch cluster/clariden_generate.sh configs/generate/threshold_alpaca_apertus8b.yaml
-#   sbatch cluster/clariden_generate.sh configs/generate/threshold_hermes_apertus8b.yaml
-#   sbatch cluster/clariden_generate.sh configs/generate/threshold_aime_apertus8b.yaml
+# Usage:
+#   sbatch cluster/clariden_generate.sh <generate-config.yaml>
+#
+# The result lands in outputs/generations/<timestamp>/data/generations.jsonl
+# and can then be passed to clariden_train.sh.
 # =============================================================================
 #SBATCH --job-name=degen-threshold
 #SBATCH --account=infra01
