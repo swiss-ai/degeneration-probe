@@ -98,6 +98,7 @@ Key knobs:
 
 - `probe.layer` — which transformer layer to read (12 = middle of Qwen-0.5B's 24; 16 = middle of Apertus-8B's 32).
 - `probe.lora.{rank,alpha,dropout}` — LoRA adapter shape.
+- `probe.lora.layers` — explicit list of layer indices to attach LoRA to. Defaults to `0..probe.layer` inclusive; set to `[probe.layer]` to constrain perturbation to just the layer being read (much smaller adapter, faster step).
 - `label.{window_size,primary_n}` — forward sliding-window size (256) and TTR n-gram size (2 = bigrams) for the per-token target.
 - `learning_rate.{head,lora}` — separate LRs for the value head vs LoRA params.
 - `model.name` — the model whose hidden states you're probing. Required when `hf_dataset` is set; auto-resolved from JSONL records when training on `train_data` instead.
@@ -168,7 +169,7 @@ export PROBE_DATA_CACHE=/path/to/shared/cache
 
 ## Interactive UI
 
-The UI streams tokens from a live model and colours each one by its probe score (green → safe, amber → borderline, red → degenerate). It runs as three independent processes:
+The UI streams tokens from a live model and colours each one by its probe score (green → safe, amber → borderline, red → degenerate). It has two tabs — **Demo** (the live generation surface with score chart, sliders and steering controls) and **About** (a self-contained explainer of the probe, training setup, and steering). It runs as three independent processes:
 
 | Component | Command | Default port | Purpose |
 |---|---|---|---|
