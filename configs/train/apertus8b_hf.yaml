@@ -17,9 +17,9 @@ hf_dataset:
   name: luca-sartori/degeneration-probe-instruct
   train_split: train
   eval_split: validation
-  # 10% of the 66 680-row train split for faster iteration; null = full split.
+  # 10% of train + eval splits for faster iteration; null = full split.
   max_train_rows: 6668
-  max_eval_rows: null
+  max_eval_rows: 833
 
 max_length: 4096
 
@@ -32,7 +32,7 @@ learning_rate:
   lora: 5.0e-5
 
 batch_size: 2          # 4096-token sequences on an 8B model — keep this small
-num_epochs: 1
+num_epochs: 3
 seed: 42
 
 wandb_project: null
