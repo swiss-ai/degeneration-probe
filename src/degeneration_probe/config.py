@@ -90,6 +90,9 @@ class LabelConfig:
 
     window_size: int = 256  # TTR computed over next N tokens
     primary_n: int = 1  # n-gram size for TTR
+    # If set, labels become binary: 1 iff TTR(next window) <= ttr_threshold,
+    # and the trainer switches from MSE on sigmoid to BCE-with-logits.
+    ttr_threshold: Optional[float] = None
 
 
 @dataclass
@@ -137,6 +140,7 @@ class TrainingConfig:
     seed: int = 42
 
     wandb_project: Optional[str] = None
+    wandb_entity: Optional[str] = None
     wandb_run_name: Optional[str] = None
 
     output_dir: str = "outputs/probes"
@@ -178,6 +182,7 @@ def load_training_config(path: Path) -> TrainingConfig:
         num_epochs=raw.get("num_epochs", 10),
         seed=raw.get("seed", 42),
         wandb_project=raw.get("wandb_project"),
+        wandb_entity=raw.get("wandb_entity"),
         wandb_run_name=raw.get("wandb_run_name"),
         output_dir=raw.get("output_dir", "outputs/probes"),
     )

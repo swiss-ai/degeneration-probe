@@ -5,20 +5,20 @@ model:
   name: swiss-ai/Apertus-8B-Instruct-2509
 
 probe:
-  layer: 16             # middle of Apertus-8B's 32 layers
+  layer: -1             # last layer (31) — read the most "next-token-ready" state
   lora:
     enabled: true
     rank: 16
     alpha: 32
     dropout: 0.0
-    layers: [16]        # only adapt the layer the probe reads from
+    layers: [16]        # adapt mid-stack; modifications propagate up to the probe
 
 hf_dataset:
   name: luca-sartori/degeneration-probe-instruct
   train_split: train
   eval_split: validation
-  # 10% of train + eval splits for faster iteration; null = full split.
-  max_train_rows: 6668
+  # 30% of train, 10% of eval; null = full split.
+  max_train_rows: 20004
   max_eval_rows: 833
 
 max_length: 4096
@@ -26,6 +26,9 @@ max_length: 4096
 label:
   window_size: 256
   primary_n: 2          # bigrams — phrase-level repetition signal
+  ttr_threshold: 0.2    # binary classification: positive class iff TTR <= 0.2
+                        # in the next 256 tokens (i.e. clearly degenerate).
+                        # Switches the loss to BCE-with-logits.
 
 learning_rate:
   head: 5.0e-3
@@ -35,5 +38,6 @@ batch_size: 2          # 4096-token sequences on an 8B model — keep this small
 num_epochs: 3
 seed: 42
 
-wandb_project: null
+wandb_entity: moritz-k-reihs-personal
+wandb_project: Degeneration probe
 output_dir: outputs/probes

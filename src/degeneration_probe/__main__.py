@@ -126,6 +126,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         max_length=cfg.max_length,
         window_size=cfg.label.window_size,
         primary_n=cfg.label.primary_n,
+        ttr_threshold=cfg.label.ttr_threshold,
         head_lr=cfg.learning_rate.head,
         lora_lr=cfg.learning_rate.lora,
         batch_size=cfg.batch_size,
@@ -133,6 +134,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         seed=cfg.seed,
         output_dir=cfg.output_dir,
         wandb_project=cfg.wandb_project,
+        wandb_entity=cfg.wandb_entity,
         wandb_run_name=cfg.wandb_run_name,
     )
     ckpt = fork_train(train_cfg)
