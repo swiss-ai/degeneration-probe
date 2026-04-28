@@ -31,10 +31,10 @@ label:
                         # Switches the loss to BCE-with-logits.
 
 learning_rate:
-  head: 5.0e-3
-  lora: 5.0e-5
+  head: 1.0e-3
+  lora: 1.0e-5
 
-batch_size: 2          # 4096-token sequences on an 8B model — keep this small
+batch_size: 4          # 4096-token sequences on an 8B model — bump from 2 to halve loss variance
 num_epochs: 3
 seed: 42
 
