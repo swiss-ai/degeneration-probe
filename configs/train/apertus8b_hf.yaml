@@ -11,13 +11,14 @@ probe:
     rank: 16
     alpha: 32
     dropout: 0.0
+    layers: [16]        # only adapt the layer the probe reads from
 
 hf_dataset:
   name: luca-sartori/degeneration-probe-instruct
   train_split: train
   eval_split: validation
-  # Set max_*_rows to subsample for quicker iteration; null = use full split.
-  max_train_rows: null
+  # 10% of the 66 680-row train split for faster iteration; null = full split.
+  max_train_rows: 6668
   max_eval_rows: null
 
 max_length: 4096

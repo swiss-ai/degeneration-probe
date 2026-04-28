@@ -72,6 +72,8 @@ class LoRAConfig:
     rank: int = 16
     alpha: int = 32
     dropout: float = 0.0
+    # Optional explicit layer list; default = layers 0..probe.layer (inclusive).
+    layers: Optional[List[int]] = None
 
 
 @dataclass

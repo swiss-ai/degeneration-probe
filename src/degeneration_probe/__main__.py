@@ -114,6 +114,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         lora_rank=cfg.probe.lora.rank,
         lora_alpha=cfg.probe.lora.alpha,
         lora_dropout=cfg.probe.lora.dropout,
+        lora_layers=list(cfg.probe.lora.layers) if cfg.probe.lora.layers else None,
         train_data=list(cfg.train_data),
         eval_data=cfg.eval_data,
         hf_dataset=cfg.hf_dataset.name if cfg.hf_dataset else None,
