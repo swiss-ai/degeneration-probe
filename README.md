@@ -98,7 +98,7 @@ Key knobs:
 
 - `probe.layer` — which transformer layer to read (12 = middle of Qwen-0.5B's 24; 16 = middle of Apertus-8B's 32).
 - `probe.lora.{rank,alpha,dropout}` — LoRA adapter shape.
-- `label.{window_size,primary_n}` — forward sliding-window size (256) and TTR n-gram size (1) for the per-token target.
+- `label.{window_size,primary_n}` — forward sliding-window size (256) and TTR n-gram size (2 = bigrams) for the per-token target.
 - `learning_rate.{head,lora}` — separate LRs for the value head vs LoRA params.
 - `model.name` — the model whose hidden states you're probing. Required when `hf_dataset` is set; auto-resolved from JSONL records when training on `train_data` instead.
 - `num_epochs`, `batch_size`, `max_length`, `seed` — standard.
@@ -328,7 +328,7 @@ The backend exposes:
 - **TTR (type-token ratio):** `unique_ngrams / total_ngrams`. 1.0 = fully diverse, 0.0 = fully repetitive.
 - **Repetition:** `1 − TTR`.
 - During generation, computed over **non-overlapping** chunks of `chunk_size` tokens (default 256), tracked for `n = 1` and `n = 3`.
-- During probe training, the per-token target is `1 − TTR` over a **forward sliding window** of `window_size` tokens (default 256, n=1). Tokens within the last window of a completion get no target (masked out of the loss).
+- During probe training, the per-token target is `1 − TTR` over a **forward sliding window** of `window_size` tokens (default 256, n=2 — bigrams capture phrase-level repetition more cleanly than unigrams, which would penalise common words like "the"/"is"). Tokens within the last window of a completion get no target (masked out of the loss).
 
 ### How the probe is trained
 

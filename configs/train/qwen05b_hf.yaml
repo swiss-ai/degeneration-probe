@@ -27,7 +27,7 @@ max_length: 2048
 
 label:
   window_size: 256
-  primary_n: 1
+  primary_n: 2          # bigrams — phrase-level repetition signal
 
 learning_rate:
   head: 5.0e-3
