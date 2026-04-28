@@ -91,11 +91,21 @@ def cmd_train(args: argparse.Namespace) -> None:
     from degeneration.train import TrainConfig, train as fork_train
 
     cfg = load_training_config(Path(args.config))
-    if not cfg.train_data:
-        raise SystemExit("Error: 'train_data' is empty in config. Provide at least one JSONL path.")
+    if not cfg.train_data and cfg.hf_dataset is None:
+        raise SystemExit(
+            "Error: provide either 'train_data' (JSONL paths) or 'hf_dataset' in the config."
+        )
 
-    model_name = resolve_model_from_data(cfg.train_data)
-    log.info("Auto-resolved model from data: %s", model_name)
+    if cfg.model is not None:
+        model_name = cfg.model.name
+        log.info("Using configured model override: %s", model_name)
+    elif cfg.train_data:
+        model_name = resolve_model_from_data(cfg.train_data)
+        log.info("Auto-resolved model from data: %s", model_name)
+    else:
+        raise SystemExit(
+            "Error: when using 'hf_dataset', the model must be set explicitly via 'model.name'."
+        )
 
     train_cfg = TrainConfig(
         model_name=model_name,
@@ -106,6 +116,11 @@ def cmd_train(args: argparse.Namespace) -> None:
         lora_dropout=cfg.probe.lora.dropout,
         train_data=list(cfg.train_data),
         eval_data=cfg.eval_data,
+        hf_dataset=cfg.hf_dataset.name if cfg.hf_dataset else None,
+        hf_train_split=cfg.hf_dataset.train_split if cfg.hf_dataset else "train",
+        hf_eval_split=cfg.hf_dataset.eval_split if cfg.hf_dataset else "validation",
+        hf_max_train_rows=cfg.hf_dataset.max_train_rows if cfg.hf_dataset else None,
+        hf_max_eval_rows=cfg.hf_dataset.max_eval_rows if cfg.hf_dataset else None,
         eval_fraction=cfg.eval_fraction,
         max_length=cfg.max_length,
         window_size=cfg.label.window_size,

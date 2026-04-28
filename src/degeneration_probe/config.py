@@ -99,11 +99,32 @@ class LearningRateConfig:
 
 
 @dataclass
+class HFDatasetConfig:
+    """Optional HuggingFace dataset spec (alternative to local JSONL paths)."""
+
+    name: str
+    train_split: str = "train"
+    eval_split: Optional[str] = "validation"
+    max_train_rows: Optional[int] = None
+    max_eval_rows: Optional[int] = None
+
+
+@dataclass
+class ModelOverride:
+    """Explicit model name (required when training from HF data; auto-resolved
+    from JSONL records otherwise)."""
+
+    name: str
+
+
+@dataclass
 class TrainingConfig:
     probe: ProbeConfig = field(default_factory=ProbeConfig)
+    model: Optional[ModelOverride] = None
 
     train_data: List[str] = field(default_factory=list)
     eval_data: Optional[str] = None
+    hf_dataset: Optional[HFDatasetConfig] = None
     eval_fraction: float = 0.2
     max_length: int = 2048
 
@@ -138,10 +159,15 @@ def load_training_config(path: Path) -> TrainingConfig:
     label = LabelConfig(**(raw.get("label", {}) or {}))
     learning_rate = LearningRateConfig(**(raw.get("learning_rate", {}) or {}))
 
+    model = ModelOverride(**raw["model"]) if raw.get("model") else None
+    hf_dataset = HFDatasetConfig(**raw["hf_dataset"]) if raw.get("hf_dataset") else None
+
     return TrainingConfig(
         probe=probe,
+        model=model,
         train_data=train_data,
         eval_data=raw.get("eval_data"),
+        hf_dataset=hf_dataset,
         eval_fraction=raw.get("eval_fraction", 0.2),
         max_length=raw.get("max_length", 2048),
         label=label,

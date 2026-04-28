@@ -1,0 +1,38 @@
+# Apertus-8B-Instruct degeneration probe trained on the aggregate HF dataset.
+# Cluster-only (8B model, 4096-token sequences). Submit via:
+#   sbatch cluster/clariden_train.sh configs/train/apertus8b_hf.yaml
+model:
+  name: swiss-ai/Apertus-8B-Instruct-2509
+
+probe:
+  layer: 16             # middle of Apertus-8B's 32 layers
+  lora:
+    enabled: true
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+
+hf_dataset:
+  name: luca-sartori/degeneration-probe-instruct
+  train_split: train
+  eval_split: validation
+  # Set max_*_rows to subsample for quicker iteration; null = use full split.
+  max_train_rows: null
+  max_eval_rows: null
+
+max_length: 4096
+
+label:
+  window_size: 256
+  primary_n: 1
+
+learning_rate:
+  head: 5.0e-3
+  lora: 5.0e-5
+
+batch_size: 2          # 4096-token sequences on an 8B model — keep this small
+num_epochs: 1
+seed: 42
+
+wandb_project: null
+output_dir: outputs/probes
