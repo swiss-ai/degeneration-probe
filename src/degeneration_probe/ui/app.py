@@ -67,16 +67,84 @@ CSS = """
 
 .gradio-container {
     font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace !important;
-    max-width: 1120px !important;
+    max-width: none !important;
+    width: 100%% !important;
     background: %(bg)s !important;
+    color: %(text)s !important;
+    padding-top: 12px !important;
 }
-.gr-button-primary {
+.gradio-container h1 {
+    margin-top: 0 !important;
+    margin-bottom: 2px !important;
+    font-size: 22px !important;
+}
+.gradio-container h1 + p {
+    margin-top: 0 !important;
+    margin-bottom: 6px !important;
+}
+#header-row {
+    align-items: flex-end !important;
+    flex-wrap: nowrap !important;
+}
+#model-label {
+    text-align: right;
+    padding-bottom: 8px;
+    white-space: nowrap;
+}
+.gr-button-primary, button.primary {
     background: #4a6cf7 !important;
     border: none !important;
     border-radius: 8px !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
 }
-.gr-button-secondary, .gr-button {
+.gr-button-primary:hover, button.primary:hover {
+    background: #3d5cea !important;
+}
+.gr-button-secondary, .gr-button, button.secondary {
     border-radius: 8px !important;
+    background: #ffffff !important;
+    border: 1px solid %(border)s !important;
+    color: %(text)s !important;
+}
+#controls-panel {
+    background: %(card)s;
+    border: 1px solid %(border)s;
+    border-radius: 12px;
+    padding: 12px 14px 14px 14px;
+    gap: 4px !important;
+}
+#controls-panel .gr-form,
+#controls-panel .form,
+#controls-panel .block {
+    gap: 6px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    background: transparent !important;
+}
+#controls-panel label,
+#controls-panel .label-wrap,
+#controls-panel span[data-testid="block-info"] {
+    font-size: 12px !important;
+    margin-bottom: 2px !important;
+}
+#controls-panel input[type="range"] {
+    height: 4px !important;
+}
+#controls-panel .wrap > div {
+    margin-bottom: 4px !important;
+}
+#steering-divider {
+    border-top: 1px dashed %(border)s;
+    margin: 0;
+    height: 0;
+}
+#controls-panel p {
+    margin: 0 !important;
+}
+#action-row {
+    margin-top: 12px;
 }
 #output-panel {
     background: %(card)s;
@@ -95,7 +163,101 @@ CSS = """
     padding: 14px 20px;
     margin-top: 8px;
 }
+/* Hide Gradio's chrome (footer, "Use via API", "Built with Gradio"). */
+footer, .footer, .built-with, .show-api { display: none !important; }
+/* About panel: long-form explanatory text. */
+#about-panel {
+    background: %(card)s;
+    border: 1px solid %(border)s;
+    border-radius: 12px;
+    padding: 24px 32px;
+    line-height: 1.65;
+    color: %(text)s;
+    max-width: 880px;
+}
+#about-panel h2 {
+    font-size: 17px;
+    font-weight: 600;
+    margin-top: 22px;
+    margin-bottom: 6px;
+    color: #2d3142;
+}
+#about-panel h2:first-child { margin-top: 0; }
+#about-panel p, #about-panel li { font-size: 14px; }
+#about-panel code {
+    background: #eef1f6;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 13px;
+}
 """ % COLORS
+
+
+ABOUT_MD = """
+<div id="about-panel">
+
+<h2>What is a degeneration probe?</h2>
+
+A *degeneration probe* is a small head attached to one hidden layer of a frozen language model.
+Given the model's internal state at a given token, it predicts how repetitive the next 256 tokens
+of generation are about to be — a continuous score in `[0, 1]` where `0` means diverse output
+and `1` means the model is locked in a loop. It's a **forecast** of degeneration, not a
+post-hoc detector: by the time output is visibly repetitive, it's already too late to react.
+
+<h2>Reading this UI</h2>
+
+- **Prompt → Generate.** The worker streams tokens one by one. Each token is colour-coded by the probe's
+  predicted score: green = healthy, amber = borderline, red = the model is about to start looping.
+- **Degeneration score chart.** Per-token probe output over the whole generation. The dashed
+  red line marks the steering threshold.
+- **Generation sliders** (temperature, top-p, max tokens) work mid-stream — change them while a
+  generation is running and the worker picks up the new value on the next token.
+- **Steering panel.** When enabled, the worker monitors the live probe score and intervenes once
+  it crosses the threshold (see "Steering" below).
+
+<h2>How the probe is trained</h2>
+
+1. Take a frozen LLM (Apertus-8B-Instruct, in our case).
+2. Attach a LoRA adapter to one mid-depth layer (16) so the model can re-shape that layer's hidden
+   states for the probing task without changing anything else.
+3. Hook that layer to capture the per-token hidden state during a forward pass.
+4. A single `Linear(hidden_size → 1)` value head reads each token's hidden state and outputs a
+   scalar logit; `sigmoid(logit)` is the predicted score.
+5. Per-token target: `1 − TTR(next 256 tokens, n=2)` — type-token ratio over **bigrams**, computed
+   on the fly during collation. Bigrams penalise repeated phrases rather than common words like
+   "the", which is closer to what humans flag as degeneration.
+6. Train with masked MSE loss between predicted score and target. Two AdamW parameter groups
+   (head LR `5e-3`, LoRA LR `5e-5`).
+
+The training corpus is the gated HF dataset `luca-sartori/degeneration-probe-instruct` — ~67k
+completions from Apertus-8B-Instruct on prompts from Llama-Nemotron, Numinamath, Medical-O1,
+IF-SFT and Deepmath.
+
+<h2>Why models degenerate</h2>
+
+The dominant cause is probability-mass concentration. At low sampling temperature the softmax
+distribution becomes nearly one-hot. If the highest-probability token at position `t` happens
+to appear frequently in the recent context, the model assigns it even higher probability at
+`t+1`, creating a feedback loop that's hard to escape — once a phrase is sampled it gets
+reinforced and resampled.
+
+A secondary factor is *attention sinks*: certain tokens (punctuation, common function words)
+attract disproportionate attention weight, biasing the next-token distribution toward whatever
+co-occurs with them in training data, narrowing the output further.
+
+Both effects compound with sequence length: longer generations have more chances to enter a
+basin and fewer chances to escape.
+
+<h2>Steering</h2>
+
+When steering is enabled and the live probe score exceeds the threshold, the active strategy
+modifies the model's output distribution to break out of the basin.
+
+- **Temperature boost** — the worker divides the logits by a higher temperature for as long as
+  the score stays above the threshold, increasing diversity until the loop is broken.
+
+</div>
+"""
 
 
 def _score_to_color(score: float) -> str:
@@ -380,88 +542,95 @@ def _build_temp_chart(temperatures: list[float], max_temp: float = 2.0) -> str:
 
 def build_ui():
     """Build and return the Gradio Blocks interface."""
-    with gr.Blocks(title="Degeneration Probe", css=CSS) as demo:
-        gr.Markdown(
-            '<h1 style="font-weight:600;color:#2d3142;margin-bottom:2px;">'
-            'Degeneration Probe</h1>'
-            '<p style="color:#8a8fa0;font-size:14px;margin-top:0;">'
-            'Real-time degeneration detection and model steering</p>'
-        )
-        model_label = gr.HTML(value="")
+    with gr.Blocks(title="Degeneration Probe", css=CSS, analytics_enabled=False) as demo:
+        with gr.Row(elem_id="header-row"):
+            gr.Markdown(
+                '<h1 style="font-weight:600;color:#2d3142;margin-bottom:2px;">'
+                'Degeneration Probe</h1>'
+                '<p style="color:#8a8fa0;font-size:14px;margin-top:0;">'
+                'Real-time degeneration detection and model steering</p>'
+            )
+            model_label = gr.HTML(value="", elem_id="model-label")
 
         demo.load(ensure_session).then(fetch_model_label, outputs=[model_label])
 
-        # Prompt input
-        prompt_input = gr.Textbox(
-            label="Prompt",
-            placeholder="Type a prompt to generate from...",
-            lines=2,
-        )
-        with gr.Row():
-            generate_btn = gr.Button("Generate", variant="primary", scale=3)
-            stop_btn = gr.Button("Stop", variant="stop", scale=1)
+        with gr.Tabs():
+          with gr.Tab("Demo"):
+            # Prompt input
+            prompt_input = gr.Textbox(
+                label="Prompt",
+                placeholder="Type a prompt to generate from...",
+                lines=2,
+            )
 
-        # Controls + Output
-        with gr.Row():
-            with gr.Column(scale=1, min_width=260):
-                gr.Markdown(
-                    '<p style="font-weight:600;font-size:14px;color:#2d3142;margin-bottom:4px;">'
-                    'Generation</p>'
-                )
-                temperature = gr.Slider(
-                    0.0, 2.0, value=0.01, step=0.01, label="Temperature",
-                    info="Low = deterministic, high = creative",
-                )
-                top_p = gr.Slider(0.0, 1.0, value=0.9, step=0.05, label="Top-p")
-                max_tokens = gr.Slider(64, 4096, value=512, step=64, label="Max tokens")
-
-                gr.Markdown(
-                    '<p style="font-weight:600;font-size:14px;color:#2d3142;'
-                    'margin-bottom:4px;margin-top:12px;">Steering</p>'
-                )
-                steering_enabled = gr.Checkbox(label="Enable steering", value=False)
-                strategy = gr.Dropdown(
-                    choices=["temperature_boost"],
-                    value="temperature_boost",
-                    label="Strategy",
-                )
-                threshold = gr.Slider(
-                    0.0, 1.0, value=0.8, step=0.05, label="Threshold",
-                    info="Probe score above this triggers intervention",
-                )
-                boost_temp = gr.Slider(
-                    1.0, 5.0, value=1.5, step=0.1, label="Boost temperature",
-                )
-
-            with gr.Column(scale=3):
-                output_html = gr.HTML(
-                    value='<div style="color:#8a8fa0;font-style:italic;">Output will appear here...</div>',
-                    elem_id="output-panel",
-                    label="Generated Text",
-                )
-
-                gr.Markdown(
-                    '<div style="font-weight:600;font-size:14px;color:#2d3142;'
-                    'margin-top:18px;margin-bottom:2px;">Degeneration Score</div>'
-                    '<div style="font-size:12px;color:#8a8fa0;margin-bottom:8px;">'
-                    'Per-token probe output (0 = natural, 1 = degenerate). '
-                    'The dashed line marks the steering threshold.</div>'
-                )
-                score_bar = gr.HTML(
-                    value=_build_score_bar([], 0.8),
-                    elem_id="score-panel",
-                )
-
-                with gr.Accordion("Temperature trace", open=False):
+            # Controls + Output
+            with gr.Row():
+                with gr.Column(scale=1, min_width=260, elem_id="controls-panel"):
                     gr.Markdown(
+                        '<p style="font-weight:600;font-size:14px;color:#2d3142;margin-bottom:4px;">'
+                        'Generation</p>'
+                    )
+                    temperature = gr.Slider(
+                        0.0, 2.0, value=0.01, step=0.01, label="Temperature",
+                    )
+                    top_p = gr.Slider(0.0, 1.0, value=0.9, step=0.05, label="Top-p")
+                    max_tokens = gr.Slider(64, 4096, value=512, step=64, label="Max tokens")
+
+                    gr.HTML('<div id="steering-divider"></div>')
+
+                    gr.Markdown(
+                        '<p style="font-weight:600;font-size:14px;color:#2d3142;'
+                        'margin-bottom:4px;">Steering</p>'
+                    )
+                    steering_enabled = gr.Checkbox(label="Enable steering", value=False)
+                    strategy = gr.Dropdown(
+                        choices=["temperature_boost"],
+                        value="temperature_boost",
+                        label="Strategy",
+                    )
+                    threshold = gr.Slider(
+                        0.0, 1.0, value=0.8, step=0.05, label="Threshold",
+                    )
+                    boost_temp = gr.Slider(
+                        1.0, 5.0, value=1.5, step=0.1, label="Boost temperature",
+                    )
+
+                    with gr.Row(elem_id="action-row"):
+                        generate_btn = gr.Button("Generate", variant="primary", scale=2)
+                        stop_btn = gr.Button("Stop", variant="secondary", scale=1)
+
+                with gr.Column(scale=3):
+                    output_html = gr.HTML(
+                        value='<div style="color:#8a8fa0;font-style:italic;">Output will appear here...</div>',
+                        elem_id="output-panel",
+                        label="Generated Text",
+                    )
+
+                    gr.Markdown(
+                        '<div style="font-weight:600;font-size:14px;color:#2d3142;'
+                        'margin-top:18px;margin-bottom:2px;">Degeneration Score</div>'
                         '<div style="font-size:12px;color:#8a8fa0;margin-bottom:8px;">'
-                        'Sampling temperature at each generated token. '
-                        'Moves when you slide the Temperature control mid-stream.</div>'
+                        'Per-token probe output (0 = natural, 1 = degenerate). '
+                        'The dashed line marks the steering threshold.</div>'
                     )
-                    temp_chart = gr.HTML(
-                        value=_build_temp_chart([]),
-                        elem_id="temp-panel",
+                    score_bar = gr.HTML(
+                        value=_build_score_bar([], 0.8),
+                        elem_id="score-panel",
                     )
+
+                    with gr.Accordion("Temperature trace", open=False):
+                        gr.Markdown(
+                            '<div style="font-size:12px;color:#8a8fa0;margin-bottom:8px;">'
+                            'Sampling temperature at each generated token. '
+                            'Moves when you slide the Temperature control mid-stream.</div>'
+                        )
+                        temp_chart = gr.HTML(
+                            value=_build_temp_chart([]),
+                            elem_id="temp-panel",
+                        )
+
+          with gr.Tab("About"):
+            gr.Markdown(ABOUT_MD)
 
         gen_event = generate_btn.click(
             generate_stream,
@@ -484,7 +653,12 @@ def build_ui():
 
 def main():
     demo = build_ui()
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_api=False,
+        quiet=True,
+    )
 
 
 if __name__ == "__main__":
