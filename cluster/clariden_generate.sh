@@ -27,6 +27,11 @@ cd "${PROJ_DIR}"
 # Create log dir
 mkdir -p /iopsstor/scratch/cscs/${USER}/logs
 
+# Load secrets (HF_TOKEN, etc.) from .env if present
+if [ -f "${PROJ_DIR}/.env" ]; then
+    set -a; source "${PROJ_DIR}/.env"; set +a
+fi
+
 # Use scratch for HF cache
 export HF_HOME="/iopsstor/scratch/cscs/${USER}/hf_cache"
 mkdir -p "${HF_HOME}"

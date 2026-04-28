@@ -27,6 +27,11 @@ cd "${PROJ_DIR}"
 
 mkdir -p /iopsstor/scratch/cscs/${USER}/logs
 
+# Load secrets (HF_TOKEN, etc.) from .env if present
+if [ -f "${PROJ_DIR}/.env" ]; then
+    set -a; source "${PROJ_DIR}/.env"; set +a
+fi
+
 export HF_HOME="/iopsstor/scratch/cscs/${USER}/hf_cache"
 export HF_HUB_CACHE="/capstor/store/cscs/swissai/infra01/users/${USER}/hf_models"
 mkdir -p "${HF_HOME}"
