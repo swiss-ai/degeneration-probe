@@ -198,16 +198,15 @@ Open **http://localhost:7860**. The UI auto-connects to the local worker on star
 
 ### Using a trained probe
 
-Pass a checkpoint dir to the worker:
+Pass a checkpoint dir to the worker — `--model` becomes optional because the worker reads it from the checkpoint's `degeneration_meta.json`:
 
 ```bash
 uv run python -m degeneration_probe worker \
-  --model Qwen/Qwen2.5-0.5B \
   --probe outputs/probes/20260428_175939/checkpoint \
   --dtype float32
 ```
 
-The worker reads `degeneration_meta.json` to confirm the probe was trained for the loaded model. The UI then colours each emitted token by the probe's predicted `1 − TTR`.
+If you also pass `--model`, it must match the probe's trained model — the worker errors out at startup otherwise (loading a probe on a different base produces meaningless scores). The UI then colours each emitted token by the probe's predicted score.
 
 ### Steering
 
@@ -232,10 +231,15 @@ For demoing Apertus-8B (or any cluster-only model) with a local UI, the repo shi
 Defaults: `swiss-ai/Apertus-8B-2509` on the `debug` partition (1 h cap). Override via env vars:
 
 ```bash
+# different model, no probe
 MODEL=Qwen/Qwen2.5-7B-Instruct PARTITION=normal TIME=04:00:00 ./cluster/start.sh
+
+# launch with a trained probe — model is auto-derived from the probe's meta,
+# so you don't need MODEL=...
+PROBE=outputs/probes/20260429_001809/checkpoint ./cluster/start.sh
 ```
 
-Available overrides: `MODEL`, `PARTITION`, `TIME`, `WORKER_PORT`, `BACKEND_PORT`, `UI_PORT`, `SSH_HOST`.
+Available overrides: `MODEL`, `PROBE`, `PARTITION`, `TIME`, `WORKER_PORT`, `BACKEND_PORT`, `UI_PORT`, `SSH_HOST`. When `PROBE` is set, `MODEL` is optional (and must match the probe's trained model if supplied).
 
 The script prints the UI URL, SLURM job ID, and node name once the stack is up. Runtime state (PIDs, job ID, logs) lives in `.run/`.
 
