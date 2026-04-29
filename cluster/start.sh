@@ -44,8 +44,9 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_HOST}" true 2>/dev/null; th
     exit 1
 fi
 
-echo "[start] syncing repo on ${SSH_HOST} to origin/serving..."
-ssh "${SSH_HOST}" 'cd ~/degeneration-probe && git fetch --quiet origin serving && git checkout --quiet serving && git reset --quiet --hard origin/serving && git log -1 --oneline'
+BRANCH="${BRANCH:-main}"
+echo "[start] syncing repo on ${SSH_HOST} to origin/${BRANCH}..."
+ssh -A "${SSH_HOST}" "cd ~/degeneration-probe && git fetch --quiet origin ${BRANCH} && git checkout --quiet ${BRANCH} && git reset --quiet --hard origin/${BRANCH} && git submodule update --quiet --init --recursive third_party/hallucination_probes && git log -1 --oneline"
 
 echo "[start] submitting worker job (model=${MODEL}, probe=${PROBE:-<none>}, partition=${PARTITION}, time=${TIME})..."
 JOBID=$(ssh "${SSH_HOST}" "cd ~/degeneration-probe && MODEL='${MODEL}' PROBE='${PROBE}' PORT='${WORKER_PORT}' sbatch --parsable --partition='${PARTITION}' --time='${TIME}' cluster/clariden_worker.sh")
