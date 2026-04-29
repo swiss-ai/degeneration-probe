@@ -25,11 +25,6 @@ def compute_ngram_ttr(token_ids: Sequence[int], n: int) -> float:
     return len(set(ngrams)) / len(ngrams)
 
 
-def compute_ngram_repetition(token_ids: Sequence[int], n: int) -> float:
-    """Compute repetition score as 1 - TTR over n-grams."""
-    return 1.0 - compute_ngram_ttr(token_ids, n)
-
-
 def summarize_chunks(
     token_ids: Sequence[int],
     n_values: Iterable[int],

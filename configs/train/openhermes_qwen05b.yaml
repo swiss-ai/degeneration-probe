@@ -1,0 +1,32 @@
+# Training config for the Qwen-0.5B-base / OpenHermes degeneration probe.
+# `train_data` is set explicitly to a generations.jsonl path; replace the
+# placeholder with the actual run produced by clariden_generate.sh.
+probe:
+  layer: 12             # middle of Qwen-0.5B's 24 layers
+  lora:
+    enabled: true
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+
+train_data:
+  - outputs/generations/20260424_144656/data/generations.jsonl
+
+eval_data: null
+eval_fraction: 0.2
+max_length: 2048
+
+label:
+  window_size: 256
+  primary_n: 2          # bigrams — phrase-level repetition signal
+
+learning_rate:
+  head: 5.0e-3
+  lora: 5.0e-5
+
+batch_size: 4
+num_epochs: 5
+seed: 42
+
+wandb_project: null
+output_dir: outputs/probes

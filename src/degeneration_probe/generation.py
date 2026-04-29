@@ -23,14 +23,18 @@ def generate_for_prompt(
     top_p: float,
 ) -> tuple[list[int], str]:
     """Generate token ids and decoded text for one prompt."""
-    messages = [{"role": "user", "content": prompt}]
-    model_inputs = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        return_tensors="pt",
-        add_generation_prompt=True,
-        return_dict=True,
-    )
+    if tokenizer.chat_template:
+        messages = [{"role": "user", "content": prompt}]
+        model_inputs = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_tensors="pt",
+            add_generation_prompt=True,
+            return_dict=True,
+        )
+    else:
+        # Base models without a chat template: tokenize the raw prompt.
+        model_inputs = tokenizer(prompt, return_tensors="pt")
 
     device = getattr(model, "device", torch.device("cpu"))
     if isinstance(model_inputs, BatchEncoding):
@@ -67,14 +71,11 @@ def run_prompt_batch(
     chunk_size: int,
     n_values: List[int],
     output_path: Path,
-    save_hidden_states: bool = False,
 ) -> Path:
     """Generate completions for a batch of prompts and save chunk-level metrics.
 
     Each record written to ``output_path`` includes the prompt, generated text,
-    chunk-based degeneration metrics, a binary ``degenerating`` label, and a
-    ``hidden_states_path`` field (``null`` until hidden-states extraction is
-    implemented in :mod:`degeneration_probe.representations`).
+    chunk-based degeneration metrics, and a binary ``degenerating`` label.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
@@ -102,12 +103,6 @@ def run_prompt_batch(
         default_n = str(n_values[0])
         binary_label = chunk_summary["metrics_by_n"][default_n]["max_repetition"] > 0.9
 
-        hidden_states_path = None
-        if save_hidden_states:
-            from degeneration_probe.representations import extract_hidden_states  # lazy import
-            result = extract_hidden_states(model, tokenizer, None)
-            hidden_states_path = result.get("hidden_states_path")
-
         append_jsonl(
             output_path,
             {
@@ -121,7 +116,6 @@ def run_prompt_batch(
                 "top_p": top_p,
                 "chunk_summary": chunk_summary,
                 "degenerating": binary_label,
-                "hidden_states_path": hidden_states_path,
             },
         )
 

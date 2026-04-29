@@ -1,0 +1,5 @@
+{
+    "target_layer_name": "ApertusDecoderLayer",
+    "layer_idx": 31,
+    "hidden_size": 4096
+}
