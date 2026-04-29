@@ -4,12 +4,14 @@
 # Defaults target the `debug` partition (fast queue, 1h cap) and the Apertus-8B
 # base model. Override via env vars:
 #   MODEL=Qwen/Qwen2.5-7B-Instruct PARTITION=normal TIME=04:00:00 ./cluster/start.sh
+#   PROBE=outputs/probes/<timestamp>/checkpoint ./cluster/start.sh
 #
 # Requires: ssh clariden working (cscs-key loaded in your agent) and `uv` locally.
 # Runtime state (PIDs, jobid, logs) is written to .run/ — used by stop.sh.
 set -euo pipefail
 
 MODEL="${MODEL:-swiss-ai/Apertus-8B-2509}"
+PROBE="${PROBE:-}"
 PARTITION="${PARTITION:-debug}"
 TIME="${TIME:-01:00:00}"
 WORKER_PORT="${WORKER_PORT:-9000}"
@@ -38,8 +40,8 @@ fi
 echo "[start] syncing repo on ${SSH_HOST} to origin/serving..."
 ssh "${SSH_HOST}" 'cd ~/degeneration-probe && git fetch --quiet origin serving && git checkout --quiet serving && git reset --quiet --hard origin/serving && git log -1 --oneline'
 
-echo "[start] submitting worker job (model=${MODEL}, partition=${PARTITION}, time=${TIME})..."
-JOBID=$(ssh "${SSH_HOST}" "cd ~/degeneration-probe && MODEL='${MODEL}' PORT='${WORKER_PORT}' sbatch --parsable --partition='${PARTITION}' --time='${TIME}' cluster/clariden_worker.sh")
+echo "[start] submitting worker job (model=${MODEL}, probe=${PROBE:-<none>}, partition=${PARTITION}, time=${TIME})..."
+JOBID=$(ssh "${SSH_HOST}" "cd ~/degeneration-probe && MODEL='${MODEL}' PROBE='${PROBE}' PORT='${WORKER_PORT}' sbatch --parsable --partition='${PARTITION}' --time='${TIME}' cluster/clariden_worker.sh")
 if [[ -z "${JOBID}" ]]; then
     echo "error: sbatch returned empty jobid" >&2
     exit 1
