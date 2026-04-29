@@ -178,7 +178,9 @@ def cmd_worker(args: argparse.Namespace) -> None:
     # The worker imports from the fork at load time; make it importable.
     ensure_fork_on_syspath()
     from degeneration_probe.worker.serve import main as worker_main
-    sys.argv = ["worker", "--model", args.model, "--host", args.host, "--port", str(args.port)]
+    sys.argv = ["worker", "--host", args.host, "--port", str(args.port)]
+    if args.model:
+        sys.argv.extend(["--model", args.model])
     if args.probe:
         sys.argv.extend(["--probe", args.probe])
     if args.dtype:
@@ -233,7 +235,7 @@ def main() -> None:
     sp_serve.set_defaults(func=cmd_serve)
 
     sp_worker = subparsers.add_parser("worker", help="Start the inference worker")
-    sp_worker.add_argument("--model", required=True, help="HuggingFace model name")
+    sp_worker.add_argument("--model", default=None, help="HuggingFace model name (optional if --probe is given; the probe meta names its model)")
     sp_worker.add_argument("--probe", default=None, help="Path to saved probe checkpoint")
     sp_worker.add_argument("--dtype", default=None, help="Model dtype")
     sp_worker.add_argument("--host", default="0.0.0.0")

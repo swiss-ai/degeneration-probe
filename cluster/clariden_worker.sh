@@ -33,8 +33,15 @@ export HF_HUB_CACHE="/capstor/store/cscs/swissai/infra01/users/${USER}/hf_models
 mkdir -p "${HF_HOME}"
 
 
-MODEL="${MODEL:-swiss-ai/Apertus-8B-Instruct-2509}"
 PROBE="${PROBE:-}"
+# When a probe is provided, leave MODEL blank by default — the worker
+# resolves it from the probe's degeneration_meta.json (and refuses to
+# load if MODEL disagrees). Only fall back to a default when no probe.
+if [[ -n "${PROBE}" ]]; then
+    MODEL="${MODEL:-}"
+else
+    MODEL="${MODEL:-swiss-ai/Apertus-8B-Instruct-2509}"
+fi
 DTYPE="${DTYPE:-bfloat16}"
 PORT="${PORT:-9000}"
 
@@ -54,12 +61,14 @@ pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
 
 
 WORKER_ARGS=(
-    --model "${MODEL}"
     --host 0.0.0.0
     --port "${PORT}"
     --dtype "${DTYPE}"
 )
 
+if [[ -n "${MODEL}" ]]; then
+    WORKER_ARGS+=(--model "${MODEL}")
+fi
 if [[ -n "${PROBE}" ]]; then
     WORKER_ARGS+=(--probe "${PROBE}")
 fi

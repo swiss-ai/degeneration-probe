@@ -194,18 +194,60 @@ async def start_server(host: str, port: int, engine: GenerationEngine):
     await server.wait_closed()
 
 
+def _resolve_model_name(args_model: str | None, probe_path: str | None) -> str:
+    """Pick the right model to load.
+
+    Rules:
+      - no probe + no --model           → error.
+      - no probe + --model M            → load M.
+      - probe present                   → read its degeneration_meta.json
+                                          for model_name; that's the model.
+                                          If --model is also given and matches,
+                                          fine; if it disagrees, error rather
+                                          than silently load the wrong base.
+    """
+    probe_model: str | None = None
+    if probe_path:
+        meta_path = Path(probe_path) / "degeneration_meta.json"
+        if not meta_path.exists():
+            raise SystemExit(
+                f"Probe checkpoint at {probe_path} is missing degeneration_meta.json — "
+                f"can't determine which model it was trained on."
+            )
+        meta = json.loads(meta_path.read_text())
+        probe_model = meta.get("model_name")
+        if not probe_model:
+            raise SystemExit(
+                f"degeneration_meta.json at {meta_path} has no 'model_name' field."
+            )
+
+    if probe_model is not None:
+        if args_model and args_model != probe_model:
+            raise SystemExit(
+                f"--model {args_model!r} disagrees with the probe's trained model "
+                f"{probe_model!r}. Loading the probe on a different base would give "
+                f"meaningless scores. Either drop --model or pass --model {probe_model!r}."
+            )
+        return probe_model
+
+    if not args_model:
+        raise SystemExit("Must pass either --model or --probe (with a checkpoint that names its model).")
+    return args_model
+
+
 def main():
     parser = argparse.ArgumentParser(description="Start inference worker")
-    parser.add_argument("--model", type=str, required=True, help="HuggingFace model name")
+    parser.add_argument("--model", type=str, default=None, help="HuggingFace model name (optional if --probe is set; the probe's meta names its model)")
     parser.add_argument("--probe", type=str, default=None, help="Path to saved probe checkpoint")
     parser.add_argument("--dtype", type=str, default=None, help="Model dtype (bfloat16, float32, etc.)")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
 
-    print(f"Loading model {args.model}...")
+    model_name = _resolve_model_name(args.model, args.probe)
+    print(f"Loading model {model_name}...")
     dtype = resolve_torch_dtype(args.dtype)
-    model, tokenizer = load_model_and_tokenizer(args.model, torch_dtype=dtype)
+    model, tokenizer = load_model_and_tokenizer(model_name, torch_dtype=dtype)
 
     probe = None
     if args.probe:
@@ -214,7 +256,7 @@ def main():
         from degeneration.probe_loader import load_probe
         probe = load_probe(args.probe, model)
 
-    engine = GenerationEngine(model=model, tokenizer=tokenizer, probe=probe, model_name=args.model)
+    engine = GenerationEngine(model=model, tokenizer=tokenizer, probe=probe, model_name=model_name)
     print("Model loaded. Starting server...")
     asyncio.run(start_server(args.host, args.port, engine))
 

@@ -10,8 +10,15 @@
 # Runtime state (PIDs, jobid, logs) is written to .run/ — used by stop.sh.
 set -euo pipefail
 
-MODEL="${MODEL:-swiss-ai/Apertus-8B-2509}"
 PROBE="${PROBE:-}"
+# When a probe is given, the worker derives the model from the probe's
+# degeneration_meta.json. Only apply the default MODEL when no probe is
+# set, so users don't accidentally load an Apertus probe on the wrong base.
+if [[ -n "${PROBE}" ]]; then
+    MODEL="${MODEL:-}"
+else
+    MODEL="${MODEL:-swiss-ai/Apertus-8B-2509}"
+fi
 PARTITION="${PARTITION:-debug}"
 TIME="${TIME:-01:00:00}"
 WORKER_PORT="${WORKER_PORT:-9000}"
