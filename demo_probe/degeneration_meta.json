@@ -1,0 +1,7 @@
+{
+  "model_name": "swiss-ai/Apertus-8B-Instruct-2509",
+  "lora_enabled": true,
+  "window_size": 256,
+  "primary_n": 2,
+  "ttr_threshold": 0.2
+}

@@ -208,6 +208,13 @@ uv run python -m degeneration_probe worker \
 
 If you also pass `--model`, it must match the probe's trained model — the worker errors out at startup otherwise (loading a probe on a different base produces meaningless scores). The UI then colours each emitted token by the probe's predicted score.
 
+A pre-trained checkpoint for **Apertus-8B-Instruct-2509** ships in [`demo_probe/`](demo_probe/) (~4.8 MB) so you can skip training and go straight to the live UI:
+
+```bash
+PROBE=demo_probe ./cluster/start.sh                # cluster
+uv run python -m degeneration_probe worker --probe demo_probe --dtype bfloat16  # local (needs the 8B model on a GPU)
+```
+
 ### Steering
 
 Toggle steering in the UI sidebar. When the probe score crosses the threshold, the active strategy modifies the model's output distribution to break out of repetition.
