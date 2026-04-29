@@ -10,6 +10,7 @@ The repo has two tracks that share one codebase and one CLI (`python -m degenera
 ## Contents
 
 - [Setup](#setup)
+- [Try the demo (one command)](#try-the-demo-one-command)
 - [Building a probe](#building-a-probe)
   - [Train on the aggregate HF dataset (recommended)](#train-on-the-aggregate-hf-dataset-recommended)
   - [Generate your own data](#generate-your-own-data)
@@ -23,6 +24,7 @@ The repo has two tracks that share one codebase and one CLI (`python -m degenera
 - [Cluster (CSCS Clariden)](#cluster-cscs-clariden)
   - [One-shot UI launch](#one-shot-ui-launch)
   - [Submitting batch jobs](#submitting-batch-jobs)
+- [Troubleshooting](#troubleshooting)
 - [Reference](#reference)
   - [CLI commands](#cli-commands)
   - [API endpoints](#api-endpoints)
@@ -38,7 +40,9 @@ The repo has two tracks that share one codebase and one CLI (`python -m degenera
 
 - Python 3.10–3.12
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
-- A HuggingFace [access token](https://huggingface.co/settings/tokens) — needed for gated datasets and models. Request access to [`luca-sartori/degeneration-probe-instruct`](https://huggingface.co/datasets/luca-sartori/degeneration-probe-instruct) if you plan to use the aggregate dataset.
+- A HuggingFace [access token](https://huggingface.co/settings/tokens). Request access on the HF page for whichever of these you need:
+  - [`luca-sartori/degeneration-probe-instruct`](https://huggingface.co/datasets/luca-sartori/degeneration-probe-instruct) — the gated training dataset (needed if you want to train your own probe).
+  - [`swiss-ai/Apertus-8B-Instruct-2509`](https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509) — the gated base model used by the demo probe and by Apertus generation/training (needed for *running* the demo or training on Apertus).
 - A GPU is recommended. Qwen-0.5B runs on CPU/MPS but is slow.
 
 **Install**
@@ -60,6 +64,18 @@ set -a; source .env; set +a
 ```
 
 The cluster sbatch scripts source `.env` automatically.
+
+---
+
+## Try the demo (one command)
+
+If you just want to see the probe in action without training anything: a pre-trained Apertus-8B-Instruct probe ships in [`demo_probe/`](demo_probe/) (4.8 MB). After the Setup steps above plus the [Cluster prerequisites](#one-shot-ui-launch) (cscs-key in your ssh-agent, `~/degeneration-probe` cloned on Clariden, `my_env` container set up), run:
+
+```bash
+PROBE=demo_probe ./cluster/start.sh
+```
+
+That's it. ~3–5 min later the script prints `UI: http://localhost:7860`. Tear down with `./cluster/stop.sh`.
 
 ---
 
@@ -208,11 +224,10 @@ uv run python -m degeneration_probe worker \
 
 If you also pass `--model`, it must match the probe's trained model — the worker errors out at startup otherwise (loading a probe on a different base produces meaningless scores). The UI then colours each emitted token by the probe's predicted score.
 
-A pre-trained checkpoint for **Apertus-8B-Instruct-2509** ships in [`demo_probe/`](demo_probe/) (~4.8 MB) so you can skip training and go straight to the live UI:
+A pre-trained checkpoint for **Apertus-8B-Instruct-2509** ships in [`demo_probe/`](demo_probe/) (~4.8 MB). For the cluster-backed UI launcher see [Try the demo (one command)](#try-the-demo-one-command); for a local worker (only viable on a beefy GPU since the base model is 8B):
 
 ```bash
-PROBE=demo_probe ./cluster/start.sh                # cluster
-uv run python -m degeneration_probe worker --probe demo_probe --dtype bfloat16  # local (needs the 8B model on a GPU)
+uv run python -m degeneration_probe worker --probe demo_probe --dtype bfloat16
 ```
 
 ### Steering
@@ -229,41 +244,42 @@ Available strategies:
 
 ### One-shot UI launch
 
-For demoing Apertus-8B (or any cluster-only model) with a local UI, the repo ships a launcher that submits the worker job, opens the SSH tunnel, and starts the local backend + UI:
+For demoing Apertus-8B (or any cluster-only model) with a local UI, the repo ships a launcher that submits the worker job, opens the SSH tunnel, and starts the local backend + UI.
+
+**Prerequisites** (one-time, per machine)
+
+- SSH access to Clariden — load the cscs cert into your agent: `ssh-add -t 1d ~/.ssh/cscs-key`.
+- The repo cloned at `~/degeneration-probe` on Clariden (`start.sh` hard-resets it to `origin/serving` on every launch).
+- A container environment `my_env` set up in `~/.edf/` on Clariden.
+- *Optional*: for agent-forwarded git on Clariden, also load your GitHub key and publish the agent socket: `ssh-add ~/.ssh/id_ed25519 && launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"`.
+
+**Launch**
 
 ```bash
+# default: bare Apertus-8B base model on the debug partition (1 h cap)
 ./cluster/start.sh
-```
 
-Defaults: `swiss-ai/Apertus-8B-2509` on the `debug` partition (1 h cap). Override via env vars:
+# the demo probe (auto-resolves to Apertus-8B-Instruct-2509)
+PROBE=demo_probe ./cluster/start.sh
 
-```bash
-# different model, no probe
+# any other model, no probe
 MODEL=Qwen/Qwen2.5-7B-Instruct PARTITION=normal TIME=04:00:00 ./cluster/start.sh
 
-# launch with a trained probe — model is auto-derived from the probe's meta,
-# so you don't need MODEL=...
+# a probe you trained yourself
 PROBE=outputs/probes/20260429_001809/checkpoint ./cluster/start.sh
 ```
 
-Available overrides: `MODEL`, `PROBE`, `PARTITION`, `TIME`, `WORKER_PORT`, `BACKEND_PORT`, `UI_PORT`, `SSH_HOST`. When `PROBE` is set, `MODEL` is optional (and must match the probe's trained model if supplied).
+Available env vars: `MODEL`, `PROBE`, `PARTITION`, `TIME`, `WORKER_PORT`, `BACKEND_PORT`, `UI_PORT`, `SSH_HOST`. When `PROBE` is set, `MODEL` is optional (and must match the probe's trained model if supplied).
 
-The script prints the UI URL, SLURM job ID, and node name once the stack is up. Runtime state (PIDs, job ID, logs) lives in `.run/`.
+The script prints `UI: http://localhost:7860` once the stack is up (~3–5 min). Runtime state (PIDs, job ID, logs) lives in `.run/`.
 
-Tear down:
+**Tear down**
 
 ```bash
 ./cluster/stop.sh
 ```
 
-This kills local processes, closes the tunnel, and cancels the SLURM job.
-
-**Prerequisites**
-
-- SSH access to Clariden (cscs-key loaded: `ssh-add -t 1d ~/.ssh/cscs-key`).
-- For agent-forwarded git on Clariden, also load your GitHub key and publish the agent socket: `ssh-add ~/.ssh/id_ed25519 && launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"`.
-- The repo cloned at `~/degeneration-probe` (`start.sh` hard-resets it to `origin/serving` on every launch).
-- A container environment `my_env` set up in `~/.edf/`.
+Kills local processes, closes the tunnel, and cancels the SLURM job.
 
 ### Submitting batch jobs
 
@@ -283,6 +299,28 @@ sbatch cluster/clariden_generate.sh configs/generate/openhermes_apertus8b.yaml
 Logs land in `/iopsstor/scratch/cscs/$USER/logs/degen_{train,threshold}_<jobid>.{out,err}`. Outputs (probes / generations) land in `~/degeneration-probe/outputs/`.
 
 The sbatch scripts source `.env` so `HF_TOKEN` is available to gated dataset / model downloads.
+
+---
+
+## Troubleshooting
+
+**`error: runtime state exists in .run/. Run ./cluster/stop.sh first.`**
+A previous launch left stale state. `./cluster/stop.sh` cleans it up. If `stop.sh` itself complains about a missing PID, the processes are already dead — `rm .run/*.pid .run/jobid` and try again.
+
+**`ssh clariden` says "Permission denied (publickey)" or just hangs at `ssh -W [clariden]:22 cscs-ela`.**
+Your cscs-key isn't loaded into the agent (or its 24-hour `-t 1d` lifetime expired). Re-add: `ssh-add -t 1d ~/.ssh/cscs-key`.
+
+**`gh` / git commands inside Clariden fail with "Permission denied (publickey)".**
+Agent forwarding has nothing to forward — your local ssh-agent isn't reachable. In your terminal: `eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519` and (on macOS) publish the socket so non-interactive shells inherit it: `launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"`.
+
+**HF download fails with 401 / 403.**
+Either `HF_TOKEN` isn't in `.env`, or your account hasn't been granted access to a gated repo. Check `huggingface-cli whoami` (must show your username) and visit the dataset/model page on huggingface.co to request access. After approval, downloads work immediately — no retry delay.
+
+**Worker errors out with `--model X disagrees with the probe's trained model Y`.**
+The probe checkpoint's `degeneration_meta.json` records which model it was trained on. The worker refuses to load a probe on a different base because the scores would be meaningless. Drop your `--model` flag, or pass the matching one.
+
+**`UI: http://localhost:7860` printed but the page is unreachable.**
+The Gradio process is binding to `0.0.0.0` — try the URL in a fresh tab. If still empty, check `tail .run/logs/ui.log` for an import error or port collision. Default port 7860 conflicts with other Gradio apps; override with `UI_PORT=7861 ./cluster/start.sh`.
 
 ---
 
