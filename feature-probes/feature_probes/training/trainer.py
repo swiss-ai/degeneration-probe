@@ -243,6 +243,25 @@ class ProbeTrainer(Trainer):
         )
 
         return optimizer
+
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        """
+        Ensure the custom optimizer exists before Transformers creates a scheduler.
+
+        Some Trainer versions call create_scheduler directly during training setup
+        instead of going through create_optimizer_and_scheduler.
+        """
+        if optimizer is None:
+            optimizer = self.optimizer
+
+        if optimizer is None:
+            optimizer = self.create_optimizer()
+            self.optimizer = optimizer
+
+        return super().create_scheduler(
+            num_training_steps=num_training_steps,
+            optimizer=optimizer,
+        )
     
     def create_optimizer_and_scheduler(self, num_training_steps: int):
         """
