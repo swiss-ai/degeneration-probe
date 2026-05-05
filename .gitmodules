@@ -1,4 +1,0 @@
-[submodule "third_party/hallucination_probes"]
-	path = third_party/hallucination_probes
-	url = https://github.com/mreihs/hallucination_probes.git
-	branch = degeneration-adaptation
