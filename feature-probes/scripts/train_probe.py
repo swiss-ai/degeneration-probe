@@ -104,7 +104,6 @@ def main(training_config: TrainingConfig):
 
     training_args = TrainingArguments(
         output_dir=str(training_config.probe_config.probe_path),
-        overwrite_output_dir=True,
         per_device_train_batch_size=training_config.per_device_train_batch_size,
         per_device_eval_batch_size=training_config.per_device_eval_batch_size,
         max_steps=training_config.max_steps,
