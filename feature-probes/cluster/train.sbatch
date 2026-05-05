@@ -25,6 +25,6 @@ export WANDB_API_KEY="$(cat ~/keys/.wandb_key)"
 
 srun --environment=$REPO/cluster/env.toml \
     python scripts/train_probe.py \
-        model=llama \
+        model=apertus \
         training=no_lora \
         dataset=our_long_form
