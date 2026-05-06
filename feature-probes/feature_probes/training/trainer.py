@@ -179,6 +179,8 @@ class ProbeTrainer(Trainer):
         """
         Create optimizer with separate learning rates for probe head and LoRA adapters.
         """
+        if self.optimizer is not None:
+            return self.optimizer
         
         # Get the device from the underlying model if using DataParallel
         model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
@@ -237,12 +239,12 @@ class ProbeTrainer(Trainer):
         print(f"lora_lr: {self.args.lora_lr} (type={type(self.args.lora_lr)})")
         print(f"probe_head_lr: {self.args.probe_head_lr} (type={type(self.args.probe_head_lr)})")
         
-        optimizer = AdamW(
+        self.optimizer = AdamW(
             param_groups,
             eps=self.args.adam_epsilon if hasattr(self.args, 'adam_epsilon') else 1e-8
         )
 
-        return optimizer
+        return self.optimizer
 
     def create_scheduler(self, num_training_steps: int, optimizer=None):
         """
@@ -251,12 +253,11 @@ class ProbeTrainer(Trainer):
         Some Trainer versions call create_scheduler directly during training setup
         instead of going through create_optimizer_and_scheduler.
         """
-        if optimizer is None:
-            optimizer = self.optimizer
+        if self.lr_scheduler is not None:
+            return self.lr_scheduler
 
         if optimizer is None:
             optimizer = self.create_optimizer()
-            self.optimizer = optimizer
 
         return super().create_scheduler(
             num_training_steps=num_training_steps,
