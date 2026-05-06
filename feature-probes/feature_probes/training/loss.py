@@ -41,6 +41,51 @@ def compute_probe_bce_loss(
         return torch.tensor(0.0, device=probe_logits.device)
 
 
+def compute_probe_regression_loss(
+    probe_logits: Float[Tensor, 'batch_size seq_len'],
+    regression_labels: Float[Tensor, 'batch_size seq_len'],
+    regression_weights: Float[Tensor, 'batch_size seq_len'],
+    loss_type: str = "mse",
+    output_activation: str = "sigmoid",
+    ignore_label: float = -100.0,
+):
+    """Compute a masked token-level regression loss for repetition scores."""
+    if output_activation == "sigmoid":
+        predictions = torch.sigmoid(probe_logits.float())
+    elif output_activation == "none":
+        predictions = probe_logits.float()
+    else:
+        raise ValueError(f"Unsupported regression output activation: {output_activation}")
+
+    valid_mask = regression_labels != ignore_label
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=probe_logits.device)
+
+    predictions = predictions[valid_mask]
+    targets = regression_labels[valid_mask].float()
+    weights = regression_weights[valid_mask].float()
+
+    if loss_type == "mse":
+        losses = F.mse_loss(predictions, targets, reduction="none")
+    elif loss_type == "smooth_l1":
+        losses = F.smooth_l1_loss(predictions, targets, reduction="none")
+    elif loss_type == "l1":
+        losses = F.l1_loss(predictions, targets, reduction="none")
+    else:
+        raise ValueError(f"Unsupported regression loss type: {loss_type}")
+
+    weight_sum = weights.sum()
+    if weight_sum <= 0:
+        return losses.mean()
+
+    loss = (losses * weights).sum() / weight_sum
+    if torch.isnan(loss):
+        print("WARNING: NaN detected in compute_probe_regression_loss. Returning 0.0")
+        return torch.tensor(0.0, device=probe_logits.device)
+
+    return loss
+
+
 def compute_probe_max_aggregation_loss(
     probe_logits: Float[Tensor, 'batch_size seq_len'],
     classification_labels: Float[Tensor, 'batch_size seq_len'],

@@ -110,7 +110,8 @@ class TokenizedProbingDataset(Dataset):
         
         labels, weights, pos_spans, neg_spans = self._compute_positional_labels(
             input_ids=input_ids,
-            item=item
+            item=item,
+            attention_mask=attention_mask,
         )
         
         input_str: str = self.tokenizer.decode(input_ids)
@@ -168,7 +169,8 @@ class TokenizedProbingDataset(Dataset):
     def _compute_positional_labels(
         self,
         input_ids: torch.Tensor,
-        item: ProbingItem
+        item: ProbingItem,
+        attention_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[List[int]], List[List[int]]]:
         """
         Computes positional labels for a sequence of tokens based on annotated spans.
@@ -188,7 +190,6 @@ class TokenizedProbingDataset(Dataset):
             Tuple of (labels, weights, pos_spans, neg_spans)
         """
         input_str: str = self.tokenizer.decode(input_ids)
-        completion: str = item.completion
         
         positive_indices: List[int] = []    # indices of hallucinated spans
         negative_indices: List[int] = []    # indices of supported spans
@@ -210,6 +211,14 @@ class TokenizedProbingDataset(Dataset):
         )
         completion_start_idx = assistant_tokens_slice.stop
         cur_idx = assistant_tokens_slice.stop
+
+        if item.token_labels is not None:
+            return self._compute_token_level_labels(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                completion_start_idx=completion_start_idx,
+                item=item,
+            )
         
         # Sort spans by their index in the text
         spans = sorted(item.spans, key=lambda x: x.index)
@@ -286,6 +295,61 @@ class TokenizedProbingDataset(Dataset):
             self.print_token_labels(input_ids, positive_indices, negative_indices, ignore_indices, spans)
         
         return labels, weights, positive_spans, negative_spans
+
+    def _compute_token_level_labels(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        completion_start_idx: int,
+        item: ProbingItem,
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[List[int]], List[List[int]]]:
+        """Map precomputed token-level scores onto the tokenized assistant response."""
+        labels = torch.full((len(input_ids),), -100.0, dtype=torch.float32)
+        weights = torch.zeros((len(input_ids),), dtype=torch.float32)
+
+        token_labels = torch.tensor(item.token_labels, dtype=torch.float32)
+        available_completion_indices = torch.where(
+            (attention_mask == 1)
+            & (torch.arange(len(input_ids), device=attention_mask.device) >= completion_start_idx)
+            & (input_ids != self.tokenizer.pad_token_id)
+        )[0]
+        try:
+            completion_slice = find_string_in_tokens(
+                item.completion,
+                input_ids[completion_start_idx:],
+                self.tokenizer,
+            )
+            completion_start = completion_start_idx + completion_slice.start
+            completion_stop = completion_start_idx + completion_slice.stop
+            available_completion_indices = torch.arange(
+                completion_start,
+                completion_stop,
+                device=attention_mask.device,
+            )
+        except (AssertionError, ValueError):
+            pass
+
+        if len(token_labels) == 0 or len(available_completion_indices) == 0:
+            return labels, weights, [], []
+
+        num_labels = min(len(token_labels), len(available_completion_indices))
+        if len(token_labels) != len(available_completion_indices):
+            print(
+                f"Token-label count mismatch for item: got {len(token_labels)} labels "
+                f"and {len(available_completion_indices)} assistant tokens. "
+                f"Using first {num_labels} aligned positions."
+            )
+
+        target_indices = available_completion_indices[:num_labels].cpu()
+        labels[target_indices] = token_labels[:num_labels]
+
+        valid_mask = labels != -100.0
+        weights[valid_mask] = 1.0
+
+        self._num_added_spans += int(valid_mask.sum().item())
+        self._num_skipped_spans += max(0, len(token_labels) - num_labels)
+
+        return labels, weights, [], []
     
     def _shuffle_items(self):
         """Shuffle the items using the configured seed."""

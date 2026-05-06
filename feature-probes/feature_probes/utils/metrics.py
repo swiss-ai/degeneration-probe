@@ -94,6 +94,59 @@ def compute_clf_metrics(
     }
 
 
+def compute_regression_metrics(
+    predictions: np.ndarray,
+    labels: np.ndarray,
+) -> Dict[str, float]:
+    """Compute token-level regression metrics."""
+    predictions = np.asarray(predictions, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.float64)
+    valid_mask = np.isfinite(predictions) & np.isfinite(labels)
+
+    predictions = predictions[valid_mask]
+    labels = labels[valid_mask]
+
+    if len(labels) == 0:
+        return {
+            "mse": float("nan"),
+            "rmse": float("nan"),
+            "mae": float("nan"),
+            "pearson": float("nan"),
+            "spearman": float("nan"),
+            "target_mean": float("nan"),
+            "prediction_mean": float("nan"),
+            "total_samples": 0,
+        }
+
+    errors = predictions - labels
+    mse = float(np.mean(errors ** 2))
+    mae = float(np.mean(np.abs(errors)))
+
+    if len(labels) > 1 and np.std(predictions) > 0 and np.std(labels) > 0:
+        pearson = float(np.corrcoef(predictions, labels)[0, 1])
+    else:
+        pearson = float("nan")
+
+    try:
+        from scipy.stats import spearmanr
+
+        spearman_result = spearmanr(predictions, labels)
+        spearman = float(spearman_result.correlation)
+    except Exception:
+        spearman = float("nan")
+
+    return {
+        "mse": mse,
+        "rmse": float(np.sqrt(mse)),
+        "mae": mae,
+        "pearson": pearson,
+        "spearman": spearman,
+        "target_mean": float(np.mean(labels)),
+        "prediction_mean": float(np.mean(predictions)),
+        "total_samples": int(len(labels)),
+    }
+
+
 def compute_metrics(
     predictions: np.ndarray,
     labels: np.ndarray,
@@ -293,6 +346,16 @@ def print_eval_metrics(
         print(f" - LM Loss:     {metrics.get(f'{prefix}lm_loss', 0):.4f}")
         print(f" - Probe Loss:  {metrics.get(f'{prefix}probe_loss', 0):.4f}")
         print(f" - Sparsity:    {metrics.get(f'{prefix}sparsity', 0):.4f}")
+
+    if f'{prefix}mse' in metrics:
+        print("\nRegression Metrics:")
+        print(f" - MSE:         {metrics[f'{prefix}mse']:.4f}")
+        print(f" - RMSE:        {metrics[f'{prefix}rmse']:.4f}")
+        print(f" - MAE:         {metrics[f'{prefix}mae']:.4f}")
+        print(f" - Pearson:     {metrics[f'{prefix}pearson']:.4f}")
+        print(f" - Spearman:    {metrics[f'{prefix}spearman']:.4f}")
+        print(f" - Target mean: {metrics[f'{prefix}target_mean']:.4f}")
+        print(f" - Pred. mean:  {metrics[f'{prefix}prediction_mean']:.4f}")
     
     # Print classification metrics for different aggregation levels
     for agg_level in ['all', 'span', 'span_max']:

@@ -18,7 +18,7 @@ from feature_probes.utils.metrics import print_eval_metrics
 
 from feature_probes.data.dataset import TokenizedProbingDataset
 from feature_probes.config import TrainingConfig
-from feature_probes.training.loss import compute_probe_bce_loss, compute_kl_divergence_loss, compute_probe_max_aggregation_loss, mask_high_loss_spans
+from feature_probes.training.loss import compute_probe_bce_loss, compute_kl_divergence_loss, compute_probe_max_aggregation_loss, compute_probe_regression_loss, mask_high_loss_spans
 from feature_probes.probes.value_head_probe import ValueHeadProbe
 from feature_probes.evaluation.evaluate import evaluate_probe
 
@@ -38,8 +38,11 @@ class ProbeTrainer(Trainer):
         **kwargs
     ):
         super().__init__(model=probe, **kwargs)
+        self.task: str = cfg.task
         self.lambda_lm: float = cfg.lambda_lm
         self.lambda_kl: float = cfg.lambda_kl
+        self.regression_loss: str = cfg.regression_loss
+        self.regression_output_activation: str = cfg.regression_output_activation
         self.anneal_max_aggr: bool = cfg.anneal_max_aggr
         self.anneal_warmup: float = cfg.anneal_warmup
         self.eval_datasets: List[TokenizedProbingDataset] = eval_datasets
@@ -107,7 +110,7 @@ class ProbeTrainer(Trainer):
             )
 
         # Mask high-loss spans if configured
-        if self.high_loss_threshold is not None:
+        if self.task == "hallucination" and self.high_loss_threshold is not None:
             classification_labels = mask_high_loss_spans(
                 lm_model=model.model,
                 input_ids=input_ids,
@@ -117,28 +120,41 @@ class ProbeTrainer(Trainer):
                 threshold=self.high_loss_threshold,
             )
 
-        # Compute probe loss
-        probe_loss = compute_probe_bce_loss(
-            probe_logits=probe_logits,
-            classification_labels=classification_labels,
-            classification_weights=classification_weights,
-        )
-
-        # Span-level max aggregation loss (if enabled)
-        if self.anneal_max_aggr:
-            max_aggr_probe_loss = compute_probe_max_aggregation_loss(
+        if self.task == "hallucination":
+            # Compute probe loss
+            probe_loss = compute_probe_bce_loss(
                 probe_logits=probe_logits,
                 classification_labels=classification_labels,
                 classification_weights=classification_weights,
-                positive_spans=pos_spans,
-                negative_spans=neg_spans,
             )
-            
-            omega = min(1.0, self.get_training_progress() / self.anneal_warmup)
-            probe_loss = (1 - omega) * probe_loss + omega * max_aggr_probe_loss
-        else:
+
+            # Span-level max aggregation loss (if enabled)
+            if self.anneal_max_aggr:
+                max_aggr_probe_loss = compute_probe_max_aggregation_loss(
+                    probe_logits=probe_logits,
+                    classification_labels=classification_labels,
+                    classification_weights=classification_weights,
+                    positive_spans=pos_spans,
+                    negative_spans=neg_spans,
+                )
+                
+                omega = min(1.0, self.get_training_progress() / self.anneal_warmup)
+                probe_loss = (1 - omega) * probe_loss + omega * max_aggr_probe_loss
+            else:
+                omega = 0.0
+                max_aggr_probe_loss = torch.tensor(0.0, device=device)
+        elif self.task == "repetition_score":
+            probe_loss = compute_probe_regression_loss(
+                probe_logits=probe_logits,
+                regression_labels=classification_labels,
+                regression_weights=classification_weights,
+                loss_type=self.regression_loss,
+                output_activation=self.regression_output_activation,
+            )
             omega = 0.0
             max_aggr_probe_loss = torch.tensor(0.0, device=device)
+        else:
+            raise ValueError(f"Unsupported training task: {self.task}")
 
         # Combine losses
         loss = (
@@ -157,8 +173,10 @@ class ProbeTrainer(Trainer):
             'active_positions': int(torch.sum((classification_labels != self.ignore_label)).item()),
         }
 
-        if self.anneal_max_aggr:
+        if self.task == "hallucination" and self.anneal_max_aggr:
             log_dict['max_aggr_probe_loss'] = float(max_aggr_probe_loss.detach().float().item())
+        if self.task == "repetition_score":
+            log_dict["regression_loss"] = float(probe_loss.detach().float().item())
 
         self.log(log_dict)
 
@@ -311,6 +329,9 @@ class ProbeTrainer(Trainer):
                 model,
                 eval_dataloader,
                 threshold=self.threshold,
+                task=self.task,
+                regression_loss=self.regression_loss,
+                regression_output_activation=self.regression_output_activation,
                 metric_key_prefix=dataset.config.dataset_id,
                 verbose=False,
                 save_roc_curves=save_roc_curves,

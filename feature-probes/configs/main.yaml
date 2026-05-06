@@ -16,6 +16,7 @@ probe_config:
 
 wandb_project: "hallucination-probes"
 wandb_tags: []
+task: hallucination
 upload_to_hf: false
 save_evaluation_metrics: true
 save_roc_curves: true
@@ -33,3 +34,5 @@ gradient_accumulation_steps: 1
 max_grad_norm: 1.0
 logging_steps: 50
 seed: 42
+regression_loss: mse
+regression_output_activation: sigmoid

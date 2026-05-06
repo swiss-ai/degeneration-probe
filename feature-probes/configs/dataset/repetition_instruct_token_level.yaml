@@ -1,0 +1,38 @@
+# @package _global_
+dataset:
+  short_name: "repetition"
+
+wandb_project: "degeneration-probes"
+task: repetition_score
+lambda_lm: 0.0
+lambda_kl: 0.0
+anneal_max_aggr: false
+save_roc_curves: false
+regression_loss: mse
+regression_output_activation: sigmoid
+
+train_datasets:
+  - dataset_id: "repetition_train"
+    hf_repo: "luca-sartori/degeneration-probe-instruct-token-level"
+    subset: null
+    split: "train"
+    max_length: 1536
+    default_ignore: true
+    last_span_token: false
+    ignore_buffer: 0
+    pos_weight: 1.0
+    neg_weight: 1.0
+    shuffle: true
+    seed: 42
+    process_on_the_fly: false
+
+eval_datasets:
+  - dataset_id: "repetition_test"
+    hf_repo: "luca-sartori/degeneration-probe-instruct-token-level"
+    subset: null
+    split: "test"
+    max_length: 1536
+    pos_weight: 1.0
+    neg_weight: 1.0
+    default_ignore: true
+    shuffle: false

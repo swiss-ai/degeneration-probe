@@ -1,6 +1,7 @@
 """Dataset converters for different HuggingFace dataset formats to probing format."""
 
-from typing import Callable, Dict, List, Optional
+from collections.abc import Iterable, Sequence
+from typing import Callable, List, Optional
 
 from datasets import Dataset
 
@@ -200,12 +201,155 @@ def prepare_synthetic(dataset: Dataset) -> List[ProbingItem]:
     return probing_items
 
 
+def _first_present(item: dict, fields: Sequence[str]):
+    """Return the first present field value from a HF row."""
+    for field in fields:
+        if field in item and item[field] is not None:
+            return item[field], field
+    return None, None
+
+
+def _as_float_labels(values: Iterable) -> List[float]:
+    """Normalize token-level label payloads to floats."""
+    labels: List[float] = []
+
+    for value in values:
+        if value is None:
+            labels.append(-100.0)
+        elif isinstance(value, dict):
+            score, _ = _first_present(
+                value,
+                [
+                    "repetition_score",
+                    "repetition",
+                    "score",
+                    "label",
+                    "target",
+                    "value",
+                ],
+            )
+            labels.append(-100.0 if score is None else float(score))
+        else:
+            labels.append(float(value))
+
+    return labels
+
+
+def _as_token_strings(values: Optional[Iterable]) -> Optional[List[str]]:
+    """Normalize optional token payloads to strings."""
+    if values is None:
+        return None
+
+    tokens: List[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            token, _ = _first_present(value, ["token", "text", "value", "piece"])
+            tokens.append("" if token is None else str(token))
+        else:
+            tokens.append(str(value))
+
+    return tokens
+
+
+def _apply_optional_token_mask(labels: List[float], item: dict) -> List[float]:
+    """Apply common valid/ignore mask conventions to token labels."""
+    mask, field = _first_present(
+        item,
+        [
+            "label_mask",
+            "valid_mask",
+            "token_mask",
+            "completion_mask",
+            "loss_mask",
+            "ignore_mask",
+        ],
+    )
+
+    if mask is None:
+        return labels
+
+    mask = list(mask)
+    masked_labels = list(labels)
+    for i, keep_or_ignore in enumerate(mask[: len(masked_labels)]):
+        if field == "ignore_mask":
+            should_ignore = bool(keep_or_ignore)
+        else:
+            should_ignore = not bool(keep_or_ignore)
+
+        if should_ignore:
+            masked_labels[i] = -100.0
+
+    return masked_labels
+
+
+def prepare_repetition_instruct_token_level_dataset(dataset: Dataset) -> List[ProbingItem]:
+    """Prepare token-level repetition-score data for regression probing."""
+    probing_items: List[ProbingItem] = []
+
+    prompt_fields = ["prompt", "instruction", "query", "question", "input"]
+    completion_fields = ["completion", "response", "answer", "output", "generated_text"]
+    score_fields = [
+        "repetition_scores",
+        "token_repetition_scores",
+        "repetition_score",
+        "scores",
+        "token_scores",
+        "labels",
+        "token_labels",
+        "targets",
+    ]
+    token_fields = ["tokens", "completion_tokens", "generated_tokens", "response_tokens"]
+
+    for hf_item in dataset:
+        prompt, _ = _first_present(hf_item, prompt_fields)
+        completion, _ = _first_present(hf_item, completion_fields)
+
+        if (prompt is None or completion is None) and "conversation" in hf_item:
+            conversation = hf_item["conversation"]
+            if len(conversation) >= 2:
+                prompt = conversation[-2].get("content", prompt)
+                completion = conversation[-1].get("content", completion)
+
+        scores, score_field = _first_present(hf_item, score_fields)
+        tokens, _ = _first_present(hf_item, token_fields)
+
+        if prompt is None or completion is None or scores is None:
+            available_fields = list(hf_item.keys())
+            raise ValueError(
+                "Could not parse repetition-score dataset row. "
+                f"Need prompt/completion/scores fields. Available fields: {available_fields}. "
+                f"Recognized score fields: {score_fields}."
+            )
+
+        if isinstance(scores, (str, bytes)) or not isinstance(scores, Iterable):
+            raise ValueError(
+                f"Expected token-level scores in field {score_field!r}, got {type(scores).__name__}."
+            )
+
+        token_labels = _apply_optional_token_mask(_as_float_labels(scores), hf_item)
+        token_label_tokens = _as_token_strings(tokens)
+
+        probing_items.append(
+            ProbingItem(
+                prompt=str(prompt),
+                completion=str(completion),
+                spans=[],
+                token_labels=token_labels,
+                token_label_tokens=token_label_tokens,
+            )
+        )
+
+    return probing_items
+
+
 def get_prepare_function(
     hf_repo: str,
     subset: Optional[str] = None
 ) -> Callable[[Dataset], List[ProbingItem]]:
     """Get the appropriate preparation function based on dataset name."""
-    if 'one_shot_pipeline' in str(subset) or 'hallucination-heads' in hf_repo:
+    if 'degeneration-probe-instruct-token-level' in hf_repo:
+        return prepare_repetition_instruct_token_level_dataset
+    elif 'one_shot_pipeline' in str(subset) or 'hallucination-heads' in hf_repo:
         return prepare_longform_dataset_old_format
     elif 'modified' in str(subset) and 'synthetic-hallucinations' in hf_repo:
         return prepare_synthetic
@@ -214,5 +358,3 @@ def get_prepare_function(
     else:
         # Default to one-shot pipeline format
         return prepare_longform_dataset
-
-

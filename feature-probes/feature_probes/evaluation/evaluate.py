@@ -16,7 +16,7 @@ import argparse
 from dotenv import load_dotenv
 
 from feature_probes.utils.file_utils import save_jsonl, load_yaml
-from feature_probes.utils.metrics import compute_clf_metrics, plot_roc_curves, print_eval_metrics
+from feature_probes.utils.metrics import compute_clf_metrics, compute_regression_metrics, plot_roc_curves, print_eval_metrics
 from feature_probes.utils.model_utils import load_model_and_tokenizer
     
 from feature_probes.data.dataset import (
@@ -25,7 +25,7 @@ from feature_probes.data.dataset import (
     tokenized_probing_collate_fn
 )
 from feature_probes.config import EvaluationConfig
-from feature_probes.training.loss import compute_probe_bce_loss
+from feature_probes.training.loss import compute_probe_bce_loss, compute_probe_regression_loss
 from feature_probes.probes.value_head_probe import ValueHeadProbe, setup_probe
 
 
@@ -34,6 +34,9 @@ def evaluate_probe(
     probe: ValueHeadProbe,
     eval_dataloader: DataLoader,
     threshold: float = 0.5,
+    task: str = "hallucination",
+    regression_loss: str = "mse",
+    regression_output_activation: str = "sigmoid",
     metric_key_prefix: Optional[str] = None,
     verbose: bool = True,
     save_roc_curves: bool = True,
@@ -64,6 +67,8 @@ def evaluate_probe(
     all_probs = {'all': [], 'span': [], 'span_max': []}
     all_preds = {'all': [], 'span': [], 'span_max': []}
     all_labels = {'all': [], 'span': [], 'span_max': []}
+    regression_predictions = []
+    regression_labels = []
 
     total_lm_loss = 0
     total_probe_loss = 0
@@ -87,52 +92,74 @@ def evaluate_probe(
         )
 
         probe_logits: Float[Tensor, "batch_size seq_len"] = outputs["probe_logits"].squeeze(-1)
-        probe_probs: Float[Tensor, "batch_size seq_len"] = torch.sigmoid(probe_logits).float()
-        probe_preds: Float[Tensor, "batch_size seq_len"] = (probe_probs > threshold).float()
 
-        probe_loss = compute_probe_bce_loss(
-            probe_logits=probe_logits,
-            classification_labels=classification_labels,
-            classification_weights=classification_weights,
-        )
+        if task == "hallucination":
+            probe_probs: Float[Tensor, "batch_size seq_len"] = torch.sigmoid(probe_logits).float()
+            probe_preds: Float[Tensor, "batch_size seq_len"] = (probe_probs > threshold).float()
 
-        # 1. All-token metrics (excluding padding and ignored tokens)
-        valid_mask = (attention_mask == 1) & (classification_labels != -100.0)
-        all_probs['all'].extend(probe_probs[valid_mask].cpu().numpy())
-        all_preds['all'].extend(probe_preds[valid_mask].cpu().numpy())
-        all_labels['all'].extend(classification_labels[valid_mask].cpu().numpy())
+            probe_loss = compute_probe_bce_loss(
+                probe_logits=probe_logits,
+                classification_labels=classification_labels,
+                classification_weights=classification_weights,
+            )
 
-        # 2. Span-level metrics
-        annotated_tokens_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-        for i in range(len(input_ids)):
-            all_spans: List[List[int]] = pos_spans[i] + neg_spans[i]
-            for span_range in all_spans:
-                start, end = span_range[0], span_range[1]
-                assert start <= end, f"Invalid span range: {span_range}"
-                annotated_tokens_mask[i, start:end+1] = True
+            # 1. All-token metrics (excluding padding and ignored tokens)
+            valid_mask = (attention_mask == 1) & (classification_labels != -100.0)
+            all_probs['all'].extend(probe_probs[valid_mask].cpu().numpy())
+            all_preds['all'].extend(probe_preds[valid_mask].cpu().numpy())
+            all_labels['all'].extend(classification_labels[valid_mask].cpu().numpy())
 
-        # Filter out ignored tokens
-        annotated_tokens_mask = annotated_tokens_mask & (classification_labels != -100.0)
-        
-        all_probs['span'].extend(probe_probs[annotated_tokens_mask].cpu().numpy())
-        all_preds['span'].extend(probe_preds[annotated_tokens_mask].cpu().numpy())
-        all_labels['span'].extend(classification_labels[annotated_tokens_mask].cpu().numpy())
+            # 2. Span-level metrics
+            annotated_tokens_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            for i in range(len(input_ids)):
+                all_spans: List[List[int]] = pos_spans[i] + neg_spans[i]
+                for span_range in all_spans:
+                    start, end = span_range[0], span_range[1]
+                    assert start <= end, f"Invalid span range: {span_range}"
+                    annotated_tokens_mask[i, start:end+1] = True
 
-        # 3. Span-level metrics (with max aggregation)
-        for i in range(len(input_ids)):
-            all_spans: List[List[int]] = pos_spans[i] + neg_spans[i]
-            if len(all_spans) == 0:
-                continue
+            # Filter out ignored tokens
+            annotated_tokens_mask = annotated_tokens_mask & (classification_labels != -100.0)
+            
+            all_probs['span'].extend(probe_probs[annotated_tokens_mask].cpu().numpy())
+            all_preds['span'].extend(probe_preds[annotated_tokens_mask].cpu().numpy())
+            all_labels['span'].extend(classification_labels[annotated_tokens_mask].cpu().numpy())
 
-            span_labels = [1.0] * len(pos_spans[i]) + [0.0] * len(neg_spans[i])
+            # 3. Span-level metrics (with max aggregation)
+            for i in range(len(input_ids)):
+                all_spans: List[List[int]] = pos_spans[i] + neg_spans[i]
+                if len(all_spans) == 0:
+                    continue
 
-            for label, (start, end) in zip(span_labels, all_spans):
-                max_prob = probe_probs[i, start:end+1].max().cpu().item()
-                max_pred = probe_preds[i, start:end+1].max().cpu().item()
-                
-                all_probs['span_max'].append(max_prob)
-                all_preds['span_max'].append(max_pred)
-                all_labels['span_max'].append(label)
+                span_labels = [1.0] * len(pos_spans[i]) + [0.0] * len(neg_spans[i])
+
+                for label, (start, end) in zip(span_labels, all_spans):
+                    max_prob = probe_probs[i, start:end+1].max().cpu().item()
+                    max_pred = probe_preds[i, start:end+1].max().cpu().item()
+                    
+                    all_probs['span_max'].append(max_prob)
+                    all_preds['span_max'].append(max_pred)
+                    all_labels['span_max'].append(label)
+        elif task == "repetition_score":
+            probe_loss = compute_probe_regression_loss(
+                probe_logits=probe_logits,
+                regression_labels=classification_labels,
+                regression_weights=classification_weights,
+                loss_type=regression_loss,
+                output_activation=regression_output_activation,
+            )
+            valid_mask = (attention_mask == 1) & (classification_labels != -100.0)
+            if regression_output_activation == "sigmoid":
+                probe_scores = torch.sigmoid(probe_logits).float()
+            elif regression_output_activation == "none":
+                probe_scores = probe_logits.float()
+            else:
+                raise ValueError(f"Unsupported regression output activation: {regression_output_activation}")
+            regression_predictions.extend(probe_scores[valid_mask].cpu().numpy())
+            regression_labels.extend(classification_labels[valid_mask].cpu().numpy())
+            probe_probs = probe_scores
+        else:
+            raise ValueError(f"Unsupported evaluation task: {task}")
         
         # Update running metrics
         total_lm_loss += outputs["lm_loss"].item()
@@ -153,19 +180,27 @@ def evaluate_probe(
     all_preds = {k: np.array(v) for k, v in all_preds.items()}
     all_labels = {k: np.array(v) for k, v in all_labels.items()}
 
-    # Compute classification metrics for each aggregation level
-    for agg_level in ['all', 'span', 'span_max']:
-        if len(all_labels[agg_level]) == 0:
-            continue
+    if task == "hallucination":
+        # Compute classification metrics for each aggregation level
+        for agg_level in ['all', 'span', 'span_max']:
+            if len(all_labels[agg_level]) == 0:
+                continue
 
-        clf_metrics = compute_clf_metrics(
-            all_preds[agg_level], 
-            all_labels[agg_level], 
-            all_probs[agg_level]
+            clf_metrics = compute_clf_metrics(
+                all_preds[agg_level], 
+                all_labels[agg_level], 
+                all_probs[agg_level]
+            )
+
+            for metric_name, metric_value in clf_metrics.items():
+                metrics[f"{agg_level}_{metric_name}"] = metric_value
+    elif task == "repetition_score":
+        metrics.update(
+            compute_regression_metrics(
+                np.array(regression_predictions),
+                np.array(regression_labels),
+            )
         )
-
-        for metric_name, metric_value in clf_metrics.items():
-            metrics[f"{agg_level}_{metric_name}"] = metric_value
 
     # Add prefix if specified
     if metric_key_prefix:
@@ -184,7 +219,7 @@ def evaluate_probe(
         )
 
     # Save ROC curves
-    if save_roc_curves and save_dir:
+    if task == "hallucination" and save_roc_curves and save_dir:
         plot_roc_curves(
             all_preds, 
             all_labels, 
@@ -204,11 +239,15 @@ def evaluate_probe(
             json.dump(metrics, f, indent=4)
         
         # Save raw predictions
-        for agg_level in ['span_max']:
-            if len(all_labels[agg_level]) > 0:
-                np.save(results_dir / f'{agg_level}_probs.npy', all_probs[agg_level])
-                np.save(results_dir / f'{agg_level}_preds.npy', all_preds[agg_level])
-                np.save(results_dir / f'{agg_level}_labels.npy', all_labels[agg_level])
+        if task == "hallucination":
+            for agg_level in ['span_max']:
+                if len(all_labels[agg_level]) > 0:
+                    np.save(results_dir / f'{agg_level}_probs.npy', all_probs[agg_level])
+                    np.save(results_dir / f'{agg_level}_preds.npy', all_preds[agg_level])
+                    np.save(results_dir / f'{agg_level}_labels.npy', all_labels[agg_level])
+        elif task == "repetition_score":
+            np.save(results_dir / 'regression_predictions.npy', np.array(regression_predictions))
+            np.save(results_dir / 'regression_labels.npy', np.array(regression_labels))
 
     # Clean up
     gc.collect()
@@ -260,6 +299,9 @@ def evaluate_on_multiple_datasets(
             probe=probe,
             eval_dataloader=dataloader,
             threshold=eval_config.probe_config.threshold,
+            task=eval_config.task,
+            regression_loss=eval_config.regression_loss,
+            regression_output_activation=eval_config.regression_output_activation,
             metric_key_prefix=dataset_config.dataset_id,
             verbose=True,
             save_roc_curves=eval_config.save_roc_curves,
@@ -309,9 +351,13 @@ def main(eval_config: EvaluationConfig):
     for dataset_id, metrics in results.items():
         print(f"\n{dataset_id}:")
         key_metrics = [
-            f"span_max_accuracy",
-            f"span_max_f1",
-            f"span_max_auc"
+            "mse",
+            "mae",
+            "pearson",
+        ] if eval_config.task == "repetition_score" else [
+            "span_max_accuracy",
+            "span_max_f1",
+            "span_max_auc",
         ]
         for metric in key_metrics:
             full_key = f"{dataset_id}/{metric}"

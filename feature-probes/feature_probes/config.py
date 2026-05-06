@@ -90,6 +90,7 @@ class ProbeConfig:
 class TrainingConfig:
     """Configuration for probe training."""
     
+    task: Literal["hallucination", "repetition_score"] = "hallucination"
     wandb_project: str = "hallucination-probes"
     wandb_name: Optional[str] = None
     wandb_tags: List[str] = field(default_factory=list) 
@@ -112,6 +113,8 @@ class TrainingConfig:
     learning_rate: float = 5e-5  # Overall learning rate (deprecated)
     probe_head_lr: Optional[float] = 5e-3 # Separate LR for probe head
     lora_lr: Optional[float] = 5e-5  # Separate LR for LoRA parameters
+    regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
+    regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
     sparsity_penalty_weight: Optional[float] = None
     num_train_samples: Optional[int] = None  # Limit training samples
     max_steps: int = -1  # Override num_epochs if set
@@ -178,12 +181,22 @@ class TrainingConfig:
                 "Use one of: auto, float32, float16, bfloat16"
             )
 
+        if self.task not in {"hallucination", "repetition_score"}:
+            raise ValueError("task must be either 'hallucination' or 'repetition_score'")
+        if self.regression_loss not in {"mse", "smooth_l1", "l1"}:
+            raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
+        if self.regression_output_activation not in {"sigmoid", "none"}:
+            raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
+
 
 @dataclass
 class EvaluationConfig:
     """Configuration for probe evaluation."""
     
+    task: Literal["hallucination", "repetition_score"] = "hallucination"
     probe_config: ProbeConfig = field(default_factory=ProbeConfig)
+    regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
+    regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
     
     datasets: List[dict] = field(default_factory=list)
     per_device_eval_batch_size: int = 8
@@ -205,6 +218,13 @@ class EvaluationConfig:
             TokenizedProbingDatasetConfig(**dataset_config)
             for dataset_config in self.datasets
         ]
+
+        if self.task not in {"hallucination", "repetition_score"}:
+            raise ValueError("task must be either 'hallucination' or 'repetition_score'")
+        if self.regression_loss not in {"mse", "smooth_l1", "l1"}:
+            raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
+        if self.regression_output_activation not in {"sigmoid", "none"}:
+            raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
 
         if self.output_dir is None:
             self.output_dir = self.probe_config.probe_path / "evaluation_results"

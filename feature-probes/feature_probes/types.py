@@ -1,7 +1,7 @@
 """Data types for probe training."""
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -20,3 +20,5 @@ class ProbingItem:
     prompt: str
     completion: str
     spans: List[AnnotatedSpan]
+    token_labels: Optional[List[float]] = None
+    token_label_tokens: Optional[List[str]] = None
