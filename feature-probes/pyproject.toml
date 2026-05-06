@@ -9,6 +9,7 @@ dependencies = [
   "torch>=2.4.0",
   "transformers>=4.56.0", 
   "peft>=0.18.0",
+  "torchao>0.16.0",
   "datasets>=2.0.0",
   "numpy>=1.24.0",
   "tqdm>=4.65.0",
