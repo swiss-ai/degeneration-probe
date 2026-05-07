@@ -315,7 +315,9 @@ def _repetition_labels_from_chunk_summary(raw_chunk_summary) -> List[float]:
         if token_index is None:
             token_index = fallback_idx
 
-        indexed_entries.append((int(token_index), float(entry["repetition"])))
+        repetition = entry["repetition"]
+        repetition_score = -100.0 if repetition is None else float(repetition)
+        indexed_entries.append((int(token_index), repetition_score))
 
     if not indexed_entries:
         return []

@@ -80,3 +80,21 @@ def test_repetition_converter_accepts_json_chunk_summary_and_fills_gaps():
     item = prepare_repetition_instruct_token_level_dataset(rows)[0]
 
     assert item.token_labels == [0.4, -100.0, 0.6]
+
+
+def test_repetition_converter_treats_null_repetition_as_ignored_label():
+    rows = [
+        {
+            "prompt": "Prompt",
+            "generated_text": "Completion",
+            "chunk_summary": [
+                {"token_index": 0, "repetition": 0.4, "degenerating": False},
+                {"token_index": 1, "repetition": None, "degenerating": False},
+                {"token_index": 2, "repetition": 0.6, "degenerating": True},
+            ],
+        }
+    ]
+
+    item = prepare_repetition_instruct_token_level_dataset(rows)[0]
+
+    assert item.token_labels == [0.4, -100.0, 0.6]
