@@ -102,6 +102,10 @@ def main(training_config: TrainingConfig):
             train_dataset = Subset(train_dataset, selected_indices)
             print(f"Using a subset of the training dataset: {num}/{total} samples")
 
+    eval_strategy = training_config.evaluation_strategy
+    if eval_strategy == "steps" and training_config.eval_steps is None:
+        eval_strategy = "no"
+
     training_args = TrainingArguments(
         output_dir=str(training_config.probe_config.probe_path),
         per_device_train_batch_size=training_config.per_device_train_batch_size,
@@ -114,7 +118,7 @@ def main(training_config: TrainingConfig):
         label_names=["classification_labels", "lm_labels"],
         report_to="wandb",
         run_name=training_config.probe_config.probe_id,
-        eval_strategy="steps" if training_config.eval_steps else "no",
+        eval_strategy=eval_strategy,
         logging_first_step=True,
         logging_strategy="steps",
         max_grad_norm=training_config.max_grad_norm,

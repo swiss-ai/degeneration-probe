@@ -10,6 +10,8 @@ anneal_max_aggr: false
 save_roc_curves: false
 regression_loss: mse
 regression_output_activation: sigmoid
+num_train_epochs: 10
+evaluation_strategy: epoch
 
 train_datasets:
   - dataset_id: "repetition_train"
@@ -27,10 +29,10 @@ train_datasets:
     process_on_the_fly: false
 
 eval_datasets:
-  - dataset_id: "repetition_test"
+  - dataset_id: "repetition_validation"
     hf_repo: "luca-sartori/degeneration-probe-instruct-token-level"
     subset: null
-    split: "test"
+    split: "validation"
     max_length: 1536
     pos_weight: 1.0
     neg_weight: 1.0
