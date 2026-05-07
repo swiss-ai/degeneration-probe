@@ -1,5 +1,6 @@
 """Dataset converters for different HuggingFace dataset formats to probing format."""
 
+import json
 from collections.abc import Iterable, Sequence
 from typing import Callable, List, Optional
 
@@ -282,6 +283,52 @@ def _apply_optional_token_mask(labels: List[float], item: dict) -> List[float]:
     return masked_labels
 
 
+def _parse_chunk_summary(raw_chunk_summary) -> List[dict]:
+    """Parse the chunk_summary column from a decoded value or JSON string."""
+    if isinstance(raw_chunk_summary, str):
+        try:
+            raw_chunk_summary = json.loads(raw_chunk_summary)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Could not parse chunk_summary as JSON") from exc
+
+    if not isinstance(raw_chunk_summary, list):
+        raise ValueError(
+            f"Expected chunk_summary to be a list, got {type(raw_chunk_summary).__name__}"
+        )
+
+    if not all(isinstance(entry, dict) for entry in raw_chunk_summary):
+        raise ValueError("Expected every chunk_summary entry to be a dictionary")
+
+    return raw_chunk_summary
+
+
+def _repetition_labels_from_chunk_summary(raw_chunk_summary) -> List[float]:
+    """Extract repetition scores from chunk_summary, preserving token_index alignment."""
+    chunk_summary = _parse_chunk_summary(raw_chunk_summary)
+
+    indexed_entries = []
+    for fallback_idx, entry in enumerate(chunk_summary):
+        if "repetition" not in entry:
+            raise ValueError(f"chunk_summary entry missing 'repetition': {entry}")
+
+        token_index = entry.get("token_index", fallback_idx)
+        if token_index is None:
+            token_index = fallback_idx
+
+        indexed_entries.append((int(token_index), float(entry["repetition"])))
+
+    if not indexed_entries:
+        return []
+
+    labels = [-100.0] * (max(idx for idx, _ in indexed_entries) + 1)
+    for token_index, repetition_score in sorted(indexed_entries, key=lambda x: x[0]):
+        if token_index < 0:
+            raise ValueError(f"chunk_summary token_index must be non-negative, got {token_index}")
+        labels[token_index] = repetition_score
+
+    return labels
+
+
 def prepare_repetition_instruct_token_level_dataset(dataset: Dataset) -> List[ProbingItem]:
     """Prepare token-level repetition-score data for regression probing."""
     probing_items: List[ProbingItem] = []
@@ -294,6 +341,8 @@ def prepare_repetition_instruct_token_level_dataset(dataset: Dataset) -> List[Pr
         "repetition_score",
         "scores",
         "token_scores",
+        "degeneration_scores",
+        "token_degenerating",
         "labels",
         "token_labels",
         "targets",
@@ -312,22 +361,28 @@ def prepare_repetition_instruct_token_level_dataset(dataset: Dataset) -> List[Pr
 
         scores, score_field = _first_present(hf_item, score_fields)
         tokens, _ = _first_present(hf_item, token_fields)
+        chunk_summary = hf_item.get("chunk_summary")
 
-        if prompt is None or completion is None or scores is None:
+        if prompt is None or completion is None or (scores is None and chunk_summary is None):
             available_fields = list(hf_item.keys())
             raise ValueError(
                 "Could not parse repetition-score dataset row. "
-                f"Need prompt/completion/scores fields. Available fields: {available_fields}. "
-                f"Recognized score fields: {score_fields}."
+                f"Need prompt/completion plus chunk_summary or scores fields. "
+                f"Available fields: {available_fields}. Recognized score fields: {score_fields}."
             )
 
-        if isinstance(scores, (str, bytes)) or not isinstance(scores, Iterable):
-            raise ValueError(
-                f"Expected token-level scores in field {score_field!r}, got {type(scores).__name__}."
-            )
+        if chunk_summary is not None:
+            token_labels = _repetition_labels_from_chunk_summary(chunk_summary)
+            token_label_tokens = None
+        else:
+            if isinstance(scores, (str, bytes)) or not isinstance(scores, Iterable):
+                raise ValueError(
+                    f"Expected token-level scores in field {score_field!r}, got {type(scores).__name__}."
+                )
+            token_labels = _as_float_labels(scores)
+            token_label_tokens = _as_token_strings(tokens)
 
-        token_labels = _apply_optional_token_mask(_as_float_labels(scores), hf_item)
-        token_label_tokens = _as_token_strings(tokens)
+        token_labels = _apply_optional_token_mask(token_labels, hf_item)
 
         probing_items.append(
             ProbingItem(
