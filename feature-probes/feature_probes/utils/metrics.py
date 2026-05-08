@@ -147,6 +147,51 @@ def compute_regression_metrics(
     }
 
 
+def compute_thresholded_regression_metrics(
+    predictions: np.ndarray,
+    labels: np.ndarray,
+    threshold: float,
+) -> Dict[str, float]:
+    """Compute binary degeneration metrics from continuous regression targets."""
+    predictions = np.asarray(predictions, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.float64)
+    valid_mask = np.isfinite(predictions) & np.isfinite(labels)
+
+    predictions = predictions[valid_mask]
+    labels = labels[valid_mask]
+
+    if len(labels) == 0:
+        return {
+            "degeneration_accuracy": float("nan"),
+            "degeneration_precision": float("nan"),
+            "degeneration_recall": float("nan"),
+            "degeneration_f1": float("nan"),
+            "degeneration_auc": float("nan"),
+            "degeneration_positive_rate": float("nan"),
+            "degeneration_pred_positive_rate": float("nan"),
+            "degeneration_threshold": float(threshold),
+            "degeneration_total_samples": 0,
+        }
+
+    binary_labels = (labels >= threshold).astype(float)
+    binary_preds = (predictions >= threshold).astype(float)
+
+    clf_metrics = compute_clf_metrics(binary_preds, binary_labels, predictions)
+    thresholded_metrics = {
+        f"degeneration_{name}": value
+        for name, value in clf_metrics.items()
+    }
+    thresholded_metrics.update(
+        {
+            "degeneration_positive_rate": float(np.mean(binary_labels)),
+            "degeneration_pred_positive_rate": float(np.mean(binary_preds)),
+            "degeneration_threshold": float(threshold),
+        }
+    )
+
+    return thresholded_metrics
+
+
 def compute_metrics(
     predictions: np.ndarray,
     labels: np.ndarray,
@@ -356,6 +401,17 @@ def print_eval_metrics(
         print(f" - Spearman:    {metrics[f'{prefix}spearman']:.4f}")
         print(f" - Target mean: {metrics[f'{prefix}target_mean']:.4f}")
         print(f" - Pred. mean:  {metrics[f'{prefix}prediction_mean']:.4f}")
+
+    if f'{prefix}degeneration_accuracy' in metrics:
+        print("\nDegeneration Metrics:")
+        print(f" - Threshold:  {metrics[f'{prefix}degeneration_threshold']:.4f}")
+        print(f" - Accuracy:   {metrics[f'{prefix}degeneration_accuracy']:.4f}")
+        print(f" - Precision:  {metrics[f'{prefix}degeneration_precision']:.4f}")
+        print(f" - Recall:     {metrics[f'{prefix}degeneration_recall']:.4f}")
+        print(f" - F1 Score:   {metrics[f'{prefix}degeneration_f1']:.4f}")
+        print(f" - AUC:        {metrics[f'{prefix}degeneration_auc']:.4f}")
+        print(f" - Label +rate:{metrics[f'{prefix}degeneration_positive_rate']:.4f}")
+        print(f" - Pred. +rate:{metrics[f'{prefix}degeneration_pred_positive_rate']:.4f}")
     
     # Print classification metrics for different aggregation levels
     for agg_level in ['all', 'span', 'span_max']:

@@ -36,3 +36,4 @@ logging_steps: 50
 seed: 42
 regression_loss: mse
 regression_output_activation: sigmoid
+degeneration_threshold: 0.8

@@ -115,6 +115,7 @@ class TrainingConfig:
     lora_lr: Optional[float] = 5e-5  # Separate LR for LoRA parameters
     regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
     regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
+    degeneration_threshold: float = 0.8
     sparsity_penalty_weight: Optional[float] = None
     num_train_samples: Optional[int] = None  # Limit training samples
     max_steps: int = -1  # Override num_epochs if set
@@ -166,7 +167,8 @@ class TrainingConfig:
         # otherwise yaml parses e.g. '1e-6' as a string instead of a float
         float_fields = [
             'learning_rate', 'probe_head_lr', 'lora_lr', 'max_grad_norm', 
-            'anneal_warmup', 'lambda_lm', 'lambda_kl', 'sparsity_penalty_weight'
+            'anneal_warmup', 'lambda_lm', 'lambda_kl', 'sparsity_penalty_weight',
+            'degeneration_threshold'
         ]
         for field_name in float_fields:
             value = getattr(self, field_name)
@@ -187,6 +189,8 @@ class TrainingConfig:
             raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
         if self.regression_output_activation not in {"sigmoid", "none"}:
             raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
+        if not 0.0 <= self.degeneration_threshold <= 1.0:
+            raise ValueError("degeneration_threshold must be between 0.0 and 1.0")
 
 
 @dataclass
@@ -197,6 +201,7 @@ class EvaluationConfig:
     probe_config: ProbeConfig = field(default_factory=ProbeConfig)
     regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
     regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
+    degeneration_threshold: float = 0.8
     
     datasets: List[dict] = field(default_factory=list)
     per_device_eval_batch_size: int = 8
@@ -213,6 +218,9 @@ class EvaluationConfig:
         """Post-initialization processing."""
         if isinstance(self.probe_config, dict):
             self.probe_config = ProbeConfig(**self.probe_config)
+
+        if isinstance(self.degeneration_threshold, str):
+            self.degeneration_threshold = float(self.degeneration_threshold)
         
         self.dataset_configs = [
             TokenizedProbingDatasetConfig(**dataset_config)
@@ -225,6 +233,8 @@ class EvaluationConfig:
             raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
         if self.regression_output_activation not in {"sigmoid", "none"}:
             raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
+        if not 0.0 <= self.degeneration_threshold <= 1.0:
+            raise ValueError("degeneration_threshold must be between 0.0 and 1.0")
 
         if self.output_dir is None:
             self.output_dir = self.probe_config.probe_path / "evaluation_results"

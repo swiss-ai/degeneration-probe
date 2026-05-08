@@ -43,6 +43,7 @@ class ProbeTrainer(Trainer):
         self.lambda_kl: float = cfg.lambda_kl
         self.regression_loss: str = cfg.regression_loss
         self.regression_output_activation: str = cfg.regression_output_activation
+        self.degeneration_threshold: float = cfg.degeneration_threshold
         self.anneal_max_aggr: bool = cfg.anneal_max_aggr
         self.anneal_warmup: float = cfg.anneal_warmup
         self.eval_datasets: List[TokenizedProbingDataset] = eval_datasets
@@ -332,6 +333,7 @@ class ProbeTrainer(Trainer):
                 task=self.task,
                 regression_loss=self.regression_loss,
                 regression_output_activation=self.regression_output_activation,
+                degeneration_threshold=self.degeneration_threshold,
                 metric_key_prefix=dataset.config.dataset_id,
                 verbose=False,
                 save_roc_curves=save_roc_curves,

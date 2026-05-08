@@ -16,7 +16,13 @@ import argparse
 from dotenv import load_dotenv
 
 from feature_probes.utils.file_utils import save_jsonl, load_yaml
-from feature_probes.utils.metrics import compute_clf_metrics, compute_regression_metrics, plot_roc_curves, print_eval_metrics
+from feature_probes.utils.metrics import (
+    compute_clf_metrics,
+    compute_regression_metrics,
+    compute_thresholded_regression_metrics,
+    plot_roc_curves,
+    print_eval_metrics,
+)
 from feature_probes.utils.model_utils import load_model_and_tokenizer
     
 from feature_probes.data.dataset import (
@@ -37,6 +43,7 @@ def evaluate_probe(
     task: str = "hallucination",
     regression_loss: str = "mse",
     regression_output_activation: str = "sigmoid",
+    degeneration_threshold: float = 0.8,
     metric_key_prefix: Optional[str] = None,
     verbose: bool = True,
     save_roc_curves: bool = True,
@@ -50,6 +57,7 @@ def evaluate_probe(
         probe: The probe to evaluate
         eval_dataloader: DataLoader for evaluation data
         threshold: Classification threshold
+        degeneration_threshold: Repetition score threshold for binary degeneration metrics
         metric_key_prefix: Prefix for metric keys
         verbose: Whether to print metrics
         save_roc_curves: Whether to save ROC curve plots
@@ -195,10 +203,19 @@ def evaluate_probe(
             for metric_name, metric_value in clf_metrics.items():
                 metrics[f"{agg_level}_{metric_name}"] = metric_value
     elif task == "repetition_score":
+        regression_predictions_array = np.array(regression_predictions)
+        regression_labels_array = np.array(regression_labels)
         metrics.update(
             compute_regression_metrics(
-                np.array(regression_predictions),
-                np.array(regression_labels),
+                regression_predictions_array,
+                regression_labels_array,
+            )
+        )
+        metrics.update(
+            compute_thresholded_regression_metrics(
+                regression_predictions_array,
+                regression_labels_array,
+                threshold=degeneration_threshold,
             )
         )
 
@@ -302,6 +319,7 @@ def evaluate_on_multiple_datasets(
             task=eval_config.task,
             regression_loss=eval_config.regression_loss,
             regression_output_activation=eval_config.regression_output_activation,
+            degeneration_threshold=eval_config.degeneration_threshold,
             metric_key_prefix=dataset_config.dataset_id,
             verbose=True,
             save_roc_curves=eval_config.save_roc_curves,
@@ -354,6 +372,8 @@ def main(eval_config: EvaluationConfig):
             "mse",
             "mae",
             "pearson",
+            "degeneration_f1",
+            "degeneration_auc",
         ] if eval_config.task == "repetition_score" else [
             "span_max_accuracy",
             "span_max_f1",

@@ -10,6 +10,7 @@ anneal_max_aggr: false
 save_roc_curves: false
 regression_loss: mse
 regression_output_activation: sigmoid
+degeneration_threshold: 0.8
 num_train_epochs: 10
 evaluation_strategy: epoch
 
