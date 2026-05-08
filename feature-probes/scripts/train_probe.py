@@ -105,6 +105,7 @@ def main(training_config: TrainingConfig):
     eval_strategy = training_config.evaluation_strategy
     if eval_strategy == "steps" and training_config.eval_steps is None:
         eval_strategy = "no"
+    hf_eval_dataset = eval_datasets[0] if eval_strategy != "no" and eval_datasets else None
 
     training_args = TrainingArguments(
         output_dir=str(training_config.probe_config.probe_path),
@@ -141,7 +142,7 @@ def main(training_config: TrainingConfig):
         cfg=training_config,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=None, # this is a dummy argument is for the HF base Trainer class
+        eval_dataset=hf_eval_dataset,
         data_collator=tokenized_probing_collate_fn,
         eval_steps=training_config.eval_steps,
         tokenizer=tokenizer,
