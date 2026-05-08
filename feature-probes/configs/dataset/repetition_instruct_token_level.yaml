@@ -19,7 +19,9 @@ train_datasets:
     hf_repo: "luca-sartori/degeneration-probe-instruct-token-level"
     subset: null
     split: "train"
-    max_length: 1536
+    max_length: 4608
+    max_completion_length: 4096
+    prompt_truncation_side: left
     default_ignore: true
     last_span_token: false
     ignore_buffer: 0
@@ -34,7 +36,9 @@ eval_datasets:
     hf_repo: "luca-sartori/degeneration-probe-instruct-token-level"
     subset: null
     split: "validation"
-    max_length: 1536
+    max_length: 4608
+    max_completion_length: 4096
+    prompt_truncation_side: left
     pos_weight: 1.0
     neg_weight: 1.0
     default_ignore: true

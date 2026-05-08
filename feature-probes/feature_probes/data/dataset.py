@@ -3,7 +3,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Tuple
 
 import torch
 import datasets
@@ -36,6 +36,16 @@ class TokenizedProbingDatasetConfig:
     seed: int = 42
     process_on_the_fly: bool = False
     max_num_samples: Optional[int] = None
+    max_completion_length: Optional[int] = None
+    prompt_truncation_side: Literal["left", "right"] = "left"
+
+    def __post_init__(self):
+        if self.max_length <= 0:
+            raise ValueError("max_length must be positive")
+        if self.max_completion_length is not None and self.max_completion_length <= 0:
+            raise ValueError("max_completion_length must be positive when set")
+        if self.prompt_truncation_side not in {"left", "right"}:
+            raise ValueError("prompt_truncation_side must be either 'left' or 'right'")
 
 
 class TokenizedProbingDataset(Dataset):
@@ -56,6 +66,9 @@ class TokenizedProbingDataset(Dataset):
         
         self._num_skipped_spans: int = 0
         self._num_added_spans: int = 0
+        self._num_truncated_prompts: int = 0
+        self._num_truncated_completions: int = 0
+        self._num_token_label_mismatches: int = 0
         
         if self.config.shuffle:
             self._shuffle_items()
@@ -84,9 +97,16 @@ class TokenizedProbingDataset(Dataset):
         print(f"\t- Number of added spans: {self._num_added_spans}")
         print(f"\t- Number of skipped spans: {self._num_skipped_spans} / {self._num_added_spans + self._num_skipped_spans}")
         print(f"\t- Total number of items: {len(self.items)}")
+        if any((self._num_truncated_prompts, self._num_truncated_completions, self._num_token_label_mismatches)):
+            print(f"\t- Repetition prompts truncated: {self._num_truncated_prompts}")
+            print(f"\t- Repetition completions truncated: {self._num_truncated_completions}")
+            print(f"\t- Repetition token-label length mismatches: {self._num_token_label_mismatches}")
     
     def _process_item(self, item: ProbingItem) -> Dict:
         """Process a single example into tokenized format with labels."""
+        if item.token_labels is not None:
+            return self._process_token_level_item(item)
+
         conversation = [
             {'role': 'user', 'content': item.prompt},
             {'role': 'assistant', 'content': item.completion}
@@ -131,6 +151,107 @@ class TokenizedProbingDataset(Dataset):
             "neg_spans": neg_spans,  # List[List[int]]
             "lm_labels": lm_labels,  # Int[Tensor, "seq_len"]
         }
+
+    def _process_token_level_item(self, item: ProbingItem) -> Dict:
+        """Process token-level generation labels without searching for assistant markers."""
+        prompt_text = self._build_generation_prompt(item.prompt)
+        prompt_ids = self._tokenize_without_special_tokens(prompt_text)
+        completion_ids = self._tokenize_without_special_tokens(item.completion)
+
+        raw_completion_len = len(completion_ids)
+        completion_limit = self.config.max_completion_length or self.config.max_length
+        completion_limit = min(completion_limit, self.config.max_length)
+        completion_ids = completion_ids[:completion_limit]
+        if raw_completion_len > len(completion_ids):
+            self._num_truncated_completions += 1
+
+        prompt_budget = max(0, self.config.max_length - len(completion_ids))
+        if len(prompt_ids) > prompt_budget:
+            self._num_truncated_prompts += 1
+            if prompt_budget == 0:
+                prompt_ids = []
+            elif self.config.prompt_truncation_side == "left":
+                prompt_ids = prompt_ids[-prompt_budget:]
+            else:
+                prompt_ids = prompt_ids[:prompt_budget]
+
+        real_input_ids = prompt_ids + completion_ids
+        prompt_len = len(prompt_ids)
+        completion_len = len(completion_ids)
+        seq_len = len(real_input_ids)
+
+        pad_token_id = self._get_pad_token_id()
+        input_ids = torch.full((self.config.max_length,), pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((self.config.max_length,), dtype=torch.long)
+        classification_labels = torch.full((self.config.max_length,), -100.0, dtype=torch.float32)
+        classification_weights = torch.zeros((self.config.max_length,), dtype=torch.float32)
+        lm_labels = torch.full((self.config.max_length,), -100, dtype=torch.long)
+
+        if seq_len > 0:
+            input_ids[:seq_len] = torch.tensor(real_input_ids, dtype=torch.long)
+            attention_mask[:seq_len] = 1
+
+        token_labels = torch.tensor(item.token_labels, dtype=torch.float32)
+        num_labels = min(len(token_labels), completion_len)
+        if len(token_labels) != completion_len:
+            self._num_token_label_mismatches += 1
+
+        if num_labels > 0:
+            label_start = prompt_len
+            label_stop = label_start + num_labels
+            classification_labels[label_start:label_stop] = token_labels[:num_labels]
+
+        valid_label_mask = classification_labels != -100.0
+        classification_weights[valid_label_mask] = 1.0
+
+        if completion_len > 0:
+            completion_start = prompt_len
+            completion_stop = completion_start + completion_len
+            lm_labels[completion_start:completion_stop] = input_ids[completion_start:completion_stop]
+
+        self._num_added_spans += int(valid_label_mask.sum().item())
+        self._num_skipped_spans += max(0, len(token_labels) - num_labels)
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "classification_labels": classification_labels,
+            "classification_weights": classification_weights,
+            "pos_spans": [],
+            "neg_spans": [],
+            "lm_labels": lm_labels,
+        }
+
+    def _build_generation_prompt(self, prompt: str) -> str:
+        """Build the chat prefix that immediately precedes generated tokens."""
+        conversation = [{'role': 'user', 'content': prompt}]
+        try:
+            prompt_text = self.tokenizer.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except TypeError:
+            prompt_text = self.tokenizer.apply_chat_template(conversation, tokenize=False)
+
+        if self.tokenizer.bos_token and self.tokenizer.bos_token in prompt_text:
+            prompt_text = prompt_text.replace(self.tokenizer.bos_token, '')
+
+        return prompt_text
+
+    def _tokenize_without_special_tokens(self, text: str) -> List[int]:
+        return self.tokenizer(
+            text,
+            add_special_tokens=False,
+            return_attention_mask=False,
+        )["input_ids"]
+
+    def _get_pad_token_id(self) -> int:
+        if self.tokenizer.pad_token_id is not None:
+            return self.tokenizer.pad_token_id
+        if self.tokenizer.eos_token_id is not None:
+            return self.tokenizer.eos_token_id
+        return 0
     
     def print_token_labels(
         self,
