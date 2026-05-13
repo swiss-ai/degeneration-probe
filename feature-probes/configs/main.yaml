@@ -1,8 +1,8 @@
 defaults:
-  - model: llama           
-  - training: no_lora         
-  - dataset: our_long_form
   - _self_
+  - model: llama
+  - training: no_lora
+  - dataset: our_long_form
 
 probe_config:
   probe_id: "${model.short_name}_${training.short_name}_${dataset.short_name}_layer${probe_config.layer}"

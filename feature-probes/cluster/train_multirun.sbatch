@@ -3,8 +3,8 @@
 #SBATCH --partition=normal
 #SBATCH --time=4:00:00
 #SBATCH --job-name=feature-probes-sweep
-#SBATCH --output=/iopsstor/scratch/cscs/%u/feature-probes/cluster/log/%x-%j_%a.out
-#SBATCH --error=/iopsstor/scratch/cscs/%u/feature-probes/cluster/log/%x-%j_%a.err
+#SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/feature-probes/cluster/log/%x-%j_%a.out
+#SBATCH --error=/iopsstor/scratch/cscs/%u/degeneration-probe/feature-probes/cluster/log/%x-%j_%a.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-task=4
@@ -13,7 +13,7 @@
 set -euo pipefail
 trap 'echo "Job failed at $(date)" >&2' ERR
 
-REPO=/iopsstor/scratch/cscs/$USER/feature-probes
+REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe/feature-probes
 
 mkdir -p $REPO/cluster/log
 

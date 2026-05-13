@@ -1,0 +1,46 @@
+# @package _global_
+dataset:
+  short_name: "repetition_balanced"
+
+wandb_project: "degeneration-probes"
+task: repetition_score
+lambda_lm: 0.0
+lambda_kl: 0.0
+anneal_max_aggr: false
+save_roc_curves: false
+regression_loss: mse
+regression_output_activation: sigmoid
+degeneration_threshold: 0.8
+num_train_epochs: 10
+evaluation_strategy: epoch
+logging_steps: 10
+
+train_datasets:
+  - dataset_id: "repetition_train"
+    hf_repo: "lorenzo0312/degeneration-probe-instruct-token-level-balanced"
+    subset: null
+    split: "train"
+    max_length: 4608
+    max_completion_length: 4096
+    prompt_truncation_side: left
+    default_ignore: true
+    last_span_token: false
+    ignore_buffer: 0
+    pos_weight: 1.0
+    neg_weight: 1.0
+    shuffle: true
+    seed: 42
+    process_on_the_fly: false
+
+eval_datasets:
+  - dataset_id: "repetition_validation"
+    hf_repo: "lorenzo0312/degeneration-probe-instruct-token-level-balanced"
+    subset: null
+    split: "validation"
+    max_length: 4608
+    max_completion_length: 4096
+    prompt_truncation_side: left
+    pos_weight: 1.0
+    neg_weight: 1.0
+    default_ignore: true
+    shuffle: false

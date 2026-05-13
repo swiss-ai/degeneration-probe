@@ -6,8 +6,8 @@ ARG BRANCH=main
 
 WORKDIR /workspace
 
-RUN git clone --branch ${BRANCH} --single-branch https://github.com/swiss-ai/feature-probes.git
-WORKDIR /workspace/feature-probes
+RUN git clone --branch ${BRANCH} --single-branch https://github.com/Luca-Sartori/degeneration-probe.git
+WORKDIR /workspace/degeneration-probe/feature-probes
 
 # should I really do break-system-packages? 
 RUN uv pip install -e . --system --break-system-packages

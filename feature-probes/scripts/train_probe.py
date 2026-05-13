@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 import wandb
 from torch.utils.data import Subset
-from transformers import TrainingArguments
+from transformers import TrainingArguments, TrainerCallback
 from dotenv import load_dotenv
 
 from feature_probes.utils.file_utils import save_jsonl, save_json, load_yaml
@@ -148,18 +148,30 @@ def main(training_config: TrainingConfig):
         tokenizer=tokenizer,
     )
 
-    def save_model_callback():
-        """Save probe weigths, tokenizer and training config to disk."""
-        probe.save(training_config.probe_config.probe_path)
-        tokenizer.save_pretrained(training_config.probe_config.probe_path)
-        save_json(
-            training_config,
-            training_config.probe_config.probe_path / "training_config.json"
-        )
+    def save_model_callback(epoch=None):
+        """Save probe weights, tokenizer and training config to disk.
+
+        If epoch is provided, save into probe_path/epoch_{epoch}; otherwise
+        save into probe_path (final/exit checkpoint).
+        """
+        base_path = training_config.probe_config.probe_path
+        save_path = base_path / f"epoch_{epoch}" if epoch is not None else base_path
+        save_path.mkdir(parents=True, exist_ok=True)
+        probe.save(save_path)
+        tokenizer.save_pretrained(save_path)
+        save_json(training_config, save_path / "training_config.json")
+        print(f"Saved checkpoint to {save_path}")
+
+    class SaveEpochCheckpointCallback(TrainerCallback):
+        def on_epoch_end(self, args, state, control, **kwargs):
+            epoch = int(round(state.epoch)) if state.epoch is not None else 0
+            save_model_callback(epoch=epoch)
+
+    trainer.add_callback(SaveEpochCheckpointCallback())
 
     # Register save callback for unexpected exits
     atexit.register(save_model_callback)
-    
+
     print("Training...")
     trainer.train()
 

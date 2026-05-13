@@ -8,8 +8,8 @@
 set -euo pipefail
 trap 'echo "Build failed at $(date)" >&2' ERR
 
-BRANCH=${1:-main}
-REPO=/iopsstor/scratch/cscs/$USER/feature-probes
+BRANCH=${1:-luca-feature-probe}
+REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe/feature-probes
 TAG="feature-probes:${BRANCH}"
 TAG_FILE_NAME="feature-probes+25.06-${BRANCH}.sqsh"
 CE_IMAGE_DIR=${SCRATCH}/ce-images

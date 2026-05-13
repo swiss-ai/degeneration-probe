@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --partition=normal
-#SBATCH --time=00:02:00
-#SBATCH --job-name=feature-probes-train
+#SBATCH --time=04:00:00
+#SBATCH --job-name=lorenzo-train
 #SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/feature-probes/cluster/log/%x-%j.out
 #SBATCH --error=/iopsstor/scratch/cscs/%u/degeneration-probe/feature-probes/cluster/log/%x-%j.err
 #SBATCH --nodes=1
@@ -26,5 +26,5 @@ export WANDB_API_KEY="$(cat ~/keys/.wandb_key)"
 srun --environment=$REPO/cluster/env.toml \
     python scripts/train_probe.py \
         model=apertus \
-        training=no_lora \
-        dataset=repetition_instruct_token_level
+        training=apertus_stability_fp32 \
+        dataset=repetition_instruct_token_level_balanced
