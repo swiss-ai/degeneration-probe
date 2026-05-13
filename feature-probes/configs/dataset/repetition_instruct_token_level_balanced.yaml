@@ -44,3 +44,6 @@ eval_datasets:
     neg_weight: 1.0
     default_ignore: true
     shuffle: false
+
+  #loss = 0·lm_loss + 0·kl_loss + 1·probe_loss si riduce a:
+  #loss = probe_loss = weighted_MSE(sigmoid(logit), target)
