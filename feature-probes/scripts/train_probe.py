@@ -223,7 +223,16 @@ def hydra_entry(cfg: DictConfig):
     
     # 2. Instantiate your existing dataclass
     training_config = TrainingConfig(**config_dict)
-    
+
+    # Optional: redirect outputs to a custom dir (e.g. a per-run timestamped folder)
+    # set via $PROBE_OUTPUT_DIR before launching. Falls back to LOCAL_PROBES_DIR/<probe_id>.
+    custom_output = os.environ.get("PROBE_OUTPUT_DIR")
+    if custom_output:
+        new_probe_path = Path(custom_output) / training_config.probe_config.probe_id
+        training_config.probe_config.probe_path = new_probe_path
+        training_config.output_dir = new_probe_path / "evaluation_results"
+        print(f"[train_probe] PROBE_OUTPUT_DIR set → probe_path={new_probe_path}")
+
     # 3. Call your original main function
     main(training_config)
 

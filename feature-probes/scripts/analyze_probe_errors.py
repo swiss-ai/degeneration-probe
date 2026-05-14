@@ -100,6 +100,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dataset-id", default=DEFAULT_EVAL_DS["dataset_id"])
     p.add_argument("--dataset-hf-repo", default=DEFAULT_EVAL_DS["hf_repo"])
     p.add_argument("--dataset-split", default=DEFAULT_EVAL_DS["split"])
+    p.add_argument("--save-predictions", action=argparse.BooleanOptionalAction, default=True,
+                   help="Save full per-token predictions to predictions.npz.")
     return p.parse_args()
 
 
@@ -196,10 +198,10 @@ def main():
                     continue
                 p = probe_scores[b, positions].cpu().numpy()
                 t = classification_labels[b, positions].cpu().numpy()
+                keep_idx = len(input_ids_keep)
                 preds.extend(p.tolist())
                 targets.extend(t.tolist())
-                global_id = batch_i * args.batch_size + b
-                sample_ids.extend([global_id] * positions.numel())
+                sample_ids.extend([keep_idx] * positions.numel())
                 token_pos.extend(positions.cpu().tolist())
                 input_ids_keep.append(input_ids[b].cpu())
 
@@ -429,6 +431,22 @@ def main():
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print(f"\n[analyze] Wrote report:    {report_path}")
+
+    if args.save_predictions:
+        preds_path = out_dir / "predictions.npz"
+        np.savez_compressed(
+            preds_path,
+            preds=preds.astype(np.float32),
+            targets=targets.astype(np.float32),
+            sample_ids=sample_ids_np.astype(np.int32),
+            token_pos=token_pos_np.astype(np.int32),
+            abs_err=abs_err.astype(np.float32),
+            meta=np.array(
+                [args.probe_id, args.dataset_hf_repo, args.dataset_split, str(deg_th), str(pred_th)],
+                dtype=object,
+            ),
+        )
+        print(f"[analyze] Wrote predictions: {preds_path}  ({n_total} tokens)")
 
     # Also a flat CSV with the worst FN/FP for quick scanning
     import csv

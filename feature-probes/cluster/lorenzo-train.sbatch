@@ -23,6 +23,12 @@ export HF_TOKEN="$(cat ~/keys/.hf_token)"
 export WANDB_API_KEY="$(cat ~/keys/.wandb_key)"
 [[ -f ~/keys/.hf_token_write ]] && export HF_WRITE_TOKEN="$(cat ~/keys/.hf_token_write)"
 
+# Per-run output dir: /capstor/.../feature-probes/output/<timestamp>/<probe_id>/
+RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+export PROBE_OUTPUT_DIR="/capstor/scratch/cscs/$USER/feature-probes/output/$RUN_TIMESTAMP"
+mkdir -p "$PROBE_OUTPUT_DIR"
+echo "PROBE_OUTPUT_DIR=$PROBE_OUTPUT_DIR"
+
 srun --environment=$REPO/cluster/env.toml \
     python scripts/train_probe.py \
         model=apertus \

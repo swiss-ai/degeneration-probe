@@ -109,6 +109,19 @@ class ValueHeadProbe(nn.Module):
             dtype=head_dtype,
         )
 
+        # Restore trained pre_head_norm weights if a checkpoint provides them.
+        # Backward-compatible: old checkpoints without pre_head_norm.bin keep the
+        # freshly-built defaults (LayerNorm weight=1, bias=0) — same behavior as before.
+        if path and len(self.pre_head_norm.state_dict()) > 0:
+            norm_path = Path(path) / "pre_head_norm.bin"
+            if norm_path.exists():
+                norm_state = torch.load(
+                    norm_path,
+                    map_location=model.device,
+                    weights_only=True,
+                )
+                self.pre_head_norm.load_state_dict(norm_state)
+
         if not isinstance(model, PeftModel):
             print("WARNING: Model is not a PeftModel. Remember to add LoRA adapters if needed.")
 
@@ -277,7 +290,13 @@ class ValueHeadProbe(nn.Module):
             self.value_head.state_dict(),
             path / "probe_head.bin"
         )
-        
+
+        # Save pre_head_norm weights too, if the norm has any (LayerNorm/RMSNorm).
+        # nn.Identity and L2Norm have empty state_dicts, so we skip them.
+        norm_state = self.pre_head_norm.state_dict()
+        if len(norm_state) > 0:
+            torch.save(norm_state, path / "pre_head_norm.bin")
+
         # Save configuration
         if isinstance(self.value_head, nn.Linear):
             hidden_size = self.value_head.in_features

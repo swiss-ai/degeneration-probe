@@ -18,7 +18,7 @@ mkdir -p $REPO/cluster/log
 export HF_TOKEN="$(cat ~/keys/.hf_token)"
 [[ -f ~/keys/.hf_token_write ]] && export HF_WRITE_TOKEN="$(cat ~/keys/.hf_token_write)"
 
-# Override these with: --export=PROBE_ID=...,EPOCH=...
+# Override these with: --export=PROBE_ID=...,EPOCH=...,DATASET_SPLIT=...
 PROBE_ID="${PROBE_ID:-apertus_apertus_stability_repetition_balanced_layer30}"
 EPOCH="${EPOCH:-1}"
 MODEL="${MODEL:-apertus}"
@@ -27,6 +27,12 @@ PROBE_DTYPE="${PROBE_DTYPE:-float32}"
 NORM="${NORM:-layernorm}"
 LORA_LAYERS="${LORA_LAYERS:-all}"
 TOP_K="${TOP_K:-50}"
+DATASET_SPLIT="${DATASET_SPLIT:-validation}"
+DATASET_ID="${DATASET_ID:-repetition_${DATASET_SPLIT}}"
+OUTPUT_DIR_ARG=""
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+    OUTPUT_DIR_ARG="--output-dir $OUTPUT_DIR"
+fi
 
 srun --environment=$REPO/cluster/env.toml \
     python scripts/analyze_probe_errors.py \
@@ -37,4 +43,7 @@ srun --environment=$REPO/cluster/env.toml \
         --norm "$NORM" \
         --lora-layers "$LORA_LAYERS" \
         --epoch "$EPOCH" \
-        --top-k "$TOP_K"
+        --top-k "$TOP_K" \
+        --dataset-id "$DATASET_ID" \
+        --dataset-split "$DATASET_SPLIT" \
+        $OUTPUT_DIR_ARG
