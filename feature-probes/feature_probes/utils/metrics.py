@@ -76,7 +76,16 @@ def compute_clf_metrics(
     pred_positive_count = int(np.sum(preds == 1.0))
     pred_negative_count = int(np.sum(preds == 0.0))
     total_samples = len(labels)
-    
+
+    # Confusion matrix counts
+    tp = int(np.sum((preds == 1.0) & (labels == 1.0)))
+    fp = int(np.sum((preds == 1.0) & (labels == 0.0)))
+    tn = int(np.sum((preds == 0.0) & (labels == 0.0)))
+    fn = int(np.sum((preds == 0.0) & (labels == 1.0)))
+    specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float('nan')
+    fpr_at_threshold = float(fp / (fp + tn)) if (fp + tn) > 0 else float('nan')
+    fnr_at_threshold = float(fn / (fn + tp)) if (fn + tp) > 0 else float('nan')
+
     return {
         "accuracy": float(accuracy),
         "precision": float(precision),
@@ -86,6 +95,13 @@ def compute_clf_metrics(
         "optimal_threshold": float(optimal_threshold),
         "threshold_optimized_accuracy": float(threshold_optimized_accuracy),
         "recall_at_0.1_fpr": float(recall_at_01_fpr),
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
+        "specificity": specificity,
+        "fpr": fpr_at_threshold,
+        "fnr": fnr_at_threshold,
         "true_positive_count": true_positive_count,
         "true_negative_count": true_negative_count,
         "pred_positive_count": pred_positive_count,
@@ -412,6 +428,11 @@ def print_eval_metrics(
         print(f" - AUC:        {metrics[f'{prefix}degeneration_auc']:.4f}")
         print(f" - Label +rate:{metrics[f'{prefix}degeneration_positive_rate']:.4f}")
         print(f" - Pred. +rate:{metrics[f'{prefix}degeneration_pred_positive_rate']:.4f}")
+        if f'{prefix}degeneration_tp' in metrics:
+            print(f" - TP / FP:    {metrics[f'{prefix}degeneration_tp']} / {metrics[f'{prefix}degeneration_fp']}")
+            print(f" - TN / FN:    {metrics[f'{prefix}degeneration_tn']} / {metrics[f'{prefix}degeneration_fn']}")
+            print(f" - Specificity:{metrics[f'{prefix}degeneration_specificity']:.4f}")
+            print(f" - FPR / FNR:  {metrics[f'{prefix}degeneration_fpr']:.4f} / {metrics[f'{prefix}degeneration_fnr']:.4f}")
     
     # Print classification metrics for different aggregation levels
     for agg_level in ['all', 'span', 'span_max']:
