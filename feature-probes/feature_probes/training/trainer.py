@@ -347,6 +347,11 @@ class ProbeTrainer(Trainer):
             self.log(metrics)
             all_eval_metrics.update(metrics)
 
+            if dataset.config.split == "validation":
+                val_loss_key = f"{dataset.config.dataset_id}/probe_loss"
+                if val_loss_key in metrics:
+                    self.log({"val_loss": metrics[val_loss_key]})
+
             # Save metrics to JSONL file
             metrics['global_step'] = self.state.global_step
             metrics['training_progress'] = self.get_training_progress()

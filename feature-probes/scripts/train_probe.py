@@ -179,7 +179,9 @@ def main(training_config: TrainingConfig):
     print(f"Saving model to {training_config.probe_config.probe_path}")
     save_model_callback()
 
-    # Final evaluation
+    # Force the final evaluation to run even if step/epoch evals already populated
+    # the cache — we need the raw-prediction dump and ROC artifacts.
+    trainer._last_eval_metrics = None
     eval_metrics = trainer.evaluate(
         save_roc_curves=training_config.save_roc_curves,
         dump_raw_eval_results=training_config.dump_raw_eval_results,
