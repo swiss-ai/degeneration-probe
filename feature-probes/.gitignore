@@ -4,6 +4,7 @@
 .cache
 *.pickle
 __pycache__/
+core_*
 venv
 wandb
 logs/
