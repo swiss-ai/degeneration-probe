@@ -1,0 +1,117 @@
+row_index: 2102
+prompt_id: AI-MO_NuminaMath-1.5-train-15698
+source_dataset: AI-MO/NuminaMath-1.5
+degenerating: True
+================================================================================
+PROMPT
+================================================================================
+Given a sequence $\{a_n\}$ whose sum of the first $n$ terms is $S_n$, and $1$, $a_n$, $S_n$ form an arithmetic sequence.
+
+(Ⅰ) Find the general formula for the sequence $\{a_n\}$;
+
+(Ⅱ) If $b_n=\log_2a_n$, and let $c_n=a_n\cdot b_n$, find the sum of the first $n$ terms of the sequence $\{c_n\}$, denoted as $T_n$.
+
+================================================================================
+ANSWER (generated_text)
+================================================================================
+(Ⅰ) To find the general formula for the sequence $\{a_n\}$, we can use the fact that $1$, $a_n$, $S_n$ form an arithmetic sequence.
+
+Let $d$ be the common difference of the arithmetic sequence. Then, we have:
+
+$1 = a_n - S_n + S_n$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots + a_n)$
+$1 = a_n - (1 + a_1 + a_2 + \dots + a_n) + (1 + a_1 + a_2 + \dots +

@@ -1,0 +1,90 @@
+probe_config:
+  probe_id: ${model.short_name}_${training.short_name}_${dataset.short_name}_layer${probe_config.layer}
+  layer: 29
+  load_from: null
+  hf_repo_id: tymciurymciu/hallucination-probes
+  threshold: 0.5
+  model_name: ${model.probe_config.model_name}
+  probe_dtype: float32
+  normalize_before_head: layernorm
+  lora_layers: all
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+wandb_project: degeneration-probes
+wandb_tags:
+- layer_29
+- sweep_20260515_180522
+task: repetition_score
+upload_to_hf: false
+save_evaluation_metrics: true
+save_roc_curves: true
+dump_raw_eval_results: true
+model_dtype: bfloat16
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+high_loss_threshold: null
+anneal_max_aggr: false
+anneal_warmup: 1.0
+enable_gradient_checkpointing: true
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+logging_steps: 10
+seed: 42
+regression_loss: mse
+regression_output_activation: sigmoid
+degeneration_threshold: 0.8
+model:
+  short_name: apertus
+  data_subset: Apertus_8B_Instruct_2509
+  probe_config:
+    model_name: swiss-ai/Apertus-8B-Instruct-2509
+training:
+  short_name: apertus_stability
+probe_head_lr: 0.0001
+lora_lr: 0.0001
+dataset:
+  short_name: repetition_balanced_layer_sweep
+lambda_lm: 0.0
+lambda_kl: 0.0
+num_train_epochs: 1
+evaluation_strategy: 'no'
+train_datasets:
+- dataset_id: repetition_train
+  hf_repo: lorenzo0312/degeneration-probe-instruct-token-level-balanced
+  subset: null
+  split: train
+  max_length: 4608
+  max_completion_length: 4096
+  prompt_truncation_side: left
+  default_ignore: true
+  last_span_token: false
+  ignore_buffer: 0
+  pos_weight: 1.0
+  neg_weight: 1.0
+  shuffle: true
+  seed: 42
+  process_on_the_fly: false
+eval_datasets:
+- dataset_id: repetition_validation
+  hf_repo: lorenzo0312/degeneration-probe-instruct-token-level-balanced
+  subset: null
+  split: validation
+  max_length: 4608
+  max_completion_length: 4096
+  prompt_truncation_side: left
+  pos_weight: 1.0
+  neg_weight: 1.0
+  default_ignore: true
+  shuffle: false
+- dataset_id: repetition_test
+  hf_repo: lorenzo0312/degeneration-probe-instruct-token-level-balanced
+  subset: null
+  split: test
+  max_length: 4608
+  max_completion_length: 4096
+  prompt_truncation_side: left
+  pos_weight: 1.0
+  neg_weight: 1.0
+  default_ignore: true
+  shuffle: false
