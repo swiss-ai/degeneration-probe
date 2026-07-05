@@ -70,19 +70,19 @@ def test_manifest_path(config):
 
 
 def test_generations_shard_path(config):
-    got = paths_module.generations_shard_path(config, "in_domain", 3)
-    assert got == Path("/tmp/dataset_v2_pilot/generations/in_domain/shard_00003.parquet")
+    got = paths_module.generations_shard_path(config, "deepmath_103k", 3)
+    assert got == Path("/tmp/dataset_v2_pilot/generations/deepmath_103k/shard_00003.parquet")
 
 
-def test_labels_shard_path_held_out(config):
-    got = paths_module.labels_shard_path(config, "held_out", 0)
-    assert got == Path("/tmp/dataset_v2_pilot/labels/held_out/shard_00000.parquet")
+def test_labels_shard_path_held_out_source(config):
+    got = paths_module.labels_shard_path(config, "aime_2025", 0)
+    assert got == Path("/tmp/dataset_v2_pilot/labels/aime_2025/shard_00000.parquet")
 
 
 def test_rollout_activation_path(config):
-    got = paths_module.rollout_activation_path(config, "in_domain", "deepmath_103k_0007", 2)
+    got = paths_module.rollout_activation_path(config, "deepmath_103k", "deepmath_103k_0007", 2)
     assert got == Path(
-        "/tmp/dataset_v2_pilot/activations/in_domain/deepmath_103k_0007/rollout_2.safetensors"
+        "/tmp/dataset_v2_pilot/activations/deepmath_103k/deepmath_103k_0007/rollout_2.safetensors"
     )
 
 
@@ -103,12 +103,54 @@ def test_invalid_domain_rejected(config):
         paths_module.generations_dir(config, "bogus_domain")
 
 
+def test_in_domain_and_held_out_split_names_are_rejected_as_domains(config):
+    # "in_domain"/"held_out" are the coarse split names, not source names --
+    # they must NOT be accepted as a `domain` (that was the bug being fixed).
+    with pytest.raises(ValueError):
+        paths_module.generations_dir(config, "in_domain")
+    with pytest.raises(ValueError):
+        paths_module.generations_dir(config, "held_out")
+
+
+def test_configured_domain_names(config):
+    assert paths_module.configured_domain_names(config) == {
+        "deepmath_103k",
+        "numinamath_1_5",
+        "if_sft_data_verified",
+        "llama_nemotron",
+        "medical_o1",
+        "aime_2025",
+    }
+
+
+def test_is_held_out_domain(config):
+    assert paths_module.is_held_out_domain(config, "aime_2025") is True
+    assert paths_module.is_held_out_domain(config, "medical_o1") is True
+    assert paths_module.is_held_out_domain(config, "deepmath_103k") is False
+    with pytest.raises(ValueError):
+        paths_module.is_held_out_domain(config, "bogus_domain")
+
+
 def test_all_output_dirs_are_under_output_root(config):
     dirs = paths_module.all_output_dirs(config)
     assert all(str(d).startswith("/tmp/dataset_v2_pilot") for d in dirs)
-    # sanity: both domains represented for the per-domain dirs
-    assert any("in_domain" in str(d) for d in dirs)
-    assert any("held_out" in str(d) for d in dirs)
+
+    # one subfolder per actual source name (6 total) under generations/,
+    # labels/, and activations/ -- not one shared folder per split.
+    for domain in paths_module.configured_domain_names(config):
+        assert paths_module.generations_dir(config, domain) in dirs
+        assert paths_module.labels_dir(config, domain) in dirs
+        assert paths_module.activations_domain_dir(config, domain) in dirs
+
+    generations_subdirs = [d for d in dirs if d.parent.name == "generations"]
+    labels_subdirs = [d for d in dirs if d.parent.name == "labels"]
+    activations_subdirs = [d for d in dirs if d.parent.name == "activations"]
+    assert len(generations_subdirs) == 6
+    assert len(labels_subdirs) == 6
+    assert len(activations_subdirs) == 6
+
+    # the coarse split names must not appear as folders themselves
+    assert not any(d.name in ("in_domain", "held_out") for d in dirs)
 
 
 def test_config_yaml_round_trip(tmp_path):
