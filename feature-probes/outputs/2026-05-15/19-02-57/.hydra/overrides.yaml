@@ -1,5 +1,0 @@
-- model=apertus
-- training=apertus_stability_fp32
-- dataset=repetition_balanced_layer_sweep
-- probe_config.layer=30
-- wandb_tags=[layer_30,sweep_20260515_180522]

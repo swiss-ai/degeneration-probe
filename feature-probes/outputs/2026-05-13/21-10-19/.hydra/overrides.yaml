@@ -1,8 +1,0 @@
-- model=apertus
-- training=apertus_stability_fp32
-- dataset=repetition_instruct_token_level_balanced
-- probe_config.load_from=disk
-- num_train_epochs=8
-- probe_head_lr=5e-5
-- lora_lr=5e-5
-- +wandb_tags=[resume,warm_start_epoch2]

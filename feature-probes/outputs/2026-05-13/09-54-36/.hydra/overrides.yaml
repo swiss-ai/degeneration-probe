@@ -1,3 +1,0 @@
-- model=apertus
-- training=apertus_stability_fp32
-- dataset=repetition_instruct_token_level_balanced
