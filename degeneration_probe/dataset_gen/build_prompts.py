@@ -20,21 +20,24 @@ only, per ``config.split_fractions``) and ``test_heldout_domains`` (all
 held-out-domain prompts, entirely reserved for OOD eval), written to
 ``paths.split_path(config, name)``.
 
-Some configured sources are far too large to fully download for a 70-prompt
-pilot sample (e.g. ``llama_nemotron``'s "code" split is ~48GB across two
+Some configured sources are far too large to fully download for a small
+prompt sample (e.g. ``llama_nemotron``'s "code" split is ~48GB across two
 JSONL files). For any HF repo whose total file size exceeds
 ``LARGE_REPO_STREAMING_THRESHOLD_BYTES`` we use ``datasets`` streaming mode
 and only read a bounded prefix of the stream
 (``STREAMING_PREFIX_SCAN_SIZE`` examples), then apply the exact same
 deterministic Fisher-Yates shuffle-and-sample (``sample_source_rows``) used
 for fully-downloaded sources, over just that prefix. This is a deliberate
-pilot-scale tradeoff: the sample is drawn from the first
-``STREAMING_PREFIX_SCAN_SIZE`` rows of the stream (in whatever order the HF
-data loader concatenates the underlying shard files), not a uniform sample
-over the entire multi-GB/multi-million-row split. This keeps the bounded
-work independent of the split's total size (no full-file download, no
-unbounded shuffle-buffer fill) at the cost of that prefix bias -- acceptable
-for a 70-prompt pilot sample, not something a full dataset build would do.
+tradeoff: the sample is drawn from the first ``STREAMING_PREFIX_SCAN_SIZE``
+rows of the stream (in whatever order the HF data loader concatenates the
+underlying shard files), not a uniform sample over the entire multi-GB/
+multi-million-row split. This keeps the bounded work independent of the
+split's total size (no full-file download, no unbounded shuffle-buffer fill)
+at the cost of that prefix bias. ``STREAMING_PREFIX_SCAN_SIZE`` should be
+raised whenever ``n_prompts`` for a streamed source grows, to keep the
+sampled fraction of the prefix (and thus its diversity) reasonable -- it was
+5,000 for the 70-prompt pilot (1.4% sampled), raised to 20,000 for the
+~600-prompt full-scale build (3% sampled).
 Small sources are fully downloaded and sampled with an exact Fisher-Yates
 shuffle over all rows.
 """
@@ -67,7 +70,7 @@ LARGE_REPO_STREAMING_THRESHOLD_BYTES = 5 * 1024**3
 # of the split's actual size (e.g. llama_nemotron's "code" split spans two
 # 18-48GB JSONL files -- we only ever read this many rows from the front of
 # them). See module docstring for the tradeoff this implies.
-STREAMING_PREFIX_SCAN_SIZE = 5_000
+STREAMING_PREFIX_SCAN_SIZE = 20_000
 
 SourceRow = Tuple[Any, str]  # (source_row_id, prompt_text)
 
