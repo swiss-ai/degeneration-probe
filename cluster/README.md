@@ -65,6 +65,18 @@ Unfortunately, this needs to be done in an interactive job, because sbatch does 
 
 > Note: optionally, you can 'borrow' an existing `enroot` image, e.g. from here: `/iopsstor/scratch/cscs/tkwiecinski/ce-images/feature-probes+25.06.sqsh`
 
+**Building from a specific branch:**
+
+`build.sh` clones the branch from `origin` (not your local working tree), so push your branch first:
+```bash
+git push -u origin <branch-name>
+```
+Then pass the branch name as an argument:
+```bash
+bash cluster/build.sh <branch-name>
+```
+This produces `$SCRATCH/ce-images/degeneration-probe+25.06-<branch-name>.sqsh`. Update the `image =` line in `env.toml` to point at that file so `train.sbatch`/`train_multirun.sbatch` actually pick it up.
+
 **4. Submit a training job:**
 ```bash
 sbatch cluster/train.sbatch

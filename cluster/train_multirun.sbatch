@@ -3,8 +3,7 @@
 #SBATCH --partition=normal
 #SBATCH --time=4:00:00
 #SBATCH --job-name=degeneration-probe-sweep
-#SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j_%a.out
-#SBATCH --error=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j_%a.err
+#SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j_%a.log
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-task=4

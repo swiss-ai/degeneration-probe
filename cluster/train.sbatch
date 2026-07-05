@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH --account=infra01
 #SBATCH --partition=normal
-#SBATCH --time=00:02:00
+#SBATCH --time=00:20:00
 #SBATCH --job-name=degeneration-probe-train
-#SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j.err
+#SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j.log
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-task=1
