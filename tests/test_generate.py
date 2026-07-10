@@ -59,7 +59,7 @@ def _load_dataset_gen():
 
 
 config_module, paths_module, generate_module = _load_dataset_gen()
-PilotDatasetConfig = config_module.PilotDatasetConfig
+DatasetGenConfig = config_module.DatasetGenConfig
 
 derive_seed = generate_module.derive_seed
 compute_entropy_from_logits = generate_module.compute_entropy_from_logits
@@ -107,24 +107,25 @@ def test_derive_seed_rejects_out_of_range_rollout_idx():
         derive_seed(42, "deepmath_103k_00001", generate_module.ROLLOUT_IDX_MODULUS)
 
 
-def test_derive_seed_matches_all_370_pilot_prompt_ids_no_collisions():
-    """No seed collisions across the full real pilot's 370 prompt_ids x 10 rollouts.
+def test_derive_seed_matches_all_full_scale_prompt_ids_no_collisions():
+    """No seed collisions across the full real build's ~3,030 prompt_ids x 10 rollouts.
 
-    Builds synthetic ids matching the real per-domain naming scheme (rather
-    than depending on the large, environment-specific prompts.parquet file).
+    Builds synthetic ids matching the real per-domain naming scheme and
+    per-domain n_prompts from configs/dataset/full_scale.yaml (rather than
+    depending on the large, environment-specific prompts.parquet file).
     """
     domains = {
-        "deepmath_103k": 70,
-        "numinamath_1_5": 70,
-        "if_sft_data_verified": 70,
-        "llama_nemotron": 70,
-        "medical_o1": 60,
+        "deepmath_103k": 600,
+        "numinamath_1_5": 600,
+        "if_sft_data_verified": 600,
+        "llama_nemotron": 600,
+        "medical_o1": 600,
         "aime_2025": 30,
     }
     prompt_ids = [
         f"{domain}_{i:05d}" for domain, n in domains.items() for i in range(n)
     ]
-    assert len(prompt_ids) == 370
+    assert len(prompt_ids) == 3030
     seeds = [derive_seed(42, pid, r) for pid in prompt_ids for r in range(10)]
     assert len(seeds) == len(set(seeds))
 

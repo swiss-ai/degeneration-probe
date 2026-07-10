@@ -1,4 +1,4 @@
-"""Build the dataset-v2 pilot prompt pool and train/val/test splits.
+"""Build the dataset's prompt pool and train/val/test splits.
 
 For every source configured in ``config.in_domain_sources`` /
 ``config.held_out_sources`` this script:
@@ -36,8 +36,8 @@ split's total size (no full-file download, no unbounded shuffle-buffer fill)
 at the cost of that prefix bias. ``STREAMING_PREFIX_SCAN_SIZE`` should be
 raised whenever ``n_prompts`` for a streamed source grows, to keep the
 sampled fraction of the prefix (and thus its diversity) reasonable -- it was
-5,000 for the 70-prompt pilot (1.4% sampled), raised to 20,000 for the
-~600-prompt full-scale build (3% sampled).
+raised from an initial 5,000 (1.4% sampled, at an earlier 70-prompt-per-source
+scale) to 20,000 for the current ~600-prompt-per-source build (3% sampled).
 Small sources are fully downloaded and sampled with an exact Fisher-Yates
 shuffle over all rows.
 """
@@ -53,10 +53,10 @@ from typing import Any, Dict, List, Sequence, Tuple
 import pandas as pd
 
 from degeneration_probe.dataset_gen import paths
-from degeneration_probe.dataset_gen.config import PilotDatasetConfig
+from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset_gen" / "pilot_v1.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "full_scale.yaml"
 
 # HF repos whose total (all-files) size exceeds this many bytes are read in
 # streaming mode with a bounded prefix scan instead of being fully
@@ -125,7 +125,7 @@ def sample_source_rows(rows: Sequence[SourceRow], n_prompts: int, seed: int) -> 
     return [rows[i] for i in order[:n]]
 
 
-def build_domain_prompts(config: PilotDatasetConfig, source: Dict[str, Any], sampled_rows: Sequence[SourceRow]) -> pd.DataFrame:
+def build_domain_prompts(config: DatasetGenConfig, source: Dict[str, Any], sampled_rows: Sequence[SourceRow]) -> pd.DataFrame:
     """Turn a sampled (source_row_id, prompt_text) list into the prompts-table rows for one domain."""
     domain = source["name"]
     held_out = paths.is_held_out_domain(config, domain)
@@ -220,7 +220,7 @@ def fetch_and_sample_source(source: Dict[str, Any], seed: int) -> List[SourceRow
 
 # --- assembling the full prompt pool ------------------------------------------
 
-def build_prompts_table(config: PilotDatasetConfig) -> pd.DataFrame:
+def build_prompts_table(config: DatasetGenConfig) -> pd.DataFrame:
     frames = []
     for source in [*config.in_domain_sources, *config.held_out_sources]:
         print(
@@ -237,7 +237,7 @@ def build_prompts_table(config: PilotDatasetConfig) -> pd.DataFrame:
 
 # --- splitting (network-free, unit-testable) ---------------------------------
 
-def assign_splits(config: PilotDatasetConfig, prompts_df: pd.DataFrame) -> Dict[str, List[str]]:
+def assign_splits(config: DatasetGenConfig, prompts_df: pd.DataFrame) -> Dict[str, List[str]]:
     """Assign every prompt_id to exactly one of train/val/test_indomain/test_heldout_domains."""
     splits: Dict[str, List[str]] = {"train": [], "val": [], "test_indomain": [], "test_heldout_domains": []}
 
@@ -263,7 +263,7 @@ def assign_splits(config: PilotDatasetConfig, prompts_df: pd.DataFrame) -> Dict[
     return splits
 
 
-def sanity_check(config: PilotDatasetConfig, prompts_df: pd.DataFrame, splits: Dict[str, List[str]]) -> None:
+def sanity_check(config: DatasetGenConfig, prompts_df: pd.DataFrame, splits: Dict[str, List[str]]) -> None:
     """Print per-domain/per-split counts and raise if any disjointness invariant is violated."""
     print("\nPer-domain prompt counts:")
     domain_counts = prompts_df.groupby("domain").size()
@@ -324,14 +324,14 @@ def sanity_check(config: PilotDatasetConfig, prompts_df: pd.DataFrame, splits: D
 
 # --- writing outputs -----------------------------------------------------------
 
-def write_prompts_parquet(config: PilotDatasetConfig, prompts_df: pd.DataFrame) -> Path:
+def write_prompts_parquet(config: DatasetGenConfig, prompts_df: pd.DataFrame) -> Path:
     out_path = paths.prompts_path(config)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     prompts_df.to_parquet(out_path, index=False)
     return out_path
 
 
-def write_splits_jsonl(config: PilotDatasetConfig, splits: Dict[str, List[str]]) -> Dict[str, Path]:
+def write_splits_jsonl(config: DatasetGenConfig, splits: Dict[str, List[str]]) -> Dict[str, Path]:
     written: Dict[str, Path] = {}
     for name, ids in splits.items():
         out_path = paths.split_path(config, name)
@@ -351,11 +351,11 @@ def main() -> None:
         "--config",
         type=str,
         default=str(DEFAULT_CONFIG_PATH),
-        help="Path to a PilotDatasetConfig YAML file (default: configs/dataset_gen/pilot_v1.yaml).",
+        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/full_scale.yaml).",
     )
     args = parser.parse_args()
 
-    config = PilotDatasetConfig.from_yaml(args.config)
+    config = DatasetGenConfig.from_yaml(args.config)
 
     prompts_df = build_prompts_table(config)
     splits = assign_splits(config, prompts_df)

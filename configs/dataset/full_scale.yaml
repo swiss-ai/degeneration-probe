@@ -1,16 +1,16 @@
-# Config for the dataset-v2 full-scale build. Matches
-# degeneration_probe.dataset_gen.config.PilotDatasetConfig field-for-field --
-# load with PilotDatasetConfig.from_yaml("configs/dataset_gen/full_scale_v1.yaml").
+# Config for the full-scale dataset build. Matches
+# degeneration_probe.dataset_gen.config.DatasetGenConfig field-for-field --
+# load with DatasetGenConfig.from_yaml("configs/dataset/full_scale.yaml").
 #
-# Successor to configs/dataset_gen/pilot_v1.yaml (370 prompts, 1024 tokens).
-# Two changes from the pilot: n_prompts raised per source (~600 each, aime_2025
-# still capped at its real 30-row maximum) to roughly match the scale of the
-# current production "balanced" HF dataset (lorenzo0312/degeneration-probe-
-# instruct-token-level-balanced, 2,973 rows), and max_new_tokens raised from
-# 1024 to 4096 -- the pilot showed llama_nemotron alone had 21.9% of its
-# rollouts hit the 1024 cap without reaching EOS (a real, hand-verified
-# "visited[u-1] and visited[u-1] and ..." loop was still forming when cut off),
-# so 1024 tokens was likely truncating degeneration before it could occur.
+# n_prompts is ~600 per source (aime_2025 capped at its real 30-row maximum)
+# to roughly match the scale of the current production "balanced" HF dataset
+# (lorenzo0312/degeneration-probe-instruct-token-level-balanced, 2,973 rows).
+# max_new_tokens is 4096 rather than a shorter cap: an earlier, shorter-cap
+# trial run showed llama_nemotron alone had 21.9% of its rollouts hit a
+# 1024-token cap without reaching EOS (a real, hand-verified
+# "visited[u-1] and visited[u-1] and ..." loop was still forming when cut
+# off), so a short cap was likely truncating degeneration before it could
+# occur.
 
 model_name: "swiss-ai/Apertus-8B-Instruct-2509"
 
@@ -52,9 +52,9 @@ held_out_sources:
     n_prompts: 600
 
   # MathArena/aime_2025's "train" split only has 30 rows total (AIME I + II
-  # 2025, 15 problems each) -- already fully used in the pilot at this exact
-  # cap. build_prompts.py's sample_source_rows() clamps to the available row
-  # count and warns rather than failing.
+  # 2025, 15 problems each) -- n_prompts is already capped at that real
+  # maximum. build_prompts.py's sample_source_rows() clamps to the available
+  # row count and warns rather than failing.
   - name: aime_2025
     hf_repo: "MathArena/aime_2025"
     hf_subset: null
@@ -68,8 +68,8 @@ temperature: 0.7
 top_p: 0.9
 seed: 42
 
-output_root: "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/dataset_v2_full_scale"
-work_root: "/capstor/scratch/cscs/mdenegri/degeneration-probe/dataset_v2_full_scale_work"
+output_root: "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/dataset_full_scale"
+work_root: "/capstor/scratch/cscs/mdenegri/degeneration-probe/dataset_full_scale_work"
 
 split_fractions:
   train: 0.70

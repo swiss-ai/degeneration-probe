@@ -29,6 +29,6 @@ export HF_TOKEN="$(cat ~/keys/.hf_token)"
 # rollout_idx) already recorded with status "ok".
 srun --environment=$REPO/cluster/env.toml \
     python -m degeneration_probe.dataset_gen.cache_activations \
-        --config configs/dataset_gen/full_scale_v1.yaml
+        --config configs/dataset/full_scale.yaml
 
 echo "Activation caching done."

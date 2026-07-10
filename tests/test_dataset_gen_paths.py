@@ -17,7 +17,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_GEN_DIR = REPO_ROOT / "degeneration_probe" / "dataset_gen"
-PILOT_V1_YAML = REPO_ROOT / "configs" / "dataset_gen" / "pilot_v1.yaml"
+FULL_SCALE_YAML = REPO_ROOT / "configs" / "dataset" / "full_scale.yaml"
 
 
 def _load_module(name: str, file_path: Path):
@@ -48,53 +48,53 @@ def _load_dataset_gen():
 
 
 config_module, paths_module = _load_dataset_gen()
-PilotDatasetConfig = config_module.PilotDatasetConfig
+DatasetGenConfig = config_module.DatasetGenConfig
 
 
 @pytest.fixture
-def config() -> "PilotDatasetConfig":
-    return PilotDatasetConfig(
-        output_root="/tmp/dataset_v2_pilot",
-        work_root="/tmp/dataset_v2_pilot_work",
+def config() -> "DatasetGenConfig":
+    return DatasetGenConfig(
+        output_root="/tmp/dataset_gen_test",
+        work_root="/tmp/dataset_gen_test_work",
     )
 
 
 def test_prompts_path(config):
     assert paths_module.prompts_path(config) == Path(
-        "/tmp/dataset_v2_pilot/prompts/prompts.parquet"
+        "/tmp/dataset_gen_test/prompts/prompts.parquet"
     )
 
 
 def test_manifest_path(config):
-    assert paths_module.manifest_path(config) == Path("/tmp/dataset_v2_pilot/manifest.json")
+    assert paths_module.manifest_path(config) == Path("/tmp/dataset_gen_test/manifest.json")
 
 
 def test_generations_shard_path(config):
     got = paths_module.generations_shard_path(config, "deepmath_103k", 3)
-    assert got == Path("/tmp/dataset_v2_pilot/generations/deepmath_103k/shard_00003.parquet")
+    assert got == Path("/tmp/dataset_gen_test/generations/deepmath_103k/shard_00003.parquet")
 
 
 def test_labels_shard_path_held_out_source(config):
     got = paths_module.labels_shard_path(config, "aime_2025", 0)
-    assert got == Path("/tmp/dataset_v2_pilot/labels/aime_2025/shard_00000.parquet")
+    assert got == Path("/tmp/dataset_gen_test/labels/aime_2025/shard_00000.parquet")
 
 
 def test_rollout_activation_path(config):
     got = paths_module.rollout_activation_path(config, "deepmath_103k", "deepmath_103k_0007", 2)
     assert got == Path(
-        "/tmp/dataset_v2_pilot/activations/deepmath_103k/deepmath_103k_0007/rollout_2.safetensors"
+        "/tmp/dataset_gen_test/activations/deepmath_103k/deepmath_103k_0007/rollout_2.safetensors"
     )
 
 
 def test_activations_manifest_path(config):
     assert paths_module.activations_manifest_path(config) == Path(
-        "/tmp/dataset_v2_pilot/activations/manifest.parquet"
+        "/tmp/dataset_gen_test/activations/manifest.parquet"
     )
 
 
 def test_split_path(config):
     assert paths_module.split_path(config, "train") == Path(
-        "/tmp/dataset_v2_pilot/splits/train.jsonl"
+        "/tmp/dataset_gen_test/splits/train.jsonl"
     )
 
 
@@ -133,7 +133,7 @@ def test_is_held_out_domain(config):
 
 def test_all_output_dirs_are_under_output_root(config):
     dirs = paths_module.all_output_dirs(config)
-    assert all(str(d).startswith("/tmp/dataset_v2_pilot") for d in dirs)
+    assert all(str(d).startswith("/tmp/dataset_gen_test") for d in dirs)
 
     # one subfolder per actual source name (6 total) under generations/,
     # labels/, and activations/ -- not one shared folder per split.
@@ -154,7 +154,7 @@ def test_all_output_dirs_are_under_output_root(config):
 
 
 def test_config_yaml_round_trip(tmp_path):
-    original = PilotDatasetConfig(
+    original = DatasetGenConfig(
         n_rollouts_per_prompt=5,
         max_new_tokens=256,
         output_root=str(tmp_path / "out"),
@@ -163,29 +163,33 @@ def test_config_yaml_round_trip(tmp_path):
     yaml_path = tmp_path / "config.yaml"
     original.to_yaml(yaml_path)
 
-    loaded = PilotDatasetConfig.from_yaml(yaml_path)
+    loaded = DatasetGenConfig.from_yaml(yaml_path)
 
     assert loaded.to_dict() == original.to_dict()
     assert loaded.n_rollouts_per_prompt == 5
     assert loaded.max_new_tokens == 256
 
 
-def test_pilot_v1_yaml_matches_config_schema():
-    loaded = PilotDatasetConfig.from_yaml(PILOT_V1_YAML)
+def test_full_scale_yaml_matches_config_schema():
+    loaded = DatasetGenConfig.from_yaml(FULL_SCALE_YAML)
 
     assert loaded.model_name == "swiss-ai/Apertus-8B-Instruct-2509"
     assert len(loaded.in_domain_sources) == 4
-    assert all(src["n_prompts"] == 70 for src in loaded.in_domain_sources)
+    assert all(src["n_prompts"] == 600 for src in loaded.in_domain_sources)
     assert len(loaded.held_out_sources) == 2
-    assert all(src["n_prompts"] == 60 for src in loaded.held_out_sources)
+    assert {src["name"]: src["n_prompts"] for src in loaded.held_out_sources} == {
+        "medical_o1": 600,
+        "aime_2025": 30,
+    }
+    assert loaded.max_new_tokens == 4096
     assert loaded.split_fractions == {"train": 0.70, "val": 0.15, "test_indomain": 0.15}
 
 
 def test_source_missing_required_key_raises():
     with pytest.raises(ValueError):
-        PilotDatasetConfig(in_domain_sources=[{"name": "bad_source"}])
+        DatasetGenConfig(in_domain_sources=[{"name": "bad_source"}])
 
 
 def test_split_fractions_must_sum_to_one():
     with pytest.raises(ValueError):
-        PilotDatasetConfig(split_fractions={"train": 0.5, "val": 0.1, "test_indomain": 0.1})
+        DatasetGenConfig(split_fractions={"train": 0.5, "val": 0.1, "test_indomain": 0.1})

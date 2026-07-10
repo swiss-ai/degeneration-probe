@@ -59,7 +59,7 @@ def _load_dataset_gen():
 
 
 config_module, paths_module, generate_module, cache_activations_module = _load_dataset_gen()
-PilotDatasetConfig = config_module.PilotDatasetConfig
+DatasetGenConfig = config_module.DatasetGenConfig
 
 ACTIVATIONS_MANIFEST_COLUMNS = cache_activations_module.ACTIVATIONS_MANIFEST_COLUMNS
 load_existing_activations_manifest = cache_activations_module.load_existing_activations_manifest

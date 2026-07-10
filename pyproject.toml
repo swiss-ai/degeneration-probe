@@ -29,6 +29,18 @@ dependencies = [
   "hydra-core>=1.3",
   "omegaconf>=2.3",   # Hydra depends on this, good to pin explicitly
   "ipywidgets>=8.1.8",
+  # LLM judge (degeneration_probe/dataset_gen/llm_judge.py)
+  "anthropic>=0.75.0",
+  "openai>=2.6.0",
+  "claude-agent-sdk>=0.2.115",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "ipykernel>=6.29.0",
+  "nbclient>=0.10.0",
+  "nbformat>=5.10.0",
 ]
 
 [tool.setuptools]

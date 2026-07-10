@@ -1,4 +1,4 @@
-"""Dataset-v2 pilot generation pipeline (scaffolding).
+"""Dataset generation pipeline (scaffolding).
 
 This package only contains the config schema, path layout, and manifest
 read/write helpers for now. Generation, labeling, and activation-extraction
@@ -7,7 +7,7 @@ logic live elsewhere and are added separately; this package does not touch
 datasets).
 """
 
-from degeneration_probe.dataset_gen.config import PilotDatasetConfig
+from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.dataset_gen.manifest import (
     build_manifest,
     get_git_commit,
@@ -17,7 +17,7 @@ from degeneration_probe.dataset_gen.manifest import (
 )
 
 __all__ = [
-    "PilotDatasetConfig",
+    "DatasetGenConfig",
     "build_manifest",
     "get_git_commit",
     "get_model_config",

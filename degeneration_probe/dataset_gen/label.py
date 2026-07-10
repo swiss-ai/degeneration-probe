@@ -1,15 +1,14 @@
-"""Phase 2 of the dataset-v2 pilot: degeneration labels.
+"""Phase 2 of the dataset generation pipeline: degeneration labels.
 
 For every rollout in ``paths.generations_shard_path(config, domain, 0)`` (written
 by ``generate.py``) this module computes:
 
-1. ``repetition_score`` -- per-token, sliding-window ``1 - TTR`` over bigrams
-   (n=2). Ported from the reference implementation at
-   ``origin/main:src/degeneration_probe/probe/data_loader.py``
-   (``_ngram_ttr`` / ``sliding_window_repetition``): for each position ``t``,
+1. ``repetition_score`` -- per-token, sliding-window ``1 - TTR`` (type-token
+   ratio) over bigrams (n=2): for each position ``t``,
    ``1 - (distinct 2-grams in tokens[t:t+window_size]) / (window_size - 1)``.
    Positions where a full window doesn't fit at the end of the sequence are
-   NaN (masked), matching that reference's convention exactly.
+   NaN (masked). A rollout counts as degenerate when this exceeds
+   ``DEFAULT_DEGENERATION_THRESHOLD`` (0.8).
 
 2. ``entropy`` -- per-token pass-through of Phase 1's ``per_token_entropy``
    column (already per-token, already aligned to ``generated_token_ids``).
@@ -55,10 +54,10 @@ import numpy as np
 import pandas as pd
 
 from degeneration_probe.dataset_gen import paths
-from degeneration_probe.dataset_gen.config import PilotDatasetConfig
+from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset_gen" / "pilot_v1.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "full_scale.yaml"
 
 DEFAULT_WINDOW_SIZE = 256
 DEFAULT_TTR_NGRAM = 2
@@ -96,7 +95,7 @@ PROMPT_STATS_COLUMNS = [
 ]
 
 
-# --- TTR window score (ported from origin/main:src/degeneration_probe/probe/data_loader.py) --
+# --- TTR window score -----------------------------------------------------------
 
 def _ngram_ttr(token_ids: Sequence[int], n: int) -> float:
     """Type-token ratio over n-grams. 1.0 if too few tokens."""
@@ -535,8 +534,8 @@ def _rollout_summary(repetition: Sequence[float]) -> Dict[str, float]:
     """Reduce one rollout's per-token repetition array to a (mean, max) pair.
 
     NaN-tail positions are ignored (np.nanmean/np.nanmax). If a rollout has no
-    valid windows at all (shorter than window_size -- doesn't happen in the
-    real pilot data, but handled defensively), both reduce to NaN rather than
+    valid windows at all (shorter than window_size -- doesn't happen in
+    practice, but handled defensively), both reduce to NaN rather than
     raising. (LRS needs no such reduction -- `find_longest_repeated_substring`
     already returns one `lrs_score` per rollout, not a per-token array.)
     """
@@ -621,7 +620,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=str, default=str(DEFAULT_CONFIG_PATH),
-        help="Path to a PilotDatasetConfig YAML file (default: configs/dataset_gen/pilot_v1.yaml).",
+        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/full_scale.yaml).",
     )
     parser.add_argument(
         "--domains", nargs="*", default=None,
@@ -646,7 +645,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = PilotDatasetConfig.from_yaml(args.config)
+    config = DatasetGenConfig.from_yaml(args.config)
     domains = args.domains or sorted(paths.configured_domain_names(config))
 
     prompts_df = pd.read_parquet(paths.prompts_path(config))

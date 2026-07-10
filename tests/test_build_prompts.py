@@ -53,7 +53,7 @@ def _load_dataset_gen():
 
 
 config_module, paths_module, build_prompts_module = _load_dataset_gen()
-PilotDatasetConfig = config_module.PilotDatasetConfig
+DatasetGenConfig = config_module.DatasetGenConfig
 
 extract_prompt_text = build_prompts_module.extract_prompt_text
 sample_source_rows = build_prompts_module.sample_source_rows
@@ -74,8 +74,8 @@ def _fake_source(name: str, n_prompts: int) -> dict:
 
 
 @pytest.fixture
-def tiny_config() -> "PilotDatasetConfig":
-    return PilotDatasetConfig(
+def tiny_config() -> "DatasetGenConfig":
+    return DatasetGenConfig(
         in_domain_sources=[_fake_source("fake_a", 10), _fake_source("fake_b", 10)],
         held_out_sources=[_fake_source("fake_c", 5)],
         split_fractions={"train": 0.70, "val": 0.15, "test_indomain": 0.15},

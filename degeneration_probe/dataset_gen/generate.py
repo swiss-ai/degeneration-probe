@@ -1,4 +1,4 @@
-"""Phase 1 of the dataset-v2 pilot: sample rollouts with per-token entropy.
+"""Phase 1 of the dataset generation pipeline: sample rollouts with per-token entropy.
 
 For every prompt in ``paths.prompts_path(config)`` (written by ``build_prompts.py``)
 this module generates ``config.n_rollouts_per_prompt`` sampled rollouts, and for
@@ -45,15 +45,16 @@ per-process for strings (via ``PYTHONHASHSEED``) so it cannot be used here;
 sha256 is stable across processes/machines/python versions.
 
 This deviates from the literal "mod 100_000" suggestion in the original spec:
-with only 100_000 buckets and ~370 prompt_ids, the birthday bound puts the
-chance of at least one hash collision across prompt_ids at roughly 1 - exp(-370^2
-/ (2*100_000)) =~ 50%, which is far too likely for comfort (a collision there
-would silently give two *different* prompts identical seeds for the same
-rollout_idx, correlating supposedly-independent samples). Using a 1e9 modulus
-instead pushes that same bound down to ~7e-5, which is negligible even if the
-dataset grows well past the pilot's 370 prompts. ``ROLLOUT_IDX_MODULUS`` (1000)
-just reserves headroom so ``+ rollout_idx`` can never carry into the hash term
-(``n_rollouts_per_prompt`` is 10 in the pilot).
+with only 100_000 buckets and ~370 prompt_ids (an earlier, smaller build's
+scale), the birthday bound puts the chance of at least one hash collision
+across prompt_ids at roughly 1 - exp(-370^2 / (2*100_000)) =~ 50%, which is
+far too likely for comfort (a collision there would silently give two
+*different* prompts identical seeds for the same rollout_idx, correlating
+supposedly-independent samples). Using a 1e9 modulus instead pushes that same
+bound down to ~7e-5 even at that scale, and stays negligible at the current
+~3,030-prompt build (and well beyond). ``ROLLOUT_IDX_MODULUS`` (1000) just
+reserves headroom so ``+ rollout_idx`` can never carry into the hash term
+(``n_rollouts_per_prompt`` is 10).
 
 Sampling determinism
 ---------------------
@@ -62,7 +63,7 @@ seeded once via ``derive_seed`` and advanced across all of that rollout's
 decode steps. Generators (and the multinomial draw itself) always run on CPU,
 even when the model runs on GPU: CUDA's RNG/algorithm can vary across GPU
 architectures and driver versions, so pinning sampling to CPU keeps a given
-seed reproducible regardless of which node/GPU the pilot happens to run on.
+seed reproducible regardless of which node/GPU the build happens to run on.
 The (batch, vocab) softmax probabilities are moved to CPU once per step before
 the per-row ``torch.multinomial`` calls -- cheap relative to the forward pass.
 
@@ -104,10 +105,10 @@ import pandas as pd
 import torch
 
 from degeneration_probe.dataset_gen import paths
-from degeneration_probe.dataset_gen.config import PilotDatasetConfig
+from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset_gen" / "pilot_v1.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "full_scale.yaml"
 
 Task = Tuple[str, int]  # (prompt_id, rollout_idx)
 
@@ -496,7 +497,7 @@ def _chunk(seq: Sequence[Task], size: int) -> Iterator[List[Task]]:
 # --- per-domain driver ---------------------------------------------------------
 
 def run_domain(
-    config: PilotDatasetConfig,
+    config: DatasetGenConfig,
     model,
     tokenizer,
     prompts_df: pd.DataFrame,
@@ -548,7 +549,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=str, default=str(DEFAULT_CONFIG_PATH),
-        help="Path to a PilotDatasetConfig YAML file (default: configs/dataset_gen/pilot_v1.yaml).",
+        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/full_scale.yaml).",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Rollouts per decode batch.")
     parser.add_argument(
@@ -572,7 +573,7 @@ def main() -> None:
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    config = PilotDatasetConfig.from_yaml(args.config)
+    config = DatasetGenConfig.from_yaml(args.config)
     if args.max_rollouts is not None:
         config.n_rollouts_per_prompt = args.max_rollouts
     if args.max_new_tokens is not None:

@@ -1,7 +1,7 @@
-"""Manifest read/write for the dataset-v2 pilot.
+"""Manifest read/write for the dataset generation pipeline.
 
 The manifest captures everything needed to reproduce/audit a dataset build:
-the pipeline's git commit, a build timestamp, the full ``PilotDatasetConfig``
+the pipeline's git commit, a build timestamp, the full ``DatasetGenConfig``
 dump, and a handful of fields from the target model's ``config.json``
 (hidden_size, num_hidden_layers, vocab_size) so downstream activation-shape
 assumptions can be checked without re-loading the model.
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from degeneration_probe.dataset_gen.config import PilotDatasetConfig
+from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.dataset_gen.paths import manifest_path
 
 # Default local HF cache to check before hitting the network. Overridable via
@@ -85,7 +85,7 @@ def get_model_config(
 
 
 def build_manifest(
-    config: PilotDatasetConfig,
+    config: DatasetGenConfig,
     repo_root: Optional[Union[str, Path]] = None,
     hf_cache_dir: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
@@ -99,7 +99,7 @@ def build_manifest(
 
 
 def write_manifest(
-    config: PilotDatasetConfig,
+    config: DatasetGenConfig,
     path: Optional[Union[str, Path]] = None,
     repo_root: Optional[Union[str, Path]] = None,
     hf_cache_dir: Optional[Union[str, Path]] = None,

@@ -25,7 +25,7 @@ echo "Job: $SLURM_JOB_ID  CPUs: $SLURM_CPUS_PER_TASK"
 source .venv/bin/activate
 
 python -m degeneration_probe.dataset_gen.label \
-    --config configs/dataset_gen/full_scale_v1.yaml \
+    --config configs/dataset/full_scale.yaml \
     --window-size 256 \
     --ttr-ngram 2 \
     --lrs-min-length 10 \
