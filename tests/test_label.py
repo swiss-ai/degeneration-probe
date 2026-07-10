@@ -1,5 +1,6 @@
-"""Tests for degeneration_probe.dataset_gen.label -- the per-token TTR/LRS
-window scores, entropy pass-through, and prompt-level aggregation.
+"""Tests for degeneration_probe.dataset_gen.label -- the per-token
+repetition/LRS window scores, entropy pass-through, and prompt-level
+aggregation.
 
 All expected values below are worked by hand in the accompanying comments
 (no dependency on the module under test to derive the expectation), following
@@ -86,7 +87,7 @@ def test_ngram_ttr_too_few_tokens_for_n_returns_one():
     assert _ngram_ttr([1, 2], 5) == 1.0
 
 
-# --- sliding_window_repetition (ttr_window_score) ------------------------------
+# --- sliding_window_repetition (repetition_score) -------------------------------
 
 def test_sliding_window_repetition_hand_computed():
     # tokens[t:t+4] for t=0..4 (window=4, total=8):
@@ -181,16 +182,16 @@ def test_sliding_window_lrs_matches_direct_lrs_score_per_window():
 def test_label_rollout_shapes_and_entropy_passthrough():
     token_ids = [1, 1, 1, 1, 2, 3, 4, 5]
     entropy = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-    labels = label_rollout(token_ids, entropy, window_size=4, lrs_min_length=2)
+    labels = label_rollout(token_ids, entropy, window_size=4, ttr_ngram=1, lrs_min_length=2)
 
-    assert len(labels["ttr_window_score"]) == len(token_ids)
+    assert len(labels["repetition_score"]) == len(token_ids)
     assert len(labels["lrs_window_score"]) == len(token_ids)
     assert len(labels["entropy"]) == len(token_ids)
     assert labels["entropy"] == pytest.approx(entropy)
     # Same hand-computed ttr as test_sliding_window_repetition_hand_computed.
-    assert labels["ttr_window_score"][0] == pytest.approx(0.75)
-    assert labels["ttr_window_score"][3] == pytest.approx(0.0)
-    assert math.isnan(labels["ttr_window_score"][-1])
+    assert labels["repetition_score"][0] == pytest.approx(0.75)
+    assert labels["repetition_score"][3] == pytest.approx(0.0)
+    assert math.isnan(labels["repetition_score"][-1])
 
 
 def test_label_shard_produces_one_row_per_rollout_with_expected_columns():
@@ -212,47 +213,47 @@ def test_label_shard_produces_one_row_per_rollout_with_expected_columns():
             },
         ]
     )
-    labels_df = label_shard(generations_df, window_size=4, lrs_min_length=2)
+    labels_df = label_shard(generations_df, window_size=4, ttr_ngram=1, lrs_min_length=2)
 
-    assert list(labels_df.columns) == ["prompt_id", "rollout_idx", "ttr_window_score", "lrs_window_score", "entropy"]
+    assert list(labels_df.columns) == ["prompt_id", "rollout_idx", "repetition_score", "lrs_window_score", "entropy"]
     assert len(labels_df) == 2
     assert set(labels_df["rollout_idx"]) == {0, 1}
 
     row0 = labels_df[labels_df["rollout_idx"] == 0].iloc[0]
-    assert row0["ttr_window_score"][0] == pytest.approx(0.75)
+    assert row0["repetition_score"][0] == pytest.approx(0.75)
     assert row0["entropy"] == pytest.approx([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
 
     row1 = labels_df[labels_df["rollout_idx"] == 1].iloc[0]
-    # All-distinct tokens -> ttr score 0.0 everywhere a window fits.
-    assert row1["ttr_window_score"][0] == pytest.approx(0.0)
+    # All-distinct tokens -> repetition score 0.0 everywhere a window fits.
+    assert row1["repetition_score"][0] == pytest.approx(0.0)
 
 
 # --- _rollout_summary / aggregate_prompt_stats ---------------------------------
 
 def test_rollout_summary_ignores_nan_tail():
-    ttr = [0.9, float("nan")]
+    repetition = [0.9, float("nan")]
     lrs = [0.1, float("nan")]
-    summary = _rollout_summary(ttr, lrs)
-    assert summary["mean_ttr_window_score"] == pytest.approx(0.9)
-    assert summary["max_ttr_window_score"] == pytest.approx(0.9)
+    summary = _rollout_summary(repetition, lrs)
+    assert summary["mean_repetition_score"] == pytest.approx(0.9)
+    assert summary["max_repetition_score"] == pytest.approx(0.9)
     assert summary["mean_lrs_window_score"] == pytest.approx(0.1)
     assert summary["max_lrs_window_score"] == pytest.approx(0.1)
 
 
 def test_rollout_summary_all_nan_is_nan():
     summary = _rollout_summary([float("nan"), float("nan")], [float("nan"), float("nan")])
-    assert math.isnan(summary["mean_ttr_window_score"])
-    assert math.isnan(summary["max_ttr_window_score"])
+    assert math.isnan(summary["mean_repetition_score"])
+    assert math.isnan(summary["max_repetition_score"])
     assert math.isnan(summary["mean_lrs_window_score"])
     assert math.isnan(summary["max_lrs_window_score"])
 
 
-def _labels_row(prompt_id, rollout_idx, ttr, lrs, entropy=None):
-    n = len(ttr)
+def _labels_row(prompt_id, rollout_idx, repetition, lrs, entropy=None):
+    n = len(repetition)
     return {
         "prompt_id": prompt_id,
         "rollout_idx": rollout_idx,
-        "ttr_window_score": ttr,
+        "repetition_score": repetition,
         "lrs_window_score": lrs,
         "entropy": entropy if entropy is not None else [0.0] * n,
     }
@@ -260,15 +261,15 @@ def _labels_row(prompt_id, rollout_idx, ttr, lrs, entropy=None):
 
 def test_aggregate_prompt_stats_hand_computed():
     # p0: 2 rollouts.
-    #   rollout0: ttr=[0.9, nan] -> mean=max=0.9 (> 0.8 threshold: degenerating)
+    #   rollout0: repetition=[0.9, nan] -> mean=max=0.9 (> 0.8 threshold: degenerating)
     #             lrs=[0.1, nan] -> mean=max=0.1
-    #   rollout1: ttr=[0.5, 0.5] -> mean=max=0.5 (<= 0.8: not degenerating)
+    #   rollout1: repetition=[0.5, 0.5] -> mean=max=0.5 (<= 0.8: not degenerating)
     #             lrs=[0.2, 0.3] -> mean=0.25, max=0.3
-    #   -> mean_ttr = mean(0.9, 0.5) = 0.7 ; max_ttr = max(0.9, 0.5) = 0.9
+    #   -> mean_repetition = mean(0.9, 0.5) = 0.7 ; max_repetition = max(0.9, 0.5) = 0.9
     #   -> mean_lrs = mean(0.1, 0.25) = 0.175 ; max_lrs = max(0.1, 0.3) = 0.3
     #   -> degeneration_rate = 1/2 = 0.5
-    # p1: 1 rollout: ttr=[0.95] (> 0.8: degenerating), lrs=[0.4]
-    #   -> mean_ttr=max_ttr=0.95 ; mean_lrs=max_lrs=0.4 ; degeneration_rate=1.0
+    # p1: 1 rollout: repetition=[0.95] (> 0.8: degenerating), lrs=[0.4]
+    #   -> mean_repetition=max_repetition=0.95 ; mean_lrs=max_lrs=0.4 ; degeneration_rate=1.0
     labels_df = pd.DataFrame.from_records(
         [
             _labels_row("p0", 0, [0.9, float("nan")], [0.1, float("nan")]),
@@ -283,16 +284,16 @@ def test_aggregate_prompt_stats_hand_computed():
 
     assert stats.loc["p0", "domain"] == "d0"
     assert stats.loc["p0", "n_rollouts"] == 2
-    assert stats.loc["p0", "mean_ttr_window_score"] == pytest.approx(0.7)
-    assert stats.loc["p0", "max_ttr_window_score"] == pytest.approx(0.9)
+    assert stats.loc["p0", "mean_repetition_score"] == pytest.approx(0.7)
+    assert stats.loc["p0", "max_repetition_score"] == pytest.approx(0.9)
     assert stats.loc["p0", "mean_lrs_window_score"] == pytest.approx(0.175)
     assert stats.loc["p0", "max_lrs_window_score"] == pytest.approx(0.3)
     assert stats.loc["p0", "degeneration_rate"] == pytest.approx(0.5)
 
     assert stats.loc["p1", "domain"] == "d1"
     assert stats.loc["p1", "n_rollouts"] == 1
-    assert stats.loc["p1", "mean_ttr_window_score"] == pytest.approx(0.95)
-    assert stats.loc["p1", "max_ttr_window_score"] == pytest.approx(0.95)
+    assert stats.loc["p1", "mean_repetition_score"] == pytest.approx(0.95)
+    assert stats.loc["p1", "max_repetition_score"] == pytest.approx(0.95)
     assert stats.loc["p1", "mean_lrs_window_score"] == pytest.approx(0.4)
     assert stats.loc["p1", "max_lrs_window_score"] == pytest.approx(0.4)
     assert stats.loc["p1", "degeneration_rate"] == pytest.approx(1.0)
@@ -308,8 +309,8 @@ def test_aggregate_prompt_stats_rollout_with_no_valid_windows_does_not_count_as_
     row = stats.iloc[0]
     assert row["n_rollouts"] == 1
     assert row["degeneration_rate"] == 0.0
-    assert math.isnan(row["mean_ttr_window_score"])
-    assert math.isnan(row["max_ttr_window_score"])
+    assert math.isnan(row["mean_repetition_score"])
+    assert math.isnan(row["max_repetition_score"])
 
 
 def test_aggregate_prompt_stats_covers_every_prompt_exactly_once():
