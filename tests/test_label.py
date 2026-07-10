@@ -332,6 +332,41 @@ def test_find_longest_repeated_substring_atomic_chunk_repeated_with_a_real_gap()
     assert result["lrs_unit_token_ids"] == paragraph
 
 
+def test_find_longest_repeated_substring_finds_all_cycles_despite_a_changing_token():
+    # Regression test (real data: a rollout that loops through the same
+    # broken derivation 9 times, incrementing a step counter every cycle).
+    # The binary search can only ever match the content shared between
+    # exactly two cycles, so its chosen pair can accidentally include one
+    # extra token beyond the true stable unit if two cycles' counters happen
+    # to share a leading digit -- here cycle 0 and cycle 1's marker tokens
+    # are both 77, so the raw match is unit+marker (6 tokens), not just the
+    # 5-token unit. Bug this guards against: without a gap-aligned rescan,
+    # only cycles 0 and 1 are ever found ("repeated 2x"), and every other
+    # cycle -- despite the unit itself being byte-identical throughout -- is
+    # invisible because its marker token differs from 77.
+    unit = [10, 20, 30, 40, 50]
+
+    def cycle(i, marker):
+        return unit + [marker] + [900 + i, 800 + i]
+
+    markers = [77, 77, 88, 99, 111, 222]
+    tokens = []
+    for i, marker in enumerate(markers):
+        tokens += cycle(i, marker)
+
+    result = find_longest_repeated_substring(tokens, min_length=2)
+    assert result["lrs_length"] == 6  # unit + the accidentally-shared marker
+    assert result["lrs_first_start"] == 0
+    assert result["lrs_second_start"] == 8
+    # Trimmed down to the 5-token unit that's actually stable across ALL
+    # six cycles, not the 6-token match that only held for the first pair.
+    assert result["lrs_period"] == 5
+    assert result["lrs_unit_token_ids"] == unit
+    assert result["lrs_region_starts"] == [0, 8, 16, 24, 32, 40]
+    assert result["lrs_region_ends"] == [5, 13, 21, 29, 37, 45]
+    assert result["lrs_period_repeat_count"] == 6
+
+
 def test_find_longest_repeated_substring_no_match_has_none_period_fields():
     tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     result = find_longest_repeated_substring(tokens, min_length=2)

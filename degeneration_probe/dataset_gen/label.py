@@ -238,6 +238,68 @@ def _periodic_regions_for_match(
     return _merge_spans([span_a, span_b])
 
 
+# An atomic chunk's *own* recurrence interval (the gap between the two
+# occurrences the binary search happened to find) has nothing to do with its
+# internal period -- there's no adjacent-step relationship to walk via
+# `_extend_periodic_region`. But that same interval is a good guess for where
+# *further* copies live (e.g. a model looping through the same paragraph with
+# an incrementing step counter spliced in every cycle), so
+# `_gap_aligned_occurrences` checks every multiple of that gap directly.
+_GAP_MATCH_MIN_FRACTION = 0.8
+
+
+def _gap_aligned_occurrences(
+    tokens: Sequence[int],
+    first_start: int,
+    gap: int,
+    span_length: int,
+    min_match_fraction: float = _GAP_MATCH_MIN_FRACTION,
+) -> Tuple[List[Tuple[int, int]], int]:
+    """Look for further copies of `tokens[first_start : first_start + span_length]`
+    at every other multiple of `gap` from `first_start` (both directions), not
+    just at `first_start` and `first_start + gap` themselves.
+
+    A copy rarely matches byte-for-byte: if the model is looping with some
+    slowly-changing element spliced into each cycle (an incrementing step
+    counter, say), only *most* of the span recurs exactly. So each candidate
+    position is scored by its longest common prefix with the anchor span
+    rather than requiring full equality, and a candidate only counts if that
+    prefix covers at least `min_match_fraction` of `span_length` -- enough to
+    be confident it's really the same content, not a coincidence.
+
+    All accepted occurrences (including the original anchor) are then
+    uniformly trimmed to the *shortest* common-prefix length found among
+    them, so every reported span reflects only the part that's genuinely
+    stable across all of them -- e.g. if a trailing token happens to match in
+    some cycles by luck (two step numbers sharing a leading digit) but not
+    others, it's dropped everywhere rather than kept in some spans and not
+    others.
+
+    Returns `(regions, core_length)`; `core_length <= span_length`, and
+    `regions` always contains at least the trimmed anchor itself.
+    """
+    n = len(tokens)
+    anchor = tokens[first_start : first_start + span_length]
+    threshold = max(1, round(min_match_fraction * span_length))
+
+    k_min = -(first_start // gap)
+    k_max = (n - 1 - first_start) // gap
+
+    candidates: List[Tuple[int, int]] = []
+    for k in range(k_min, k_max + 1):
+        c = first_start + k * gap
+        limit = min(span_length, n - c)
+        match_len = 0
+        while match_len < limit and tokens[c + match_len] == anchor[match_len]:
+            match_len += 1
+        if match_len >= threshold:
+            candidates.append((c, match_len))
+
+    core_length = min(match_len for _c, match_len in candidates)
+    regions = [(c, c + core_length) for c, _match_len in candidates]
+    return _merge_spans(regions), core_length
+
+
 def find_longest_repeated_substring(
     token_ids: Sequence[int],
     min_length: int = DEFAULT_LRS_MIN_LENGTH,
@@ -273,6 +335,18 @@ def find_longest_repeated_substring(
     between (`lrs_gap` not a multiple of `lrs_period`) -- so the repeating
     unit can occupy more than one disjoint span; `lrs_region_starts` /
     `lrs_region_ends` are therefore parallel lists, not a single range.
+
+    For that atomic case, `lrs_gap` (the interval between the one pair the
+    binary search happened to find) is also used as a probe for *further*
+    copies elsewhere in the sequence -- see `_gap_aligned_occurrences`. This
+    matters a lot for loops that repeat the same content but splice in some
+    slowly-changing element each cycle (a step counter that keeps
+    incrementing, say): the binary search can only ever match the stable
+    part shared between exactly two cycles, so left alone it silently
+    undercounts a 9-cycle loop as "repeated twice". When this finds more
+    occurrences, `lrs_period`/`lrs_unit_token_ids` are trimmed to the longest
+    prefix shared by *all* of them (not just the original pair), and
+    `lrs_period_repeat_count` reflects the true occurrence count.
 
     Returns a dict:
     - `lrs_length`, `lrs_score` (`lrs_length / len(token_ids)`)
@@ -346,7 +420,14 @@ def find_longest_repeated_substring(
     first_start, second_start = best_pair
     matched_span = tokens[first_start : first_start + best_length]
     period = _minimal_period(matched_span)
-    regions = _periodic_regions_for_match(tokens, first_start, second_start, period)
+    if period == best_length:
+        # Atomic chunk (no internal sub-repetition): its own recurrence gap,
+        # not its (nonexistent) internal period, is the right step size to
+        # search for further copies -- see _gap_aligned_occurrences.
+        gap = second_start - first_start
+        regions, period = _gap_aligned_occurrences(tokens, first_start, gap, best_length)
+    else:
+        regions = _periodic_regions_for_match(tokens, first_start, second_start, period)
     region_starts = [s for s, _e in regions]
     region_ends = [e for _s, e in regions]
     first_region_start = region_starts[0]
