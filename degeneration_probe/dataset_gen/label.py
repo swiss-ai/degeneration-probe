@@ -1,47 +1,43 @@
-"""Phase 2 of the dataset-v2 pilot: per-token degeneration labels.
+"""Phase 2 of the dataset-v2 pilot: degeneration labels.
 
 For every rollout in ``paths.generations_shard_path(config, domain, 0)`` (written
-by ``generate.py``) this module computes three per-token degeneration signals,
-aligned to the same token positions, so the team can compare which one best
-tracks actual repetition:
+by ``generate.py``) this module computes:
 
-1. ``repetition_score`` -- sliding-window ``1 - TTR`` over bigrams (n=2).
-   Ported from the reference implementation at
+1. ``repetition_score`` -- per-token, sliding-window ``1 - TTR`` over bigrams
+   (n=2). Ported from the reference implementation at
    ``origin/main:src/degeneration_probe/probe/data_loader.py``
    (``_ngram_ttr`` / ``sliding_window_repetition``): for each position ``t``,
    ``1 - (distinct 2-grams in tokens[t:t+window_size]) / (window_size - 1)``.
    Positions where a full window doesn't fit at the end of the sequence are
    NaN (masked), matching that reference's convention exactly.
 
-2. ``lrs_window_score`` -- Longest Repeated Substring, made per-token by
-   applying the (naive, per the given spec) whole-sequence ``lrs_score``
-   formula to each length-``window_size`` window instead of the whole
-   sequence, using the *same* NaN-at-the-tail convention as (1) so the two
-   signals are directly comparable position-for-position.
+2. ``entropy`` -- per-token pass-through of Phase 1's ``per_token_entropy``
+   column (already per-token, already aligned to ``generated_token_ids``).
 
-3. ``entropy`` -- pass-through of Phase 1's ``per_token_entropy`` column
-   (already per-token, already aligned to ``generated_token_ids``).
+3. LRS (Longest Repeated Substring) -- a *whole-rollout*, exact-match signal,
+   computed once per rollout (not per token): the longest exact,
+   non-overlapping substring that occurs twice anywhere in the rollout's
+   tokens. Unlike (1)/(2) this isn't an array aligned to token positions --
+   it's a single match (or "no match"), reported as several columns:
+   ``lrs_length`` (tokens), ``lrs_score`` (``lrs_length / num_tokens``),
+   ``lrs_first_start`` / ``lrs_second_start`` (the two occurrences' start
+   indices), ``lrs_gap`` (``lrs_second_start - lrs_first_start`` -- small means
+   the model repeats itself immediately, large means it echoes something said
+   much earlier), and ``lrs_repeated_token_ids`` (the actual repeated chunk,
+   for decoding/inspection). See ``find_longest_repeated_substring`` for the
+   algorithm (binary search over candidate length + rolling hash, O(n log n),
+   replacing an earlier per-token sliding-window LRS approximation that didn't
+   scale to window_size=256).
 
 Output: ``labels/<domain>/shard_00000.parquet`` (via
-``paths.labels_shard_path``) with columns
-``[prompt_id, rollout_idx, repetition_score, lrs_window_score, entropy]``,
-one row per rollout.
+``paths.labels_shard_path``), one row per rollout, columns per
+``LABEL_COLUMNS``.
 
 This module also aggregates across ALL domains into
 ``prompt_stats/prompt_stats.parquet`` (via ``paths.prompt_stats_path``): one
 row per prompt_id summarizing its ``n_rollouts_per_prompt`` (10) rollouts --
 see ``aggregate_prompt_stats`` for exactly how "mean"/"max"/"degeneration_rate"
 are defined across the two levels (per-rollout, then per-prompt).
-
-Performance note on LRS
-------------------------
-The per-window LRS computation is the naive O(window_size^2)-ish algorithm
-from the given spec, run once per token position (i.e. up to
-``num_tokens - window_size + 1`` times per rollout) rather than once per
-rollout. At ``window_size=256`` (up from the pilot's 32) this is roughly
-64x more work per window than the pilot used; see the module's CLI output
-for the measured wall-clock time on the real data, and benchmark on a small
-``--domains`` subset before launching a full run if that matters.
 """
 
 from __future__ import annotations
@@ -70,7 +66,23 @@ DEFAULT_LRS_MIN_LENGTH = 10
 # Matches configs/dataset/repetition_instruct_token_level.yaml's degeneration_threshold.
 DEFAULT_DEGENERATION_THRESHOLD = 0.8
 
-LABEL_COLUMNS = ["prompt_id", "rollout_idx", "repetition_score", "lrs_window_score", "entropy"]
+LABEL_COLUMNS = [
+    "prompt_id",
+    "rollout_idx",
+    "repetition_score",
+    "entropy",
+    "lrs_length",
+    "lrs_score",
+    "lrs_first_start",
+    "lrs_second_start",
+    "lrs_gap",
+    "lrs_repeated_token_ids",
+    "lrs_period",
+    "lrs_period_repeat_count",
+    "lrs_region_starts",
+    "lrs_region_ends",
+    "lrs_unit_token_ids",
+]
 
 PROMPT_STATS_COLUMNS = [
     "prompt_id",
@@ -78,8 +90,8 @@ PROMPT_STATS_COLUMNS = [
     "n_rollouts",
     "mean_repetition_score",
     "max_repetition_score",
-    "mean_lrs_window_score",
-    "max_lrs_window_score",
+    "mean_lrs_score",
+    "max_lrs_score",
     "degeneration_rate",
 ]
 
@@ -118,50 +130,240 @@ def sliding_window_repetition(
     return out
 
 
-# --- LRS (longest repeated substring) window score ---------------------------
+# --- LRS (longest repeated substring): exact, whole-rollout -------------------
 
-def lrs_score(tokens: Sequence[int], min_length: int = 10) -> float:
-    """Naive O(n^2)-ish longest-repeated-non-overlapping-substring fraction.
+# Polynomial-hash constants for the rolling hash used by
+# `find_longest_repeated_substring`. Any collision is only ever treated as a
+# *candidate* and verified with a direct token comparison before being
+# trusted (see `_find_matching_pair`), so these don't need to be
+# cryptographic -- just large enough that collisions are rare in practice.
+_HASH_MOD = (1 << 61) - 1
+_HASH_BASE = 131_542_391
 
-    Exactly the reference implementation given in the task spec: for every
-    pair of start positions (i, j) with j >= i + min_length, extend a match
-    while tokens line up, tokens don't overlap (i + length < j), and both
-    indices stay in bounds. Returns the longest such match length / n.
+
+def _no_lrs_match() -> Dict[str, object]:
+    return {
+        "lrs_length": 0,
+        "lrs_score": 0.0,
+        "lrs_first_start": None,
+        "lrs_second_start": None,
+        "lrs_gap": None,
+        "lrs_repeated_token_ids": [],
+        "lrs_period": None,
+        "lrs_period_repeat_count": None,
+        "lrs_region_starts": [],
+        "lrs_region_ends": [],
+        "lrs_unit_token_ids": [],
+    }
+
+
+def _minimal_period(tokens: Sequence[int]) -> int:
+    """Smallest p (1 <= p <= len(tokens)) with `tokens[i] == tokens[i + p]` for
+    every valid i.
+
+    Standard string-periodicity result, via the KMP prefix function: for a
+    length-m string, `p = m - pi[m-1]` is always its smallest period -- this
+    holds whether or not p evenly divides m (e.g. "1,2,1,2,1" has period 2
+    even though 5 isn't a multiple of 2). If the string has no internal
+    repetition at all, this returns m itself (its only "period" is its own
+    full length).
+    """
+    m = len(tokens)
+    if m <= 1:
+        return max(m, 1)
+    pi = [0] * m
+    k = 0
+    for i in range(1, m):
+        while k > 0 and tokens[i] != tokens[k]:
+            k = pi[k - 1]
+        if tokens[i] == tokens[k]:
+            k += 1
+        pi[i] = k
+    return m - pi[-1]
+
+
+def _extend_periodic_region(tokens: Sequence[int], start: int, period: int) -> Tuple[int, int]:
+    """Given that `tokens[start : start + period]` repeating with period `period`
+    describes at least part of the sequence, extend `[start, end)` as far as
+    that exact periodicity actually holds across the whole sequence in both
+    directions.
+
+    Only walks *adjacent* period-steps, so it only grows across genuinely
+    back-to-back repetition -- it stops the instant unrelated content
+    intervenes. That's intentional: see `_periodic_regions_for_match` for why
+    a single call to this from only one of the two occurrences isn't enough
+    on its own.
     """
     n = len(tokens)
-    max_len = 0
-    for i in range(n):
-        for j in range(i + min_length, n):
-            length = 0
-            while (
-                j + length < n
-                and i + length < j
-                and tokens[i + length] == tokens[j + length]
-            ):
-                length += 1
-            max_len = max(max_len, length)
-    return max_len / n
+    end = start + period
+    while end < n and tokens[end] == tokens[end - period]:
+        end += 1
+    while start > 0 and tokens[start - 1] == tokens[start - 1 + period]:
+        start -= 1
+    return start, end
 
 
-def sliding_window_lrs(
-    token_ids: Sequence[int],
-    window_size: int,
-    min_length: int = DEFAULT_LRS_MIN_LENGTH,
-) -> List[float]:
-    """Per-position LRS score over token_ids[t : t + window_size], NaN-masked.
-
-    Same tail convention as `sliding_window_repetition`: positions where a
-    full window doesn't fit at the end of the sequence are NaN.
-    """
-    out: List[float] = []
-    total = len(token_ids)
-    for t in range(total):
-        end = t + window_size
-        if end > total:
-            out.append(float("nan"))
+def _merge_spans(spans: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Merge overlapping/touching (start, end) spans into a sorted, disjoint list."""
+    merged: List[Tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
-            out.append(lrs_score(token_ids[t:end], min_length=min_length))
-    return out
+            merged.append((start, end))
+    return merged
+
+
+def _periodic_regions_for_match(
+    tokens: Sequence[int], first_start: int, second_start: int, period: int
+) -> List[Tuple[int, int]]:
+    """The full set of disjoint spans over which the matched `period`-token unit
+    repeats, covering *both* known occurrences.
+
+    `_extend_periodic_region` only grows through back-to-back repetition, so
+    seeding it from `first_start` alone silently loses the second occurrence
+    whenever there's a real gap of unrelated content between the two matches
+    (e.g. `period == lrs_length`, i.e. the matched chunk has no smaller
+    internal repetition, and the two occurrences are genuinely far apart --
+    the gap is then not itself a multiple of `period`, so extending from
+    `first_start` stops dead at the end of the first occurrence and never
+    reaches the second). Seeding from *both* occurrences and merging fixes
+    this: when the run really is one contiguous periodic stretch (gap is a
+    multiple of `period`), both seeds extend into and merge onto the same
+    span; when it's two genuinely separate occurrences, both seeds are kept
+    as distinct spans instead of one silently vanishing.
+    """
+    span_a = _extend_periodic_region(tokens, first_start, period)
+    span_b = _extend_periodic_region(tokens, second_start, period)
+    return _merge_spans([span_a, span_b])
+
+
+def find_longest_repeated_substring(
+    token_ids: Sequence[int],
+    min_length: int = DEFAULT_LRS_MIN_LENGTH,
+) -> Dict[str, object]:
+    """Find the longest exact, non-overlapping repeated substring in `token_ids`.
+
+    Whole-rollout (not per-token) signal: binary search over the candidate
+    match length L. "Does a non-overlapping repeat of length >= L exist
+    anywhere in the sequence?" is monotonic in L (any length-L repeat's
+    prefixes are themselves shorter repeats at the same two positions), so
+    binary search finds the true maximum in O(log n) probes. Each probe is
+    O(n): hash every length-L window with a rolling polynomial hash
+    (Rabin-Karp), bucket start positions by hash, and accept a pair (p, i)
+    from within a bucket only if `i - p >= L` (non-overlapping) and the
+    tokens actually match -- a hash collision is just a candidate, always
+    verified directly. Overall O(n log n) per rollout, independent of L, vs.
+    the O(window_size^2)-ish cost *per token position* of the earlier
+    sliding-window approach.
+
+    `min_length` is the shortest match worth reporting at all (the binary
+    search's lower bound) -- if the true longest repeat is shorter than
+    this, it's treated as "no match" rather than returned.
+
+    Also decomposes the match into its true repeating unit via
+    `_minimal_period` / `_periodic_regions_for_match`: on fully-degenerate,
+    gapless repetition this single (first_start, second_start) pair is
+    really just two samples of one long periodic run -- e.g. a 1-token unit
+    repeated 2000 times and a 2000-token paragraph repeated twice both
+    produce `lrs_length` ~= n/2 with `lrs_gap` ~= `lrs_length`, and are only
+    told apart by `lrs_period` (1 vs. ~2000). But the two occurrences aren't
+    always part of one contiguous run -- a short, atomic phrase (`lrs_period
+    == lrs_length`) can genuinely repeat twice with unrelated content in
+    between (`lrs_gap` not a multiple of `lrs_period`) -- so the repeating
+    unit can occupy more than one disjoint span; `lrs_region_starts` /
+    `lrs_region_ends` are therefore parallel lists, not a single range.
+
+    Returns a dict:
+    - `lrs_length`, `lrs_score` (`lrs_length / len(token_ids)`)
+    - `lrs_first_start`, `lrs_second_start`, `lrs_gap`
+      (`lrs_second_start - lrs_first_start`)
+    - `lrs_repeated_token_ids` -- the raw matched chunk (length `lrs_length`)
+    - `lrs_period` -- the matched chunk's own smallest internal period (in
+      tokens); equals `lrs_length` itself if the chunk has no smaller
+      internal repetition (e.g. a long paragraph repeated exactly twice)
+    - `lrs_region_starts` / `lrs_region_ends` -- parallel lists of the
+      disjoint span(s) (may reach beyond both `lrs_first_start` and
+      `lrs_second_start + lrs_length`) over which that `lrs_period`-token
+      unit repeats -- one span if it's one contiguous periodic run, two if
+      the occurrences are genuinely separate
+    - `lrs_period_repeat_count` -- total repeats of the unit summed across
+      all spans: `sum((end - start) // lrs_period for start, end in spans)`
+    - `lrs_unit_token_ids` -- the actual `lrs_period`-token repeating unit
+      (from the first span), for decoding/inspection/highlighting every
+      occurrence
+
+    All zero/None/empty if no repeat of at least `min_length` tokens exists.
+    """
+    n = len(token_ids)
+    tokens = list(token_ids)
+
+    if n < 2 * min_length:
+        return _no_lrs_match()
+
+    # Prefix hashes / powers are independent of L -- computed once, then any
+    # window's hash is O(1): hash(tokens[i:i+L]) = prefix[i+L] - prefix[i] * power[L].
+    prefix = [0] * (n + 1)
+    power = [1] * (n + 1)
+    for idx in range(n):
+        prefix[idx + 1] = (prefix[idx] * _HASH_BASE + tokens[idx] + 1) % _HASH_MOD
+        power[idx + 1] = (power[idx] * _HASH_BASE) % _HASH_MOD
+
+    def window_hash(i: int, length: int) -> int:
+        return (prefix[i + length] - prefix[i] * power[length]) % _HASH_MOD
+
+    def find_matching_pair(length: int):
+        """First verified non-overlapping (first_start, second_start) pair
+        with an exact match of this length, or None if none exists."""
+        buckets: Dict[int, List[int]] = {}
+        for i in range(n - length + 1):
+            h = window_hash(i, length)
+            bucket = buckets.get(h)
+            if bucket is None:
+                buckets[h] = [i]
+                continue
+            for p in bucket:
+                if i - p >= length and tokens[p : p + length] == tokens[i : i + length]:
+                    return (p, i)
+            bucket.append(i)
+        return None
+
+    lo, hi = min_length, n // 2
+    best_length = 0
+    best_pair = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        pair = find_matching_pair(mid)
+        if pair is not None:
+            best_length, best_pair = mid, pair
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    if best_pair is None:
+        return _no_lrs_match()
+
+    first_start, second_start = best_pair
+    matched_span = tokens[first_start : first_start + best_length]
+    period = _minimal_period(matched_span)
+    regions = _periodic_regions_for_match(tokens, first_start, second_start, period)
+    region_starts = [s for s, _e in regions]
+    region_ends = [e for _s, e in regions]
+    first_region_start = region_starts[0]
+
+    return {
+        "lrs_length": best_length,
+        "lrs_score": best_length / n,
+        "lrs_first_start": first_start,
+        "lrs_second_start": second_start,
+        "lrs_gap": second_start - first_start,
+        "lrs_repeated_token_ids": matched_span,
+        "lrs_period": period,
+        "lrs_period_repeat_count": sum((e - s) // period for s, e in regions),
+        "lrs_region_starts": region_starts,
+        "lrs_region_ends": region_ends,
+        "lrs_unit_token_ids": tokens[first_region_start : first_region_start + period],
+    }
 
 
 # --- per-rollout / per-shard labeling ------------------------------------------
@@ -172,13 +374,13 @@ def label_rollout(
     window_size: int = DEFAULT_WINDOW_SIZE,
     ttr_ngram: int = DEFAULT_TTR_NGRAM,
     lrs_min_length: int = DEFAULT_LRS_MIN_LENGTH,
-) -> Dict[str, List[float]]:
-    """Compute the three aligned per-token signals for one rollout."""
+) -> Dict[str, object]:
+    """Compute the per-token repetition/entropy signals plus the whole-rollout LRS match."""
     token_ids = [int(t) for t in generated_token_ids]
     repetition = sliding_window_repetition(token_ids, window_size, n=ttr_ngram)
-    lrs = sliding_window_lrs(token_ids, window_size, min_length=lrs_min_length)
     entropy = [float(e) for e in per_token_entropy]
-    return {"repetition_score": repetition, "lrs_window_score": lrs, "entropy": entropy}
+    lrs = find_longest_repeated_substring(token_ids, min_length=lrs_min_length)
+    return {"repetition_score": repetition, "entropy": entropy, **lrs}
 
 
 def _label_rollout_task(task: Tuple[str, int, Sequence[int], Sequence[float], int, int, int]) -> dict:
@@ -191,13 +393,7 @@ def _label_rollout_task(task: Tuple[str, int, Sequence[int], Sequence[float], in
         ttr_ngram=ttr_ngram,
         lrs_min_length=lrs_min_length,
     )
-    return {
-        "prompt_id": prompt_id,
-        "rollout_idx": rollout_idx,
-        "repetition_score": labels["repetition_score"],
-        "lrs_window_score": labels["lrs_window_score"],
-        "entropy": labels["entropy"],
-    }
+    return {"prompt_id": prompt_id, "rollout_idx": rollout_idx, **labels}
 
 
 def label_shard(
@@ -209,11 +405,11 @@ def label_shard(
 ) -> pd.DataFrame:
     """Label every rollout in one domain's generations shard.
 
-    The naive LRS computation (see module docstring) makes each rollout's
-    labeling independent and CPU-heavy, so with ``n_workers > 1`` rollouts
-    are farmed out to a ``ProcessPoolExecutor``. ``executor.map`` returns
-    results in the same order as the input tasks (not completion order), so
-    the returned DataFrame's row order always matches ``generations_df``'s.
+    Each rollout's labeling is independent, so with ``n_workers > 1``
+    rollouts are farmed out to a ``ProcessPoolExecutor``. ``executor.map``
+    returns results in the same order as the input tasks (not completion
+    order), so the returned DataFrame's row order always matches
+    ``generations_df``'s.
     """
     tasks = [
         (
@@ -254,16 +450,16 @@ def write_shard_atomic(df: pd.DataFrame, shard_path: Path) -> None:
 
 # --- prompt-level aggregation --------------------------------------------------
 
-def _rollout_summary(repetition: Sequence[float], lrs: Sequence[float]) -> Dict[str, float]:
-    """Reduce one rollout's per-token arrays to a (mean, max) pair for each signal.
+def _rollout_summary(repetition: Sequence[float]) -> Dict[str, float]:
+    """Reduce one rollout's per-token repetition array to a (mean, max) pair.
 
     NaN-tail positions are ignored (np.nanmean/np.nanmax). If a rollout has no
     valid windows at all (shorter than window_size -- doesn't happen in the
     real pilot data, but handled defensively), both reduce to NaN rather than
-    raising.
+    raising. (LRS needs no such reduction -- `find_longest_repeated_substring`
+    already returns one `lrs_score` per rollout, not a per-token array.)
     """
     repetition_arr = np.asarray(repetition, dtype=float)
-    lrs_arr = np.asarray(lrs, dtype=float)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN slice
@@ -273,14 +469,10 @@ def _rollout_summary(repetition: Sequence[float], lrs: Sequence[float]) -> Dict[
         max_repetition = (
             float(np.nanmax(repetition_arr)) if np.any(~np.isnan(repetition_arr)) else float("nan")
         )
-        mean_lrs = float(np.nanmean(lrs_arr)) if np.any(~np.isnan(lrs_arr)) else float("nan")
-        max_lrs = float(np.nanmax(lrs_arr)) if np.any(~np.isnan(lrs_arr)) else float("nan")
 
     return {
         "mean_repetition_score": mean_repetition,
         "max_repetition_score": max_repetition,
-        "mean_lrs_window_score": mean_lrs,
-        "max_lrs_window_score": max_lrs,
     }
 
 
@@ -291,22 +483,22 @@ def aggregate_prompt_stats(
 ) -> pd.DataFrame:
     """Aggregate a (multi-domain) labels table to one row per prompt_id.
 
-    For each rollout, first reduce its per-token repetition/lrs arrays to a
-    (mean, max) pair (NaN-tail positions ignored). Then, per prompt_id, across
-    its rollouts:
-      - mean_repetition_score / mean_lrs_window_score: mean of the per-rollout
-        means (NaN rollouts, i.e. ones with no valid window, are ignored).
-      - max_repetition_score / max_lrs_window_score: max of the per-rollout
-        maxes.
+    For each rollout, first reduce its per-token repetition array to a (mean,
+    max) pair (NaN-tail positions ignored); `lrs_score` is already a single
+    number per rollout. Then, per prompt_id, across its rollouts:
+      - mean_repetition_score / mean_lrs_score: mean of the per-rollout
+        values (NaN rollouts, i.e. ones with no valid window, are ignored).
+      - max_repetition_score / max_lrs_score: max of the per-rollout values.
       - degeneration_rate: fraction of rollouts whose max_repetition_score
         exceeds `degeneration_threshold` (a rollout with an undefined,
         NaN max never counts as exceeding it).
     """
     per_rollout_records = []
     for row in labels_df.itertuples(index=False):
-        summary = _rollout_summary(row.repetition_score, row.lrs_window_score)
+        summary = _rollout_summary(row.repetition_score)
         summary["prompt_id"] = row.prompt_id
         summary["rollout_idx"] = int(row.rollout_idx)
+        summary["lrs_score"] = float(row.lrs_score)
         per_rollout_records.append(summary)
 
     per_rollout_df = pd.DataFrame.from_records(per_rollout_records)
@@ -323,8 +515,8 @@ def aggregate_prompt_stats(
             warnings.simplefilter("ignore", category=RuntimeWarning)
             mean_repetition = float(group["mean_repetition_score"].mean(skipna=True))
             max_repetition = float(group["max_repetition_score"].max(skipna=True))
-            mean_lrs = float(group["mean_lrs_window_score"].mean(skipna=True))
-            max_lrs = float(group["max_lrs_window_score"].max(skipna=True))
+            mean_lrs = float(group["lrs_score"].mean(skipna=True))
+            max_lrs = float(group["lrs_score"].max(skipna=True))
 
         prompt_records.append(
             {
@@ -333,8 +525,8 @@ def aggregate_prompt_stats(
                 "n_rollouts": n_rollouts,
                 "mean_repetition_score": mean_repetition,
                 "max_repetition_score": max_repetition,
-                "mean_lrs_window_score": mean_lrs,
-                "max_lrs_window_score": max_lrs,
+                "mean_lrs_score": mean_lrs,
+                "max_lrs_score": max_lrs,
                 "degeneration_rate": n_degenerating / n_rollouts,
             }
         )
@@ -354,14 +546,22 @@ def main() -> None:
         "--domains", nargs="*", default=None,
         help="Subset of domains to label (default: all configured domains).",
     )
-    parser.add_argument("--window-size", type=int, default=DEFAULT_WINDOW_SIZE)
+    parser.add_argument(
+        "--window-size", type=int, default=DEFAULT_WINDOW_SIZE,
+        help="Sliding-window size (in tokens) for the per-token repetition_score (default: 256).",
+    )
     parser.add_argument("--ttr-ngram", type=int, default=DEFAULT_TTR_NGRAM)
-    parser.add_argument("--lrs-min-length", type=int, default=DEFAULT_LRS_MIN_LENGTH)
+    parser.add_argument(
+        "--lrs-min-length", type=int, default=DEFAULT_LRS_MIN_LENGTH,
+        help="Shortest exact repeated substring (in tokens) worth reporting for the "
+        "whole-rollout LRS match; shorter true-longest repeats are reported as no match "
+        "(default: 10).",
+    )
     parser.add_argument("--degeneration-threshold", type=float, default=DEFAULT_DEGENERATION_THRESHOLD)
     parser.add_argument(
         "--workers", type=int, default=1,
         help="Rollouts to label in parallel via ProcessPoolExecutor (default: 1, serial). "
-        "The naive LRS computation is CPU-heavy and embarrassingly parallel per-rollout.",
+        "Labeling is embarrassingly parallel per-rollout.",
     )
     args = parser.parse_args()
 
