@@ -268,6 +268,23 @@ class ClaudeAgentSDKBackend:
             if rate_limit_rejected is not None:
                 info = rate_limit_rejected.rate_limit_info
                 raise UsageExhausted(rate_limit_type=info.rate_limit_type, resets_at=info.resets_at) from exc
+            # A ResultMessage already arrived before this exception fired (the SDK
+            # raises a second, generic exception while reaping the process *after*
+            # yielding the real result -- see class docstring). If that result
+            # says is_error, we already know the real cause (e.g. a content-policy
+            # refusal, api_refusal_category="bio" observed for a highly repetitive
+            # "kill the X" rollout in practice) -- surface that instead of falling
+            # through to the ambiguous usage-exhausted crash-text guess below,
+            # which would otherwise misclassify a normal per-row refusal as the
+            # whole account's usage being gone and wrongly halt/rotate the batch.
+            if result is not None and result.is_error:
+                if result.api_error_status == 429:
+                    raise UsageExhausted(rate_limit_type=None, resets_at=None) from exc
+                raise ValueError(
+                    f"claude_agent_sdk judge failed (subtype={result.subtype}, "
+                    f"stop_reason={getattr(result, 'stop_reason', None)}, "
+                    f"errors={result.errors}): result={result.result!r}"
+                ) from exc
             if str(exc) == _USAGE_EXHAUSTED_CRASH_TEXT:
                 raise UsageExhausted(rate_limit_type=None, resets_at=None) from exc
             raise
