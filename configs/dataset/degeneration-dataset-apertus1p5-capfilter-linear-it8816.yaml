@@ -15,16 +15,33 @@
 # Hub repo id -- AutoModelForCausalLM.from_pretrained /
 # AutoTokenizer.from_pretrained both accept a local directory transparently,
 # and transformers>=4.57 (installed: 5.8.1) natively supports the "apertus"
-# architecture, so no trust_remote_code is needed. tokenizer_name is left
-# unset (defaults to model_name): this checkpoint's own bundled tokenizer
-# files are untouched/standard, unlike its ap1p5-8b-sft-256k-... sibling --
-# see that config's tokenizer_name comment.
+# architecture, so no trust_remote_code is needed.
+#
+# tokenizer_name overrides the checkpoint's own bundled tokenizer -- confirmed
+# with the checkpoint owner (durech, 2026-07-13) that both Apertus 1.5
+# checkpoints should use tokenizers/apertus_emu3.5_wavtok_text_only instead
+# of their own bundled tokenizer files (the "not for inference" warning in
+# that checkpoint directory's own NOTES.md was leftover residue from an
+# unrelated copy-paste, not applicable here). Cross-checked compatibility:
+# ids 0-3 and the model's generation_config.json eos_token_id set {2, 68, 72}
+# decode identically between this tokenizer and the checkpoint's own.
+#
+# This override is wholesale, chat_template included: durech confirmed
+# (2026-07-13, re: the tokenizer folder's chat_template rendering an empty
+# default system prompt where this checkpoint's own chat_template.jinja
+# would inject "You are Apertus 1.5 Omni, ...") that "tokenizer path is
+# canonical for whatever is in it" -- i.e. use
+# apertus_emu3.5_wavtok_text_only's own chat_template as-is, do NOT patch
+# the checkpoint's system prompt back in. Both Apertus 1.5 datasets
+# therefore share not just the same tokenizer but the same chat template,
+# even though each uses its own checkpoint's weights.
 #
 # n_prompts / max_new_tokens / temperature / top_p / seed / split_fractions
 # are identical to the other two datasets' configs by design, so all three
 # datasets are directly comparable.
 
 model_name: "/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816"
+tokenizer_name: "/capstor/store/cscs/swissai/infra01/reasoning/models/tokenizers/apertus_emu3.5_wavtok_text_only"
 
 in_domain_sources:
   - name: deepmath_103k

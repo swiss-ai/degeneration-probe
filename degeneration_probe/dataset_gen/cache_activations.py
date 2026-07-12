@@ -82,7 +82,11 @@ from safetensors.torch import load_file, safe_open, save_file
 
 from degeneration_probe.dataset_gen import paths
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
-from degeneration_probe.dataset_gen.generate import build_generation_prompt, write_shard_atomic
+from degeneration_probe.dataset_gen.generate import (
+    build_generation_prompt,
+    load_tokenizer_for_generation,
+    write_shard_atomic,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
@@ -363,7 +367,7 @@ def main() -> None:
     parser.add_argument("--dtype", default="bfloat16", choices=sorted(_DTYPES))
     args = parser.parse_args()
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
 
     config = DatasetGenConfig.from_yaml(args.config)
     prompts_df = pd.read_parquet(paths.prompts_path(config))
@@ -377,9 +381,7 @@ def main() -> None:
         f"Loading tokenizer {tokenizer_name!r} + model {config.model_name!r} "
         f"(dtype={args.dtype}, device={device})..."
     )
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_tokenizer_for_generation(config)
     model = AutoModelForCausalLM.from_pretrained(config.model_name, dtype=dtype).to(device)
     model.eval()
 

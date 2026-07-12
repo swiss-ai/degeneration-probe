@@ -12,38 +12,39 @@
 # field-for-field -- load with
 # DatasetGenConfig.from_yaml("configs/dataset/degeneration-dataset-apertus1p5-sft256k-4200.yaml").
 #
-# *** BLOCKED: do not run generation against this config yet ***
 # This checkpoint's own bundled tokenizer.json / tokenizer_config.json were
 # overwritten on 2026-07-10 with a variant whose own NOTES.md in that
 # directory says: "Internal use only -- not for model release / inference
-# deployment" (a data-prep tool for the vision-tokenization SFT pipeline that
-# rewrites raw '<think>'/'<answer>' etc. substrings on every encode()). The
-# checkpoint's chat_template.jinja is unmodified and still emits literal
-# '<think>'/'</think>' tokens, and the pre-overwrite originals are sitting
-# right next to the live files as tokenizer.json.bak / tokenizer_config.json.bak.
-# tokenizer_name is deliberately left unset (null) below rather than guessing
-# which tokenizer is actually correct here -- the checkpoint owner (durech)
-# needs to confirm whether the 2026-07-10 change was intentional before this
-# dataset's tokenizer_name (and possibly a reconstructed tokenizer directory
-# built from the .bak files) can be finalized. See the conversation this
-# config was added in for the full investigation.
+# deployment". Investigated and confirmed with the checkpoint owner
+# (durech, 2026-07-13): that NOTES.md warning is leftover residue from an
+# unrelated copy-paste and does not apply here -- both this checkpoint and
+# its capfilter-linear-it8816 sibling should use
+# tokenizers/apertus_emu3.5_wavtok_text_only instead of their own bundled
+# tokenizer files (neither the live nor the .bak tokenizer.json in this
+# checkpoint's own directory should be used). Cross-checked compatibility:
+# ids 0-3 and the model's generation_config.json eos_token_id set {2, 68, 72}
+# decode identically between this tokenizer and the checkpoint's own.
 #
 # model_name points directly at the checkpoint directory rather than an HF
 # Hub repo id -- AutoModelForCausalLM.from_pretrained accepts a local
 # directory transparently, and transformers>=4.57 (installed: 5.8.1)
 # natively supports the "apertus" architecture, so no trust_remote_code is
-# needed. This only loads the model weights; it does NOT resolve the
-# tokenizer landmine above, since generate.py/cache_activations.py load the
-# tokenizer from `tokenizer_name or model_name` -- until tokenizer_name is
-# set explicitly, they would fall back to this checkpoint's own (currently
-# suspect) live tokenizer files.
+# needed. tokenizer_name below overrides everything tokenizer-related
+# wholesale, chat_template included: durech confirmed (2026-07-13, re: the
+# tokenizer folder's chat_template rendering an empty default system prompt
+# where this checkpoint's own chat_template.jinja would inject "You are
+# Apertus 1.5 Omni, ...") that "tokenizer path is canonical for whatever is
+# in it" -- i.e. use apertus_emu3.5_wavtok_text_only's own chat_template
+# as-is, do NOT patch the checkpoint's system prompt back in. Both Apertus
+# 1.5 datasets therefore share not just the same tokenizer but the same
+# chat template, even though each uses its own checkpoint's weights.
 #
 # n_prompts / max_new_tokens / temperature / top_p / seed / split_fractions
 # are identical to the other two datasets' configs by design, so all three
 # datasets are directly comparable.
 
 model_name: "/capstor/store/cscs/swissai/infra01/reasoning/models/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200"
-tokenizer_name: null  # BLOCKED -- see header comment, do not fill in without confirming with durech first
+tokenizer_name: "/capstor/store/cscs/swissai/infra01/reasoning/models/tokenizers/apertus_emu3.5_wavtok_text_only"
 
 in_domain_sources:
   - name: deepmath_103k

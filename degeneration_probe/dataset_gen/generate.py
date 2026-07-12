@@ -175,6 +175,34 @@ def build_generation_prompt(tokenizer, prompt: str) -> str:
     return prompt_text
 
 
+def load_tokenizer_for_generation(config: DatasetGenConfig):
+    """Load the tokenizer (vocab, merges, special tokens, AND chat_template)
+    to use for generation/activation-caching.
+
+    ``config.tokenizer_name`` overrides ``config.model_name`` wholesale --
+    i.e. whatever is in the tokenizer_name directory (vocab *and*
+    chat_template) is used as-is, with no mixing-in of the checkpoint's own
+    chat_template.jinja. Confirmed explicitly with the checkpoint owner
+    (durech, 2026-07-13, re: the two local Apertus 1.5 checkpoints both
+    needing ``tokenizers/apertus_emu3.5_wavtok_text_only`` instead of their
+    own bundled tokenizer files): "tokenizer path is canonical for whatever
+    is in it" -- i.e. do NOT patch the checkpoint's own default system
+    prompt back in, even though apertus_emu3.5_wavtok_text_only's own
+    chat_template renders an empty one where each checkpoint's own template
+    would inject "You are Apertus 1.5 Omni, ...". An earlier version of this
+    function did exactly that override; it was wrong and has been removed.
+    """
+    from transformers import AutoTokenizer
+
+    tokenizer_name = config.tokenizer_name or config.model_name
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    return tokenizer
+
+
 # --- entropy / sampling (pure tensor ops, no model calls) --------------------
 
 def compute_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
@@ -571,7 +599,7 @@ def main() -> None:
     parser.add_argument("--dtype", default="bfloat16", choices=sorted(_DTYPES))
     args = parser.parse_args()
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
 
     config = DatasetGenConfig.from_yaml(args.config)
     if args.max_rollouts is not None:
@@ -590,9 +618,7 @@ def main() -> None:
         f"Loading tokenizer {tokenizer_name!r} + model {config.model_name!r} "
         f"(dtype={args.dtype}, device={device})..."
     )
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_tokenizer_for_generation(config)
     model = AutoModelForCausalLM.from_pretrained(config.model_name, dtype=dtype).to(device)
     model.eval()
 
