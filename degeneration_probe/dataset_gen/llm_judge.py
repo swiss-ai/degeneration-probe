@@ -71,43 +71,103 @@ MAX_PARSE_RETRIES = 2
 # --- judge schema --------------------------------------------------------------
 
 class JudgeVerdict(BaseModel):
+    reasoning: str = Field(
+        description="Write this FIRST, before deciding is_degenerating below "
+        "-- it's meant to be your scratch space, not a post-hoc summary. "
+        "Cover: does the repeated structure reflect genuine incremental work "
+        "(a new candidate/case/step each time) or a non-progressing loop? "
+        "Does the prompt itself ask for repeated output, making repetition "
+        "correct instruction-following rather than degeneration? Note "
+        "anything that makes the call ambiguous, e.g. the max-token cutoff "
+        "landing before it's clear whether a pattern would have kept looping "
+        "or resolved."
+    )
     is_degenerating: bool = Field(
         description="Whether the completion exhibits degenerate repetition -- "
         "looping, echoing, or otherwise unproductive repeated text -- as "
         "opposed to repetition that is a normal/expected part of the task "
-        "(e.g. restating a step in a math derivation, formatting boilerplate)."
+        "(e.g. restating a step in a math derivation, formatting boilerplate, "
+        "genuine brute-force enumeration, or repetition the prompt itself "
+        "asked for). Base this on the reasoning above."
     )
     repeated_pattern: Optional[str] = Field(
         default=None,
         description="The exact repeated span (verbatim substring from the "
         "completion), if is_degenerating is true. null otherwise.",
     )
-    confidence: str = Field(description="One of: high, medium, low.")
-    comment: str = Field(
-        description="A short free-text note, e.g. 'high repetition but not "
-        "degenerating -- this is a step-by-step long division' or 'clear "
-        "infinite loop on the word occurs starting mid-response'."
+    onset_quote: Optional[str] = Field(
+        default=None,
+        description="If is_degenerating is true: a short verbatim quote "
+        "(exact substring copied from the completion, roughly 5-15 words) "
+        "marking where the degenerate repetition actually begins -- i.e. "
+        "the start of the FIRST occurrence of the pattern that then goes on "
+        "to repeat, not the second (or later) time it recurs. The repeated "
+        "pattern does not need to be verbatim identical each time (e.g. a "
+        "template with a changing number, like 'N = 41: ...' then 'N = 42: "
+        "...') -- pick the earliest point where that repeating pattern "
+        "starts, even before it's obvious yet that it will keep repeating. "
+        "Must be copied exactly (do not paraphrase or summarize) so it can "
+        "be located in the completion text programmatically. null if "
+        "is_degenerating is false.",
+    )
+    confidence: str = Field(
+        description="One of: high, medium, low -- how sure you are about "
+        "the is_degenerating call itself, not about the task's correctness. "
+        "Drop to medium/low when: the max-token cutoff lands before the "
+        "pattern's fate is clear (it might have kept looping, or might have "
+        "resolved); it's genuinely unclear whether repeated work is real "
+        "incremental progress (brute-force search, case-by-case derivation) "
+        "or an illusion of progress (a template that stopped actually "
+        "advancing); or the prompt's own repetition request is ambiguous "
+        "about how much repetition it wants, making an overrun hard to call."
     )
 
 
 JUDGE_JSON_SCHEMA: Dict[str, object] = {
     "type": "object",
     "properties": {
+        "reasoning": {"type": "string"},
         "is_degenerating": {"type": "boolean"},
         "repeated_pattern": {"type": ["string", "null"]},
+        "onset_quote": {"type": ["string", "null"]},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-        "comment": {"type": "string"},
     },
-    "required": ["is_degenerating", "repeated_pattern", "confidence", "comment"],
+    "required": ["reasoning", "is_degenerating", "repeated_pattern", "onset_quote", "confidence"],
     "additionalProperties": False,
 }
 
 JUDGE_SYSTEM_PROMPT = """You are judging whether a language model's completion \
 degenerated into repetitive, low-information text (looping on a phrase, \
 sentence, or pattern without making progress), as opposed to repetition that \
-is a normal, expected part of the task (e.g. restating steps in a derivation, \
-enumerating similar cases, formatting/boilerplate). You will see only the \
-prompt and the completion -- judge on the text alone."""
+is a normal, expected part of the task. You will see both the prompt and the \
+completion -- read the prompt first, since it changes what counts as \
+degeneration.
+
+Two things that look repetitive but are NOT degeneration:
+
+1. Genuine incremental work. Brute-force search, case enumeration, or a \
+step-by-step derivation often produces a fixed template with a changing \
+value each time (e.g. "N = 41: ..." then "N = 42: ..." then "N = 43: ..."). \
+This is fine as long as each occurrence is doing new work -- checking a new \
+candidate, advancing to the next step, covering a new case. A useful test: \
+if you deleted every occurrence but the first, would the completion lose \
+information needed to solve the task? If yes, it's legitimate enumeration, \
+not degeneration. Only flag it if the "progress" is illusory -- e.g. it \
+starts re-checking values it already covered, drifts into a template that \
+stops advancing, or cycles without ever converging on an answer.
+
+2. Instructed repetition. If the prompt itself asks for repeated output \
+(e.g. "repeat X ten times", "write a line for each of the following ..."), \
+producing that repetition is correct instruction-following, not \
+degeneration -- unless the completion overruns what was asked (keeps going \
+well past the requested count) or the repetition itself becomes corrupted \
+or loops in a way the prompt didn't ask for.
+
+Completions are all hard-capped at the same fixed max-token budget. A \
+completion that ends abruptly mid-sentence, mid-word, or mid-token is \
+expected simply because it hit that cap -- this is not, by itself, evidence \
+of degeneration one way or the other. Judge based on the quality and content \
+of the text alone, not on whether or how it was cut off."""
 
 JUDGE_USER_TEMPLATE = """PROMPT:
 {prompt_text}
@@ -528,8 +588,9 @@ def _load_existing_results(results_path: Path) -> pd.DataFrame:
             "status",
             "is_degenerating",
             "repeated_pattern",
+            "onset_quote",
             "confidence",
-            "comment",
+            "reasoning",
             "error",
         ]
     )
@@ -571,8 +632,9 @@ def run_judging(
             "status": "ok",
             "is_degenerating": None,
             "repeated_pattern": None,
+            "onset_quote": None,
             "confidence": None,
-            "comment": None,
+            "reasoning": None,
             "error": None,
         }
         stop_after_this_row = False
@@ -581,8 +643,9 @@ def run_judging(
             record.update(
                 is_degenerating=verdict.is_degenerating,
                 repeated_pattern=verdict.repeated_pattern,
+                onset_quote=verdict.onset_quote,
                 confidence=verdict.confidence,
-                comment=verdict.comment,
+                reasoning=verdict.reasoning,
             )
         except UsageExhausted as exc:
             record["status"] = "failed"
