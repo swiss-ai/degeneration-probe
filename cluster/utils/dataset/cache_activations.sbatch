@@ -2,7 +2,7 @@
 #SBATCH --account=infra01
 #SBATCH --partition=normal
 #SBATCH --time=04:00:00
-#SBATCH --job-name=degeneration-probe-cache-activations-fullscale
+#SBATCH --job-name=degeneration-probe-cache-activations
 #SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j.log
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -15,9 +15,13 @@ REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe
 mkdir -p $REPO/cluster/log
 cd $REPO
 
+# One of three equally-important dataset configs (see configs/dataset/) --
+# override with e.g. --export=ALL,CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml
+CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
+
 echo "Commit: $(git rev-parse HEAD)"
 echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
-echo "Job: $SLURM_JOB_ID"
+echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
 
 export HF_TOKEN="$(cat ~/keys/.hf_token)"
 
@@ -29,6 +33,6 @@ export HF_TOKEN="$(cat ~/keys/.hf_token)"
 # rollout_idx) already recorded with status "ok".
 srun --environment=$REPO/cluster/env.toml \
     python -m degeneration_probe.dataset_gen.cache_activations \
-        --config configs/dataset/full_scale.yaml
+        --config "$CONFIG"
 
 echo "Activation caching done."

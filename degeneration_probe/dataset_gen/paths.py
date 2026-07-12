@@ -15,19 +15,20 @@ that needs to isolate e.g. the math sources) can see a clean per-source
 breakdown. Use ``is_held_out_domain`` to check which split a given source
 belongs to without collapsing the folder structure.
 
-Layout under ``config.output_root``::
+Layout under ``config.output_root`` (e.g.
+``degeneration-dataset-apertus-8b-instruct/``, or either of its two
+sibling per-checkpoint datasets)::
 
-    dataset_full_scale/
-        manifest.json
-        prompts/prompts.parquet
-        generations/<domain>/shard_00000.parquet
-        labels/<domain>/shard_00000.parquet
-        prompt_stats/prompt_stats.parquet
-        activations/<domain>/<prompt_id>/rollout_<k>.safetensors
-        activations/manifest.parquet
-        llm_judge/
-        splits/<split_name>.jsonl
-        notebooks/
+    manifest.json
+    prompts/prompts.parquet
+    generations/<domain>/shard_00000.parquet
+    labels/<domain>/shard_00000.parquet
+    prompt_stats/prompt_stats.parquet
+    activations/<domain>/<prompt_id>/rollout_<k>.safetensors
+    activations/manifest.parquet
+    llm_judge/
+    splits/<split_name>.jsonl
+    notebooks/
 """
 
 from __future__ import annotations

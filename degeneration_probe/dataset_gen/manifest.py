@@ -45,10 +45,26 @@ def get_model_config(
 ) -> Dict[str, Any]:
     """Fetch a few load-bearing fields from the target model's ``config.json``.
 
-    Looks in the local HF cache first (no network needed if already cached),
-    and only falls back to a live fetch from the HF Hub if the file isn't
-    cached yet. Raises RuntimeError if neither works.
+    ``model_name`` may be either an HF Hub repo id or a local checkpoint
+    directory (e.g. one of the checkpoints under
+    ``/capstor/store/cscs/swissai/infra01/reasoning/models/``) -- local
+    directories are read directly, with no network/HF Hub involvement at
+    all. For a Hub repo id, looks in the local HF cache first (no network
+    needed if already cached), and only falls back to a live fetch from the
+    HF Hub if the file isn't cached yet. Raises RuntimeError if neither
+    works.
     """
+    local_path = Path(model_name)
+    if local_path.is_dir():
+        config_path = local_path / "config.json"
+        if not config_path.exists():
+            raise RuntimeError(
+                f"Local model directory {model_name!r} has no config.json at {config_path}"
+            )
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw_config = json.load(f)
+        return {field_name: raw_config.get(field_name) for field_name in MODEL_CONFIG_FIELDS}
+
     from huggingface_hub import hf_hub_download
 
     cache_dir = str(hf_cache_dir) if hf_cache_dir is not None else str(DEFAULT_HF_CACHE_DIR)

@@ -2,7 +2,7 @@
 #SBATCH --account=infra01
 #SBATCH --partition=normal
 #SBATCH --time=12:00:00
-#SBATCH --job-name=degeneration-probe-generate-fullscale
+#SBATCH --job-name=degeneration-probe-generate
 #SBATCH --output=/iopsstor/scratch/cscs/%u/degeneration-probe/cluster/log/%x-%j.log
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -18,18 +18,22 @@ fi
 
 REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe
 
+# One of three equally-important dataset configs (see configs/dataset/) --
+# override with e.g. --export=ALL,DOMAIN=...,CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml
+CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
+
 mkdir -p $REPO/cluster/log
 
 echo "Commit: $(git -C $REPO rev-parse HEAD)"
 echo "Branch: $(git -C $REPO rev-parse --abbrev-ref HEAD)"
-echo "Job: $SLURM_JOB_ID  Domain: $DOMAIN"
+echo "Job: $SLURM_JOB_ID  Domain: $DOMAIN  Config: $CONFIG"
 echo "(part of a per-domain wave chain -- see cluster/utils/dataset/submit_generation.sh)"
 
 export HF_TOKEN="$(cat ~/keys/.hf_token)"
 
 srun --environment=$REPO/cluster/env.toml \
     python -m degeneration_probe.dataset_gen.generate \
-        --config configs/dataset/full_scale.yaml \
+        --config "$CONFIG" \
         --domains $DOMAIN \
         --batch-size 16
 

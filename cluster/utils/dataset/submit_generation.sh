@@ -19,11 +19,20 @@
 # since waves are pre-submitted as a fixed-length chain up front.
 #
 # Usage: bash cluster/utils/dataset/submit_generation.sh
+#        CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml \
+#            bash cluster/utils/dataset/submit_generation.sh
 
 set -euo pipefail
 
 REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe
 cd "$REPO"
+
+# One of three equally-important dataset configs (see configs/dataset/).
+CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
+# Short tag for job names/logs, e.g. "apertus-8b-instruct" from
+# "degeneration-dataset-apertus-8b-instruct.yaml" -- keeps job names for
+# different datasets' generation runs distinguishable in `squeue`.
+DATASET_TAG=$(basename "$CONFIG" .yaml | sed 's/^degeneration-dataset-//')
 
 # domain -> number of waves (worst-case GPU-hours / 12h, rounded up, +1 margin)
 declare -A WAVES=(
@@ -40,11 +49,11 @@ for domain in "${!WAVES[@]}"; do
     prev_jobid=""
     echo "=== $domain ($n_waves waves) ==="
     for wave in $(seq 1 "$n_waves"); do
-        job_name="degeneration-probe-generate-fullscale-${domain}"
+        job_name="degeneration-probe-generate-${DATASET_TAG}-${domain}"
         if [[ -z "$prev_jobid" ]]; then
-            jobid=$(sbatch --parsable --job-name="$job_name" --export=ALL,DOMAIN="$domain" cluster/utils/dataset/generate.sbatch)
+            jobid=$(sbatch --parsable --job-name="$job_name" --export=ALL,DOMAIN="$domain",CONFIG="$CONFIG" cluster/utils/dataset/generate.sbatch)
         else
-            jobid=$(sbatch --parsable --job-name="$job_name" --export=ALL,DOMAIN="$domain" --dependency=afterany:"$prev_jobid" cluster/utils/dataset/generate.sbatch)
+            jobid=$(sbatch --parsable --job-name="$job_name" --export=ALL,DOMAIN="$domain",CONFIG="$CONFIG" --dependency=afterany:"$prev_jobid" cluster/utils/dataset/generate.sbatch)
         fi
         echo "  wave $wave: job $jobid$( [[ -n "$prev_jobid" ]] && echo " (depends on afterany:$prev_jobid)" )"
         prev_jobid=$jobid

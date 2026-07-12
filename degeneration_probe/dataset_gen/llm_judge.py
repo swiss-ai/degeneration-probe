@@ -52,7 +52,7 @@ from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.dataset_gen.label import write_shard_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "full_scale.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
 # Matches label.py's DEFAULT_DEGENERATION_THRESHOLD / DEFAULT window's
 # canonical cutoff -- kept as a separate constant here (rather than importing

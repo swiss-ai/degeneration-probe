@@ -1,6 +1,12 @@
-# Config for the full-scale dataset build. Matches
+# Config for the degeneration-dataset-apertus-8b-instruct build -- rollouts
+# from the HF-hosted swiss-ai/Apertus-8B-Instruct-2509 model. One of three
+# equally-important, directly-comparable datasets built from the same prompt
+# sample (same sources, same n_prompts, same seed); see the sibling
+# degeneration-dataset-apertus1p5-*.yaml configs, which differ only in
+# model_name/tokenizer_name and output_root/work_root. Matches
 # degeneration_probe.dataset_gen.config.DatasetGenConfig field-for-field --
-# load with DatasetGenConfig.from_yaml("configs/dataset/full_scale.yaml").
+# load with
+# DatasetGenConfig.from_yaml("configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml").
 #
 # n_prompts is ~600 per source (aime_2025 capped at its real 30-row maximum)
 # to roughly match the scale of the current production "balanced" HF dataset
@@ -68,8 +74,8 @@ temperature: 0.7
 top_p: 0.9
 seed: 42
 
-output_root: "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/dataset_full_scale"
-work_root: "/capstor/scratch/cscs/mdenegri/degeneration-probe/dataset_full_scale_work"
+output_root: "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct"
+work_root: "/capstor/scratch/cscs/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct_work"
 
 split_fractions:
   train: 0.70

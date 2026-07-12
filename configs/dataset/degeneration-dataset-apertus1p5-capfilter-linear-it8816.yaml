@@ -1,0 +1,89 @@
+# Config for the degeneration-dataset-apertus1p5-capfilter-linear-it8816
+# build -- rollouts from the local checkpoint
+# /capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816
+# (Apertus 1.5, group infra01, read access confirmed 2026-07-12). One of
+# three equally-important, directly-comparable datasets built from the same
+# prompt sample (same sources, same n_prompts, same seed) -- see the sibling
+# degeneration-dataset-apertus-8b-instruct.yaml (HF Apertus-8B-Instruct) and
+# degeneration-dataset-apertus1p5-sft256k-4200.yaml configs, which differ
+# only in model_name/tokenizer_name and output_root/work_root. Matches
+# degeneration_probe.dataset_gen.config.DatasetGenConfig field-for-field --
+# load with
+# DatasetGenConfig.from_yaml("configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml").
+#
+# model_name points directly at the checkpoint directory rather than an HF
+# Hub repo id -- AutoModelForCausalLM.from_pretrained /
+# AutoTokenizer.from_pretrained both accept a local directory transparently,
+# and transformers>=4.57 (installed: 5.8.1) natively supports the "apertus"
+# architecture, so no trust_remote_code is needed. tokenizer_name is left
+# unset (defaults to model_name): this checkpoint's own bundled tokenizer
+# files are untouched/standard, unlike its ap1p5-8b-sft-256k-... sibling --
+# see that config's tokenizer_name comment.
+#
+# n_prompts / max_new_tokens / temperature / top_p / seed / split_fractions
+# are identical to the other two datasets' configs by design, so all three
+# datasets are directly comparable.
+
+model_name: "/capstor/store/cscs/swissai/infra01/reasoning/models/Apertus-1p5-8B-sft-capfilter-linear-it8816"
+
+in_domain_sources:
+  - name: deepmath_103k
+    hf_repo: "zwhe99/DeepMath-103K"
+    hf_subset: null
+    hf_split: "train"
+    prompt_field: "question"
+    n_prompts: 600
+
+  - name: numinamath_1_5
+    hf_repo: "AI-MO/NuminaMath-1.5"
+    hf_subset: null
+    hf_split: "train"
+    prompt_field: "problem"
+    n_prompts: 600
+
+  - name: if_sft_data_verified
+    hf_repo: "allenai/IF_sft_data_verified"
+    hf_subset: null
+    hf_split: "train"
+    prompt_field: "messages"
+    n_prompts: 600
+
+  - name: llama_nemotron
+    hf_repo: "nvidia/Llama-Nemotron-Post-Training-Dataset"
+    hf_subset: "SFT"
+    hf_split: "code"
+    prompt_field: "input"
+    n_prompts: 600
+
+held_out_sources:
+  - name: medical_o1
+    hf_repo: "FreedomIntelligence/medical-o1-verifiable-problem"
+    hf_subset: null
+    hf_split: "train"
+    prompt_field: "Open-ended Verifiable Question"
+    n_prompts: 600
+
+  # MathArena/aime_2025's "train" split only has 30 rows total (AIME I + II
+  # 2025, 15 problems each) -- n_prompts is already capped at that real
+  # maximum. build_prompts.py's sample_source_rows() clamps to the available
+  # row count and warns rather than failing.
+  - name: aime_2025
+    hf_repo: "MathArena/aime_2025"
+    hf_subset: null
+    hf_split: "train"
+    prompt_field: "problem"
+    n_prompts: 30
+
+n_rollouts_per_prompt: 10
+max_new_tokens: 4096
+temperature: 0.7
+top_p: 0.9
+seed: 42
+
+output_root: "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus1p5-capfilter-linear-it8816"
+work_root: "/capstor/scratch/cscs/mdenegri/degeneration-probe/degeneration-dataset-apertus1p5-capfilter-linear-it8816_work"
+
+split_fractions:
+  train: 0.70
+  val: 0.15
+  test_indomain: 0.15

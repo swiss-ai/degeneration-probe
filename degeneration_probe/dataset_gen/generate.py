@@ -108,7 +108,7 @@ from degeneration_probe.dataset_gen import paths
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "full_scale.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
 Task = Tuple[str, int]  # (prompt_id, rollout_idx)
 
@@ -549,7 +549,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=str, default=str(DEFAULT_CONFIG_PATH),
-        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/full_scale.yaml).",
+        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml).",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Rollouts per decode batch.")
     parser.add_argument(
@@ -585,8 +585,12 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = _DTYPES[args.dtype]
 
-    print(f"Loading tokenizer + model {config.model_name!r} (dtype={args.dtype}, device={device})...")
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+    tokenizer_name = config.tokenizer_name or config.model_name
+    print(
+        f"Loading tokenizer {tokenizer_name!r} + model {config.model_name!r} "
+        f"(dtype={args.dtype}, device={device})..."
+    )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(config.model_name, dtype=dtype).to(device)

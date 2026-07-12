@@ -111,8 +111,10 @@ def test_derive_seed_matches_all_full_scale_prompt_ids_no_collisions():
     """No seed collisions across the full real build's ~3,030 prompt_ids x 10 rollouts.
 
     Builds synthetic ids matching the real per-domain naming scheme and
-    per-domain n_prompts from configs/dataset/full_scale.yaml (rather than
-    depending on the large, environment-specific prompts.parquet file).
+    per-domain n_prompts from
+    configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml (shared by
+    all three dataset configs -- rather than depending on the large,
+    environment-specific prompts.parquet file).
     """
     domains = {
         "deepmath_103k": 600,
