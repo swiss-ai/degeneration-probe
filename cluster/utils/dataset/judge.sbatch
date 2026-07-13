@@ -31,7 +31,7 @@ echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
 # manifest each time -- llm_judge.py already skips rows marked "ok" and stops
 # cleanly (exit 0) on UsageExhausted, so each iteration below just continues
 # wherever the previous account's usage ran out.
-TOKEN_NAMES=(marcodenegri lucasartori lorenzobaggi)
+TOKEN_NAMES=(marcodenegri lucasartori lorenzobaggi moritzreihs)
 
 remaining() {
     python3 - <<PY
