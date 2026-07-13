@@ -191,6 +191,18 @@ def notebooks_dir(config: DatasetGenConfig) -> Path:
     return dataset_root(config) / "notebooks"
 
 
+# --- onset labels (derived artifact for probe training, not part of the core
+# generate/label/cache-activations pipeline -- see
+# degeneration_probe/dataset_gen/onset_labels.py) --------------------------------
+
+def onset_labels_dir(config: DatasetGenConfig) -> Path:
+    return dataset_root(config) / "onset_labels"
+
+
+def onset_labels_path(config: DatasetGenConfig) -> Path:
+    return onset_labels_dir(config) / "onset_labels.parquet"
+
+
 # --- work root (scratch, resumable intermediates) ---------------------------------
 
 def work_root(config: DatasetGenConfig) -> Path:
