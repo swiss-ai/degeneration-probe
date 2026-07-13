@@ -67,6 +67,10 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 MAX_PARSE_RETRIES = 2
 
+# Below the field's own "roughly 5-15 words" target -- rejects a single word or short
+# fragment as a candidate onset_quote (see ClaudeAgentSDKBackend's verify_onset_quote tool).
+MIN_ONSET_QUOTE_WORDS = 4
+
 
 # --- judge schema --------------------------------------------------------------
 
@@ -331,6 +335,13 @@ class ClaudeAgentSDKBackend:
         # model is judging -- no file/bash access, just a plain substring search (the same
         # check `find_string_in_tokens`/`resolve_onset_position(metric="onset_quote")` do
         # downstream), so a call confirming FOUND here guarantees FOUND there too.
+        #
+        # Also rejects too-short candidates before the substring check: a bare-existence check
+        # alone can't catch a generic word (observed in practice: the model outputting the
+        # literal placeholder "test" as onset_quote, which happened to verbatim-match a
+        # coincidental, unrelated occurrence of that common word elsewhere in the completion --
+        # e.g. a ratio-test convergence problem's own "ratio test" phrase) -- verbatim existence
+        # is necessary but not sufficient for onset_quote to be meaningful.
         @tool(
             "verify_onset_quote",
             "Check whether a candidate onset_quote string appears verbatim in the completion "
@@ -339,6 +350,13 @@ class ClaudeAgentSDKBackend:
         )
         async def verify_onset_quote(args):
             candidate = args["candidate"]
+            if len(candidate.split()) < MIN_ONSET_QUOTE_WORDS:
+                return {"content": [{"type": "text", "text": (
+                    f"TOO SHORT -- onset_quote must be a longer, more distinctive span (roughly "
+                    f"5-15 words), not a single word or short fragment, even if it happens to "
+                    f"appear verbatim. Copy a longer contiguous span directly from the completion "
+                    f"and try again."
+                )}]}
             count = completion_text.count(candidate)
             if count == 0:
                 return {"content": [{"type": "text", "text": (
