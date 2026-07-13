@@ -90,11 +90,6 @@ class JudgeVerdict(BaseModel):
         "genuine brute-force enumeration, or repetition the prompt itself "
         "asked for). Base this on the reasoning above."
     )
-    repeated_pattern: Optional[str] = Field(
-        default=None,
-        description="The exact repeated span (verbatim substring from the "
-        "completion), if is_degenerating is true. null otherwise.",
-    )
     onset_quote: Optional[str] = Field(
         default=None,
         description="If is_degenerating is true: a short verbatim quote "
@@ -128,11 +123,10 @@ JUDGE_JSON_SCHEMA: Dict[str, object] = {
     "properties": {
         "reasoning": {"type": "string"},
         "is_degenerating": {"type": "boolean"},
-        "repeated_pattern": {"type": ["string", "null"]},
         "onset_quote": {"type": ["string", "null"]},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
     },
-    "required": ["reasoning", "is_degenerating", "repeated_pattern", "onset_quote", "confidence"],
+    "required": ["reasoning", "is_degenerating", "onset_quote", "confidence"],
     "additionalProperties": False,
 }
 
@@ -168,6 +162,25 @@ completion that ends abruptly mid-sentence, mid-word, or mid-token is \
 expected simply because it hit that cap -- this is not, by itself, evidence \
 of degeneration one way or the other. Judge based on the quality and content \
 of the text alone, not on whether or how it was cut off."""
+
+
+# Appended to JUDGE_SYSTEM_PROMPT for ClaudeAgentSDKBackend only (the other backends have no
+# such tool, and would just be confused by an instruction referencing one). Exists because
+# onset_quote, reproduced purely from memory, was only verbatim-locatable in the completion
+# ~69% of the time in practice (see notebooks/inspect_dataset.ipynb Section 7's onset_quote
+# validation cell) -- LaTeX-heavy spans and longer quotes were the main offenders. Routing the
+# verbatim check through a tool call that sees the actual completion_text, rather than trusting
+# reproduction from context, is meant to close that gap.
+ONSET_QUOTE_TOOL_INSTRUCTIONS = """
+
+A verify_onset_quote tool is available. Before writing onset_quote in your final answer, \
+call it once with your candidate text to confirm it appears verbatim in the completion. If \
+it reports NOT FOUND, you get exactly one more try: fix whitespace/punctuation or copy a \
+shorter span directly from the completion, and call it again. Write your final answer \
+immediately after that second call, whatever it reports -- if it now says FOUND, use that \
+candidate as onset_quote; if it still says NOT FOUND, set onset_quote to null rather than \
+guessing further (this does not change is_degenerating, only onset_quote). Do not call the \
+tool a third time or keep iterating."""
 
 JUDGE_USER_TEMPLATE = """PROMPT:
 {prompt_text}
@@ -259,13 +272,15 @@ class ClaudeAgentSDKBackend:
     "Claude Code" identity to accept the same token would not be legitimate
     and was deliberately not done here).
 
-    ``tools=[]`` disables all built-in tools (no file/bash access -- this is
-    a one-shot text-judgment call, not an agentic session) and
+    ``tools=[]`` disables all built-in tools (no file/bash access) and
     ``setting_sources=[]`` isolates the call from any local CLAUDE.md/hooks/
-    settings. ``output_format`` mirrors the Messages API's
-    ``output_config.format`` shape, so, like AnthropicBackend, this gets
-    schema-validated JSON back directly (via ``ResultMessage.structured_output``)
-    with no parse-retry loop needed.
+    settings -- the only tool ever exposed is the single in-process
+    ``verify_onset_quote`` MCP tool (see ``_judge_async``), so this stays a
+    narrowly-scoped text-judgment call, not a general agentic session.
+    ``output_format`` mirrors the Messages API's ``output_config.format``
+    shape, so, like AnthropicBackend, this gets schema-validated JSON back
+    directly (via ``ResultMessage.structured_output``) with no parse-retry
+    loop needed.
 
     The CLI streams a ``RateLimitEvent`` whenever subscription usage status
     changes; a ``status == "rejected"`` here (or a 429 on the result) raises
@@ -303,15 +318,52 @@ class ClaudeAgentSDKBackend:
         return asyncio.run(self._judge_async(prompt_text, completion_text))
 
     async def _judge_async(self, prompt_text: str, completion_text: str) -> JudgeVerdict:
-        from claude_agent_sdk import ClaudeAgentOptions, RateLimitEvent, ResultMessage, query
+        from claude_agent_sdk import (
+            ClaudeAgentOptions,
+            RateLimitEvent,
+            ResultMessage,
+            create_sdk_mcp_server,
+            query,
+            tool,
+        )
+
+        # Closed over `completion_text` so the check runs against the exact same string the
+        # model is judging -- no file/bash access, just a plain substring search (the same
+        # check `find_string_in_tokens`/`resolve_onset_position(metric="onset_quote")` do
+        # downstream), so a call confirming FOUND here guarantees FOUND there too.
+        @tool(
+            "verify_onset_quote",
+            "Check whether a candidate onset_quote string appears verbatim in the completion "
+            "under judgment. Always call this before including onset_quote in your final answer.",
+            {"candidate": str},
+        )
+        async def verify_onset_quote(args):
+            candidate = args["candidate"]
+            count = completion_text.count(candidate)
+            if count == 0:
+                return {"content": [{"type": "text", "text": (
+                    "NOT FOUND -- this exact text does not appear in the completion. Copy a "
+                    "shorter or more carefully transcribed span directly from the completion "
+                    "text and try again."
+                )}]}
+            return {"content": [{"type": "text", "text": (
+                f"FOUND -- {count} verbatim occurrence(s) in the completion, first at character "
+                f"offset {completion_text.find(candidate)}. Safe to use as onset_quote."
+            )}]}
+
+        onset_quote_server = create_sdk_mcp_server(
+            name="onset_quote_check", tools=[verify_onset_quote]
+        )
 
         options = ClaudeAgentOptions(
             tools=[],
-            system_prompt=JUDGE_SYSTEM_PROMPT,
+            system_prompt=JUDGE_SYSTEM_PROMPT + ONSET_QUOTE_TOOL_INSTRUCTIONS,
             model=self.model,
             output_format={"type": "json_schema", "schema": JUDGE_JSON_SCHEMA},
             setting_sources=[],
             env={"CLAUDE_CODE_OAUTH_TOKEN": self.oauth_token},
+            mcp_servers={"onset_quote_check": onset_quote_server},
+            allowed_tools=["mcp__onset_quote_check__verify_onset_quote"],
         )
         user_content = JUDGE_USER_TEMPLATE.format(
             prompt_text=prompt_text, completion_text=completion_text
@@ -587,7 +639,6 @@ def _load_existing_results(results_path: Path) -> pd.DataFrame:
             "rollout_idx",
             "status",
             "is_degenerating",
-            "repeated_pattern",
             "onset_quote",
             "confidence",
             "reasoning",
@@ -631,7 +682,6 @@ def run_judging(
             "rollout_idx": int(row.rollout_idx),
             "status": "ok",
             "is_degenerating": None,
-            "repeated_pattern": None,
             "onset_quote": None,
             "confidence": None,
             "reasoning": None,
@@ -642,7 +692,6 @@ def run_judging(
             verdict = backend.judge(row.prompt_text, row.completion_text)
             record.update(
                 is_degenerating=verdict.is_degenerating,
-                repeated_pattern=verdict.repeated_pattern,
                 onset_quote=verdict.onset_quote,
                 confidence=verdict.confidence,
                 reasoning=verdict.reasoning,
