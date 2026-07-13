@@ -18,7 +18,7 @@ from degeneration_probe.utils.metrics import print_eval_metrics
 
 from degeneration_probe.data.dataset import TokenizedProbingDataset
 from degeneration_probe.config import TrainingConfig
-from degeneration_probe.training.loss import compute_probe_bce_loss, compute_kl_divergence_loss, compute_probe_max_aggregation_loss, compute_probe_regression_loss, mask_high_loss_spans
+from degeneration_probe.training.loss import compute_probe_bce_loss, compute_kl_divergence_loss, compute_probe_max_aggregation_loss, compute_probe_regression_loss, compute_multi_horizon_bce_loss, mask_high_loss_spans
 from degeneration_probe.probes.value_head_probe import ValueHeadProbe
 from degeneration_probe.evaluation.evaluate import evaluate_probe
 
@@ -46,6 +46,8 @@ class ProbeTrainer(Trainer):
         self.degeneration_threshold: float = cfg.degeneration_threshold
         self.anneal_max_aggr: bool = cfg.anneal_max_aggr
         self.anneal_warmup: float = cfg.anneal_warmup
+        self.onset_horizons: List[int] = cfg.onset_horizons
+        self.onset_horizon_weights: Optional[List[float]] = cfg.onset_horizon_weights
         self.eval_datasets: List[TokenizedProbingDataset] = eval_datasets
         self.threshold = cfg.probe_config.threshold
         self.ignore_label: float = -100.0
@@ -92,7 +94,11 @@ class ProbeTrainer(Trainer):
         )
 
         lm_logits = outputs["lm_logits"]
-        probe_logits = outputs["probe_logits"].squeeze(-1)  # shape [B, T]
+        # [B, T, 1] -> [B, T] for the single-output tasks; onset_multi_horizon keeps
+        # the full [B, T, K] shape (K = len(self.onset_horizons)).
+        probe_logits = outputs["probe_logits"]
+        if self.task != "onset_multi_horizon":
+            probe_logits = probe_logits.squeeze(-1)
         lm_loss = outputs["lm_loss"]  # standard next-token CE loss
 
         if torch.isnan(lm_loss):
@@ -154,6 +160,16 @@ class ProbeTrainer(Trainer):
             )
             omega = 0.0
             max_aggr_probe_loss = torch.tensor(0.0, device=device)
+        elif self.task == "onset_multi_horizon":
+            probe_loss, per_horizon_losses = compute_multi_horizon_bce_loss(
+                probe_logits=probe_logits,
+                classification_labels=classification_labels,
+                classification_weights=classification_weights,
+                horizons=self.onset_horizons,
+                horizon_weights=self.onset_horizon_weights,
+            )
+            omega = 0.0
+            max_aggr_probe_loss = torch.tensor(0.0, device=device)
         else:
             raise ValueError(f"Unsupported training task: {self.task}")
 
@@ -178,6 +194,9 @@ class ProbeTrainer(Trainer):
             log_dict['max_aggr_probe_loss'] = float(max_aggr_probe_loss.detach().float().item())
         if self.task == "repetition_score":
             log_dict["regression_loss"] = float(probe_loss.detach().float().item())
+        if self.task == "onset_multi_horizon":
+            for horizon, horizon_loss in per_horizon_losses.items():
+                log_dict[f"horizon_{horizon}_loss"] = horizon_loss
 
         self.log(log_dict)
 
@@ -334,6 +353,8 @@ class ProbeTrainer(Trainer):
                 regression_loss=self.regression_loss,
                 regression_output_activation=self.regression_output_activation,
                 degeneration_threshold=self.degeneration_threshold,
+                onset_horizons=self.onset_horizons,
+                onset_horizon_weights=self.onset_horizon_weights,
                 metric_key_prefix=dataset.config.dataset_id,
                 verbose=False,
                 save_roc_curves=save_roc_curves,

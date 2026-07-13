@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from jaxtyping import Float, Int
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -31,7 +32,7 @@ from degeneration_probe.data.dataset import (
     tokenized_probing_collate_fn
 )
 from degeneration_probe.config import EvaluationConfig
-from degeneration_probe.training.loss import compute_probe_bce_loss, compute_probe_regression_loss
+from degeneration_probe.training.loss import compute_probe_bce_loss, compute_probe_regression_loss, compute_multi_horizon_bce_loss
 from degeneration_probe.probes.value_head_probe import ValueHeadProbe, setup_probe
 
 
@@ -44,6 +45,8 @@ def evaluate_probe(
     regression_loss: str = "mse",
     regression_output_activation: str = "sigmoid",
     degeneration_threshold: float = 0.8,
+    onset_horizons: Optional[List[int]] = None,
+    onset_horizon_weights: Optional[List[float]] = None,
     metric_key_prefix: Optional[str] = None,
     verbose: bool = True,
     save_roc_curves: bool = True,
@@ -77,6 +80,12 @@ def evaluate_probe(
     all_labels = {'all': [], 'span': [], 'span_max': []}
     regression_predictions = []
     regression_labels = []
+    onset_horizons = onset_horizons or []
+    # horizon -> flat (masked) predicted-probability / binary-label arrays, accumulated
+    # across batches -- same "flatten everything, score once at the end" approach
+    # scripts/evaluate_onset_probes.py uses for the no-LoRA condition.
+    onset_probs_by_horizon: Dict[int, List[float]] = {h: [] for h in onset_horizons}
+    onset_labels_by_horizon: Dict[int, List[float]] = {h: [] for h in onset_horizons}
 
     total_lm_loss = 0
     total_probe_loss = 0
@@ -99,7 +108,11 @@ def evaluate_probe(
             labels=lm_labels,
         )
 
-        probe_logits: Float[Tensor, "batch_size seq_len"] = outputs["probe_logits"].squeeze(-1)
+        # [B, T, 1] -> [B, T] for the single-output tasks; onset_multi_horizon keeps
+        # the full [B, T, K] shape.
+        probe_logits: Float[Tensor, "batch_size seq_len"] = outputs["probe_logits"]
+        if task != "onset_multi_horizon":
+            probe_logits = probe_logits.squeeze(-1)
 
         if task == "hallucination":
             probe_probs: Float[Tensor, "batch_size seq_len"] = torch.sigmoid(probe_logits).float()
@@ -166,6 +179,20 @@ def evaluate_probe(
             regression_predictions.extend(probe_scores[valid_mask].cpu().numpy())
             regression_labels.extend(classification_labels[valid_mask].cpu().numpy())
             probe_probs = probe_scores
+        elif task == "onset_multi_horizon":
+            probe_loss, _ = compute_multi_horizon_bce_loss(
+                probe_logits=probe_logits,
+                classification_labels=classification_labels,
+                classification_weights=classification_weights,
+                horizons=onset_horizons,
+                horizon_weights=onset_horizon_weights,
+            )
+            probe_probs = torch.sigmoid(probe_logits).float()  # [B, T, K]
+            valid_mask = classification_weights > 0  # [B, T]
+            for i, horizon in enumerate(onset_horizons):
+                y_n = ((classification_labels >= 0) & (classification_labels <= horizon)).float()
+                onset_probs_by_horizon[horizon].extend(probe_probs[..., i][valid_mask].cpu().numpy())
+                onset_labels_by_horizon[horizon].extend(y_n[valid_mask].cpu().numpy())
         else:
             raise ValueError(f"Unsupported evaluation task: {task}")
         
@@ -218,6 +245,15 @@ def evaluate_probe(
                 threshold=degeneration_threshold,
             )
         )
+    elif task == "onset_multi_horizon":
+        for horizon in onset_horizons:
+            y_true = np.array(onset_labels_by_horizon[horizon])
+            y_prob = np.array(onset_probs_by_horizon[horizon])
+            has_both_classes = len(np.unique(y_true)) > 1
+            metrics[f"horizon_{horizon}_auc"] = float(roc_auc_score(y_true, y_prob)) if has_both_classes else float("nan")
+            metrics[f"horizon_{horizon}_ap"] = float(average_precision_score(y_true, y_prob)) if has_both_classes else float("nan")
+            metrics[f"horizon_{horizon}_n"] = len(y_true)
+            metrics[f"horizon_{horizon}_n_pos"] = int(y_true.sum())
 
     # Add prefix if specified
     if metric_key_prefix:
@@ -320,6 +356,7 @@ def evaluate_on_multiple_datasets(
             regression_loss=eval_config.regression_loss,
             regression_output_activation=eval_config.regression_output_activation,
             degeneration_threshold=eval_config.degeneration_threshold,
+            onset_horizons=eval_config.onset_horizons,
             metric_key_prefix=dataset_config.dataset_id,
             verbose=True,
             save_roc_curves=eval_config.save_roc_curves,

@@ -33,6 +33,7 @@ class ProbeConfig:
     normalize_before_head: str = "none"  # none | layernorm | rmsnorm | l2
     attention_probe_n_heads: int = 4  # Number of attention heads for the probe (only used when probe_head_type="attention")
     probe_head_type: str = "linear"  # linear | attention
+    n_outputs: int = 1  # 1 for a single-horizon probe_N head; K for the multi-horizon head
 
     def __post_init__(self):
         """Validate configuration."""
@@ -90,12 +91,22 @@ class ProbeConfig:
 class TrainingConfig:
     """Configuration for probe training."""
     
-    task: Literal["hallucination", "repetition_score"] = "hallucination"
+    task: Literal["hallucination", "repetition_score", "onset_multi_horizon"] = "hallucination"
     wandb_project: str = "hallucination-probes"
     wandb_name: Optional[str] = None
-    wandb_tags: List[str] = field(default_factory=list) 
-    
+    wandb_tags: List[str] = field(default_factory=list)
+
     probe_config: ProbeConfig = field(default_factory=ProbeConfig)
+
+    # Only used when task == "onset_multi_horizon". `onset_horizons` must match
+    # probe_config.n_outputs in length/order (head i predicts onset_horizons[i]).
+    # `onset_horizon_weights`, if set, must be the same length and is normalized to
+    # sum to len(onset_horizons) inside compute_multi_horizon_bce_loss; None means
+    # uniform weighting. The caller (e.g. the pilot run script) is expected to pass
+    # explicit inverse-positive-rate weights computed from the training data, the
+    # same way scripts/train_onset_probes.py does for the no-LoRA condition.
+    onset_horizons: List[int] = field(default_factory=lambda: [5, 20, 50, 100, 200])
+    onset_horizon_weights: Optional[List[float]] = None
     
     upload_to_hf: bool = False
     save_evaluation_metrics: bool = True
@@ -183,26 +194,35 @@ class TrainingConfig:
                 "Use one of: auto, float32, float16, bfloat16"
             )
 
-        if self.task not in {"hallucination", "repetition_score"}:
-            raise ValueError("task must be either 'hallucination' or 'repetition_score'")
+        if self.task not in {"hallucination", "repetition_score", "onset_multi_horizon"}:
+            raise ValueError("task must be one of: 'hallucination', 'repetition_score', 'onset_multi_horizon'")
         if self.regression_loss not in {"mse", "smooth_l1", "l1"}:
             raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
         if self.regression_output_activation not in {"sigmoid", "none"}:
             raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
         if not 0.0 <= self.degeneration_threshold <= 1.0:
             raise ValueError("degeneration_threshold must be between 0.0 and 1.0")
+        if self.task == "onset_multi_horizon":
+            if self.onset_horizon_weights is not None and len(self.onset_horizon_weights) != len(self.onset_horizons):
+                raise ValueError("onset_horizon_weights must be the same length as onset_horizons")
+            if self.probe_config.n_outputs != len(self.onset_horizons):
+                raise ValueError(
+                    f"probe_config.n_outputs ({self.probe_config.n_outputs}) must equal "
+                    f"len(onset_horizons) ({len(self.onset_horizons)}) for task='onset_multi_horizon'"
+                )
 
 
 @dataclass
 class EvaluationConfig:
     """Configuration for probe evaluation."""
-    
-    task: Literal["hallucination", "repetition_score"] = "hallucination"
+
+    task: Literal["hallucination", "repetition_score", "onset_multi_horizon"] = "hallucination"
     probe_config: ProbeConfig = field(default_factory=ProbeConfig)
     regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
     regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
     degeneration_threshold: float = 0.8
-    
+    onset_horizons: List[int] = field(default_factory=lambda: [5, 20, 50, 100, 200])
+
     datasets: List[dict] = field(default_factory=list)
     per_device_eval_batch_size: int = 8
     
@@ -227,8 +247,13 @@ class EvaluationConfig:
             for dataset_config in self.datasets
         ]
 
-        if self.task not in {"hallucination", "repetition_score"}:
-            raise ValueError("task must be either 'hallucination' or 'repetition_score'")
+        if self.task not in {"hallucination", "repetition_score", "onset_multi_horizon"}:
+            raise ValueError("task must be one of: 'hallucination', 'repetition_score', 'onset_multi_horizon'")
+        if self.task == "onset_multi_horizon" and self.probe_config.n_outputs != len(self.onset_horizons):
+            raise ValueError(
+                f"probe_config.n_outputs ({self.probe_config.n_outputs}) must equal "
+                f"len(onset_horizons) ({len(self.onset_horizons)}) for task='onset_multi_horizon'"
+            )
         if self.regression_loss not in {"mse", "smooth_l1", "l1"}:
             raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
         if self.regression_output_activation not in {"sigmoid", "none"}:

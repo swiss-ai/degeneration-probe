@@ -1,6 +1,6 @@
 """Loss functions for probe training."""
 
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -39,6 +39,76 @@ def compute_probe_bce_loss(
     except Exception as e:
         print(f"Error in compute_probe_bce_loss: {e}")
         return torch.tensor(0.0, device=probe_logits.device)
+
+
+def compute_multi_horizon_bce_loss(
+    probe_logits: Float[Tensor, 'batch_size seq_len n_horizons'],
+    classification_labels: Float[Tensor, 'batch_size seq_len'],
+    classification_weights: Float[Tensor, 'batch_size seq_len'],
+    horizons: List[int],
+    horizon_weights: Optional[List[float]] = None,
+    max_clipped_logits: float = 100.0,
+    ignore_label: float = -100.0,
+) -> Tuple[Tensor, Dict[int, float]]:
+    """Weighted sum of K independent masked-BCE terms, one per horizon, for the
+    multi-horizon onset probe's LoRA-condition training.
+
+    `classification_labels` is NOT a 0/1 label -- it's the continuous
+    distance-to-onset encoding produced by `onset_lora_dataset
+    .build_onset_probing_items` (see that module's docstring): `>= 0` is a real
+    "onset is this many tokens away" distance, `-1.0`
+    (`onset_lora_dataset.NEGATIVE_SENTINEL`) means "never degenerates, negative at
+    every horizon", and `ignore_label` (-100.0) means "excluded, don't train on
+    this position at any horizon" -- already reflected in `classification_weights`
+    being 0 there, so the SAME weights array is reused for every horizon's mask
+    without re-deriving it from the labels each time.
+
+    For horizon `N`, `y_N(t) = 1 if 0 <= classification_labels[t] <= N else 0`
+    (matches the settled discrete-horizon-label definition: `y_N(t) = 1 if
+    (onset - t) <= N`, restricted to eligible positions).
+
+    `horizon_weights`, if given, must have the same length as `horizons`; it is
+    renormalized to sum to `len(horizons)` (keeping the combined loss on a scale
+    comparable to a single-horizon BCE while still up-weighting rarer horizons
+    relative to each other) -- mirrors `scripts/train_onset_probes.py`'s
+    no-LoRA convention for the same weighting. `None` means uniform weights.
+
+    Returns `(total_loss, per_horizon_losses)` -- the latter purely for logging
+    (e.g. `ProbeTrainer`'s `log_dict`), not used in the backward pass itself
+    beyond what's already summed into `total_loss`.
+    """
+    if probe_logits.shape[-1] != len(horizons):
+        raise ValueError(
+            f"probe_logits' last dim ({probe_logits.shape[-1]}) must equal len(horizons) ({len(horizons)})"
+        )
+
+    if horizon_weights is None:
+        weights_arr = [1.0] * len(horizons)
+    else:
+        if len(horizon_weights) != len(horizons):
+            raise ValueError("horizon_weights must be the same length as horizons")
+        weights_arr = horizon_weights
+    weight_sum = sum(weights_arr)
+    normalized_weights = [w / weight_sum * len(horizons) for w in weights_arr]
+
+    logits_clipped = torch.clamp(probe_logits, min=-max_clipped_logits, max=max_clipped_logits)
+    weight_denom = classification_weights.sum().clamp_min(1e-8)
+
+    total_loss = torch.tensor(0.0, device=probe_logits.device, dtype=probe_logits.dtype)
+    per_horizon_losses: Dict[int, float] = {}
+    for i, horizon in enumerate(horizons):
+        y_n = ((classification_labels >= 0) & (classification_labels <= horizon)).to(probe_logits.dtype)
+        bce = F.binary_cross_entropy_with_logits(logits_clipped[..., i], y_n, reduction='none')
+        horizon_loss = (bce * classification_weights).sum() / weight_denom
+
+        if torch.isnan(horizon_loss):
+            print(f"WARNING: NaN detected in compute_multi_horizon_bce_loss for horizon={horizon}")
+            horizon_loss = torch.tensor(0.0, device=probe_logits.device, dtype=probe_logits.dtype)
+
+        per_horizon_losses[horizon] = float(horizon_loss.detach().float().item())
+        total_loss = total_loss + normalized_weights[i] * horizon_loss
+
+    return total_loss / len(horizons), per_horizon_losses
 
 
 def compute_probe_regression_loss(

@@ -56,6 +56,7 @@ class ValueHeadProbe(nn.Module):
         probe_dtype: Optional[str] = None,
         normalize_before_head: Optional[str] = None,
         probe_head_type: str = "linear",
+        n_outputs: int = 1,
         seed: int = 42,
     ):
         """
@@ -83,6 +84,7 @@ class ValueHeadProbe(nn.Module):
             saved_probe_dtype = saved_config.get("probe_dtype")
             saved_norm = saved_config.get("normalize_before_head")
             probe_head_type = saved_config.get("probe_head_type", probe_head_type)
+            n_outputs = saved_config.get("n_outputs", n_outputs)
 
         hidden_size = get_model_hidden_size(model)
         model_layers = get_model_layers(model)
@@ -94,6 +96,7 @@ class ValueHeadProbe(nn.Module):
         self.context_window_size = context_window_size
         self.attention_probe_n_heads = attention_probe_n_heads
         self.probe_head_type = str(probe_head_type).strip().lower()
+        self.n_outputs = n_outputs
 
         self.probe_dtype = probe_dtype if probe_dtype is not None else (saved_probe_dtype or "auto")
         self.normalize_before_head = (
@@ -139,13 +142,13 @@ class ValueHeadProbe(nn.Module):
             self.value_head = PerTokenAttentionProbe(
                 input_size,
                 n_heads=self.attention_probe_n_heads,
-                n_outputs=1,
+                n_outputs=self.n_outputs,
                 device=model.device,
                 dtype=head_dtype,
             )
         else:  # "linear"
             torch.manual_seed(seed)
-            self.value_head = nn.Linear(input_size, 1, device=model.device, dtype=head_dtype)
+            self.value_head = nn.Linear(input_size, self.n_outputs, device=model.device, dtype=head_dtype)
             self._initialize_weights()
         
         # Initialize hook state
@@ -275,10 +278,11 @@ class ValueHeadProbe(nn.Module):
     def save(self, path: Union[str, Path]):
         """
         Save the probe to disk.
-        
+
         Args:
             path: Directory to save the probe to
         """
+        path = Path(path)
         os.makedirs(path, exist_ok=True)
         
         # Save LoRA adapters if present
@@ -314,6 +318,7 @@ class ValueHeadProbe(nn.Module):
             "hidden_size": hidden_size,
             "probe_head_type": self.probe_head_type,
             "attention_probe_n_heads": self.attention_probe_n_heads,
+            "n_outputs": self.n_outputs,
         }
         with open(path / "probe_config.json", 'w') as f:
             json.dump(probe_config, f, indent=4)
@@ -350,11 +355,12 @@ class ValueHeadProbe(nn.Module):
         probe_layer_idx = probe_config['layer_idx']
         head_type = probe_config.get("probe_head_type", "attention")  # old saves default to attention
         n_heads = probe_config.get("attention_probe_n_heads", 4)
+        n_outputs = probe_config.get("n_outputs", 1)  # old saves predate multi-output heads
 
         if head_type == "attention":
-            probe_head = PerTokenAttentionProbe(hidden_size, n_heads=n_heads, n_outputs=1, device=device, dtype=dtype)
+            probe_head = PerTokenAttentionProbe(hidden_size, n_heads=n_heads, n_outputs=n_outputs, device=device, dtype=dtype)
         else:
-            probe_head = nn.Linear(hidden_size, 1, device=device, dtype=dtype)
+            probe_head = nn.Linear(hidden_size, n_outputs, device=device, dtype=dtype)
         
         state_dict = torch.load(
             path / "probe_head.bin",
@@ -440,6 +446,7 @@ def setup_probe(
             probe_dtype=probe_config.probe_dtype,
             normalize_before_head=probe_config.normalize_before_head,
             probe_head_type=probe_config.probe_head_type,
+            n_outputs=probe_config.n_outputs,
             seed=seed,
         )
   

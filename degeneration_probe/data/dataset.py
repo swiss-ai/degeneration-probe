@@ -156,7 +156,14 @@ class TokenizedProbingDataset(Dataset):
         """Process token-level generation labels without searching for assistant markers."""
         prompt_text = self._build_generation_prompt(item.prompt)
         prompt_ids = self._tokenize_without_special_tokens(prompt_text)
-        completion_ids = self._tokenize_without_special_tokens(item.completion)
+        # Prefer the item's own exact completion token ids (e.g. from a prior generation
+        # run) over retokenizing `item.completion` -- retokenization isn't guaranteed to
+        # round-trip losslessly, which can silently misalign `token_labels` against the
+        # wrong tokens. See `ProbingItem.completion_token_ids`'s docstring.
+        if item.completion_token_ids is not None:
+            completion_ids = list(item.completion_token_ids)
+        else:
+            completion_ids = self._tokenize_without_special_tokens(item.completion)
 
         raw_completion_len = len(completion_ids)
         completion_limit = self.config.max_completion_length or self.config.max_length
