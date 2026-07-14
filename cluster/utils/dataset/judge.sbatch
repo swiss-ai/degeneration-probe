@@ -31,7 +31,10 @@ echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
 # manifest each time -- llm_judge.py already skips rows marked "ok" and stops
 # cleanly (exit 0) on UsageExhausted, so each iteration below just continues
 # wherever the previous account's usage ran out.
-TOKEN_NAMES=(marcodenegri lucasartori lorenzobaggi moritzreihs)
+# Override the rotation order with e.g. --export=ALL,TOKEN_ORDER="lorenzobaggi moritzreihs marcodenegri lucasartori"
+# -- lets two judge jobs for different datasets run concurrently without both
+# starting from the same account and colliding on its usage window.
+TOKEN_NAMES=(${TOKEN_ORDER:-marcodenegri lucasartori lorenzobaggi moritzreihs})
 
 remaining() {
     python3 - <<PY
