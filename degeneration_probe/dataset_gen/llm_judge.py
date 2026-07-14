@@ -670,6 +670,21 @@ def _done_keys(results_df: pd.DataFrame) -> set:
     return set(zip(ok["prompt_id"], ok["rollout_idx"]))
 
 
+def _onset_quote_is_valid(onset_quote: Optional[str], completion_text: str) -> bool:
+    """Server-side re-check, independent of whatever the backend's own
+    verify_onset_quote tool reported. The tool only sees the *candidate* the
+    model chooses to check with it -- nothing binds the final onset_quote
+    field in the structured output to actually be that same, tool-verified
+    string (observed in practice: a verified multi-word candidate checked via
+    the tool, then a different, unverified value -- once literally "test" --
+    written into the final answer instead). This re-derives both conditions
+    the tool call is supposed to guarantee (min length, verbatim substring)
+    directly against the real completion text before ever accepting the row."""
+    if not isinstance(onset_quote, str) or len(onset_quote.split()) < MIN_ONSET_QUOTE_WORDS:
+        return False
+    return onset_quote in completion_text
+
+
 def run_judging(
     sample: pd.DataFrame,
     backend: JudgeBackend,
@@ -708,6 +723,14 @@ def run_judging(
         stop_after_this_row = False
         try:
             verdict = backend.judge(row.prompt_text, row.completion_text)
+            if verdict.is_degenerating and not _onset_quote_is_valid(
+                verdict.onset_quote, row.completion_text
+            ):
+                raise ValueError(
+                    f"onset_quote failed server-side verification (missing, under "
+                    f"{MIN_ONSET_QUOTE_WORDS} words, or not a verbatim substring of the "
+                    f"completion): {verdict.onset_quote!r}"
+                )
             record.update(
                 is_degenerating=verdict.is_degenerating,
                 onset_quote=verdict.onset_quote,
