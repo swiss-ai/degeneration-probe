@@ -652,6 +652,7 @@ def write_shard_atomic(df: pd.DataFrame, shard_path: Path) -> None:
     fd, tmp_path = tempfile.mkstemp(
         dir=str(shard_path.parent), prefix=".tmp_shard_", suffix=".parquet"
     )
+    os.fchmod(fd, 0o640)
     os.close(fd)
     try:
         df.to_parquet(tmp_path, index=False)

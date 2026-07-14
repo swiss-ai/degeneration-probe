@@ -445,6 +445,7 @@ def write_partial_result(work_dir: Path, result: RolloutResult) -> Path:
     final_path = _partial_result_path(work_dir, result.prompt_id, result.rollout_idx)
     fd, tmp_path = tempfile.mkstemp(dir=str(work_dir), prefix=".tmp_partial_", suffix=".json")
     try:
+        os.fchmod(fd, 0o640)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(asdict(result), f)
         os.replace(tmp_path, final_path)
@@ -483,6 +484,7 @@ def write_shard_atomic(df: pd.DataFrame, shard_path: Path) -> None:
     fd, tmp_path = tempfile.mkstemp(
         dir=str(shard_path.parent), prefix=".tmp_shard_", suffix=".parquet"
     )
+    os.fchmod(fd, 0o640)
     os.close(fd)
     try:
         df.to_parquet(tmp_path, index=False)
