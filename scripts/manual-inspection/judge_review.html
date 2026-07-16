@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Revisione manuale LLM-judge</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #d9dee3;
+    --text: #1b2430;
+    --muted: #62707d;
+    --accent: #2563eb;
+    --accent-dark: #1d4ed8;
+    --good: #15803d;
+    --bad: #b91c1c;
+    --warn: #b45309;
+    --judge-onset: #ffd8a8;
+    --judge-onset-border: #d9730d;
+    --corrected-onset: #bfdbfe;
+    --corrected-onset-border: #1d4ed8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.4;
+  }
+  header.topbar {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 10px 18px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header.topbar h1 { font-size: 17px; margin: 0; }
+  header.topbar .spacer { flex: 1; }
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px;
+    background: #eef1f4; color: var(--muted); border: 1px solid var(--border);
+  }
+  main { max-width: 1400px; margin: 0 auto; padding: 16px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .panel h2 { margin-top: 0; font-size: 15px; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 7px; border: 1px solid var(--border);
+    background: #fff; padding: 7px 13px; color: var(--text);
+  }
+  button:hover { background: #f1f4f7; }
+  button.primary { background: var(--accent); border-color: var(--accent-dark); color: #fff; }
+  button.primary:hover { background: var(--accent-dark); }
+  button.danger { color: var(--bad); border-color: #f3c8c8; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.active { background: var(--accent); border-color: var(--accent-dark); color: #fff; }
+  select, input[type=text], textarea {
+    font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: #fff; color: var(--text);
+  }
+  textarea { width: 100%; resize: vertical; min-height: 60px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .app-grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .app-grid { grid-template-columns: 1fr; } }
+  .worklist { max-height: 78vh; overflow-y: auto; }
+  .worklist table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .worklist th, .worklist td { text-align: left; padding: 6px 6px; border-bottom: 1px solid #eef1f4; }
+  .worklist tr { cursor: pointer; }
+  .worklist tr:hover td { background: #f4f7fb; }
+  .worklist tr.selected td { background: #e7effe; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+  .badge.degen { background: #fde2e1; color: var(--bad); }
+  .badge.clean { background: #dcfce7; color: var(--good); }
+  .badge.done { background: #dcfce7; color: var(--good); }
+  .badge.pending { background: #eef1f4; color: var(--muted); }
+  .badge.conf-high { background: #eef1f4; color: var(--muted); }
+  .badge.conf-medium { background: #fef3c7; color: var(--warn); }
+  .badge.conf-low { background: #fde2e1; color: var(--bad); }
+  progress { width: 160px; }
+  pre.completion {
+    white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; background: #fbfcfd; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; max-height: 60vh; overflow-y: auto; cursor: text;
+  }
+  mark.onset-judge { background: var(--judge-onset); box-shadow: inset 0 -2px 0 var(--judge-onset-border); }
+  mark.onset-corrected { background: var(--corrected-onset); box-shadow: inset 0 -2px 0 var(--corrected-onset-border); }
+  mark.onset-judge.onset-corrected { background: linear-gradient(180deg, var(--judge-onset) 50%, var(--corrected-onset) 50%); }
+  .legend-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+  details > summary { cursor: pointer; font-weight: 600; margin-bottom: 6px; }
+  details[open] > summary { margin-bottom: 10px; }
+  .prompt-text, .reasoning-text { white-space: pre-wrap; font-size: 13.5px; }
+  .segctl { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .segctl button { border: none; border-radius: 0; }
+  .segctl button + button { border-left: 1px solid var(--border); }
+  .field { margin: 12px 0; }
+  .field > label.field-label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 13.5px; }
+  .pending-marker-box {
+    margin-top: 8px; padding: 8px 10px; border: 1px dashed var(--corrected-onset-border);
+    border-radius: 7px; background: #eff6ff; font-size: 13px; display: none;
+  }
+  .pending-marker-box.visible { display: block; }
+  .completed-check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .top-instructions { font-size: 13.5px; }
+  .top-instructions ol { padding-left: 20px; }
+  .warn-box { background: #fff7ed; border: 1px solid #fde3c9; border-radius: 8px; padding: 10px 12px; font-size: 13px; color: #7c4a03; }
+  footer.status-note { font-size: 12px; color: var(--muted); padding: 6px 2px; }
+  input[type=file] { font-size: 13px; }
+  table.overview-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.overview-table th, table.overview-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eef1f4; }
+  .tabbar { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabbar button { border-radius: 999px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>🔍 Revisione manuale — verdetti LLM-judge</h1>
+  <span class="pill" id="dataset-pill">nessun file caricato</span>
+  <span class="spacer"></span>
+  <span class="hint" id="reviewer-pill"></span>
+  <button id="change-reviewer-btn" class="hidden">Cambia revisore</button>
+</header>
+
+<main>
+
+  <section class="panel" id="loader-panel">
+    <h2>1. Carica i dati</h2>
+    <p class="hint">
+      Questo file HTML deve stare nella <b>stessa cartella</b> di <code>judge_review_data.json</code>.
+      Prova prima "Carica automaticamente"; se il browser lo blocca (succede spesso aprendo il file
+      direttamente da disco), usa il selettore qui sotto per scegliere il file a mano — funziona sempre.
+    </p>
+    <div class="row">
+      <button id="auto-load-btn">Carica automaticamente (judge_review_data.json)</button>
+      <span>oppure</span>
+      <input type="file" id="file-input" accept="application/json" />
+    </div>
+    <p class="hint" id="loader-status"></p>
+  </section>
+
+  <section class="panel" id="reviewer-panel" style="display:none">
+    <h2>2. Chi sei?</h2>
+    <div class="row">
+      <select id="reviewer-select"></select>
+      <button id="reviewer-confirm-btn" class="primary">Continua</button>
+    </div>
+    <p class="hint">Le tue revisioni vengono salvate automaticamente in questo browser, sotto il tuo nome.</p>
+  </section>
+
+  <section id="app-panel" style="display:none">
+
+    <details class="panel">
+      <summary>ℹ️ Istruzioni (clicca per aprire/chiudere)</summary>
+      <div class="top-instructions">
+        <ol>
+          <li>Nella colonna a sinistra ("Le mie sequenze") trovi le sequenze assegnate a te. Solo quelle che hanno raggiunto il limite di token vengono mostrate — è la condizione necessaria per essere degeneri.</li>
+          <li>Clicca una riga per aprirla. A destra vedi il prompt, il testo generato e il verdetto del giudice (LLM). L'inizio della degenerazione segnalato dal giudice è evidenziato in <mark class="onset-judge">arancione</mark>.</li>
+          <li>Controlla se la <b>classificazione</b> (degenera / non degenera) è corretta. Se non lo è, cambiala con i pulsanti.</li>
+          <li>Se la sequenza degenera, controlla se il <b>punto di inizio</b> è giusto. Se non lo è, clicca esattamente nel testo dove pensi cominci davvero la degenerazione, poi conferma — apparirà in <mark class="onset-corrected">blu</mark>.</li>
+          <li>Aggiungi un commento se hai cambiato qualcosa (utile per capire il motivo). Poi spunta "Ho completato la revisione".</li>
+          <li>Quando hai finito (anche solo in parte), premi "Esporta le mie revisioni" e mandami il file <code>.json</code> generato — lo unisco con quelli degli altri.</li>
+        </ol>
+      </div>
+    </details>
+
+    <div class="tabbar">
+      <button id="tab-mine" class="active">Le mie sequenze</button>
+      <button id="tab-overview">Panoramica assegnazioni</button>
+    </div>
+
+    <div id="mine-view" class="app-grid">
+      <div class="panel worklist">
+        <div class="row" style="justify-content: space-between; margin-bottom:8px;">
+          <b>Le mie sequenze</b>
+          <progress id="progress-bar" value="0" max="1"></progress>
+        </div>
+        <div class="row" style="margin-bottom:8px;">
+          <label><input type="checkbox" id="filter-pending" /> solo da revisionare</label>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Dominio</th><th>Giudizio</th><th>Conf.</th><th>Stato</th></tr></thead>
+          <tbody id="worklist-body"></tbody>
+        </table>
+      </div>
+      <div id="detail-container"></div>
+    </div>
+
+    <div id="overview-view" class="panel" style="display:none">
+      <h2>Panoramica assegnazioni</h2>
+      <p class="hint">
+        Conteggi assegnati per persona (fissi, decisi al momento dell'esportazione). Il conteggio "completate"
+        è visibile solo per te in questo browser — ognuno vede solo il proprio progresso finché non manda
+        il proprio file di export.
+      </p>
+      <table class="overview-table" id="overview-table"></table>
+      <div class="row" style="margin-top:12px;">
+        <label>Sfoglia le sequenze assegnate a:
+          <select id="overview-reviewer-select"></select>
+        </label>
+      </div>
+      <div id="overview-list" style="margin-top:10px;"></div>
+      <div id="overview-detail-container" style="margin-top:10px;"></div>
+    </div>
+
+    <section class="panel">
+      <h2>3. Esporta</h2>
+      <p class="hint">
+        Esporta <b>solo</b> le sequenze che hai segnato come "completate". Manda il file generato a chi
+        raccoglie le revisioni (nome file: <code>judge_review_&lt;tuo-nome&gt;_&lt;dataset&gt;.json</code>).
+      </p>
+      <div class="row">
+        <button id="export-btn" class="primary">⬇️ Esporta le mie revisioni (JSON)</button>
+        <span>oppure, per riprendere su un altro computer:</span>
+        <input type="file" id="import-input" accept="application/json" />
+      </div>
+      <p class="hint" id="export-status"></p>
+      <details style="margin-top:10px;">
+        <summary>Opzioni avanzate</summary>
+        <button id="reset-btn" class="danger">Cancella tutte le mie revisioni salvate in questo browser</button>
+      </details>
+    </section>
+
+  </section>
+
+</main>
+
+<footer class="status-note" style="text-align:center;" id="footer-note"></footer>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- state ----------
+  let appData = null;       // { meta, records }
+  let currentReviewer = null;
+  let reviews = {};         // id -> review object, for currentReviewer
+  let selectedId = null;    // currently open record id (mine view)
+  let overviewSelectedId = null;
+  let pendingClickOffset = null; // {offset} while user is placing a corrected onset marker
+
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // ---------- localStorage ----------
+  function storageKey(reviewer) {
+    const m = appData.meta;
+    return `judgeReview::${m.dataset_tag}::${m.backend}::${m.generated_at}::${reviewer}`;
+  }
+
+  function loadReviewsFor(reviewer) {
+    try {
+      const raw = localStorage.getItem(storageKey(reviewer));
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function persistReviews() {
+    localStorage.setItem(storageKey(currentReviewer), JSON.stringify(reviews));
+  }
+
+  function defaultReview(record) {
+    return {
+      id: record.id,
+      classification_status: "unset",       // unset | confirmed | corrected
+      corrected_is_degenerating: record.judge.is_degenerating,
+      position_status: "unset",             // unset | correct | corrected | ambiguous | na
+      corrected_onset_char_start: null,
+      comment: "",
+      completed: false,
+      reviewed_at: null,
+    };
+  }
+
+  function getReview(id) {
+    const record = recordsById[id];
+    if (!reviews[id]) reviews[id] = defaultReview(record);
+    return reviews[id];
+  }
+
+  function saveReview(id, patch) {
+    const r = getReview(id);
+    Object.assign(r, patch, { reviewed_at: new Date().toISOString() });
+    persistReviews();
+  }
+
+  // ---------- data loading ----------
+  let recordsById = {};
+
+  function indexRecords() {
+    recordsById = {};
+    for (const r of appData.records) recordsById[r.id] = r;
+  }
+
+  function onDataLoaded(data, sourceLabel) {
+    appData = data;
+    indexRecords();
+    $("#dataset-pill").textContent =
+      `${data.meta.dataset_tag} · backend=${data.meta.backend} · ${data.records.length} sequenze (${sourceLabel})`;
+    $("#loader-status").textContent = "";
+    $("#loader-panel").style.display = "none";
+    setupReviewerPanel();
+  }
+
+  async function tryAutoLoad() {
+    $("#loader-status").textContent = "Tentativo di caricamento automatico...";
+    try {
+      const resp = await fetch("./judge_review_data.json", { cache: "no-store" });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const data = await resp.json();
+      onDataLoaded(data, "auto");
+    } catch (e) {
+      $("#loader-status").textContent =
+        "Caricamento automatico non riuscito (normale se hai aperto il file direttamente da disco). " +
+        "Usa il selettore per scegliere judge_review_data.json a mano.";
+    }
+  }
+
+  $("#auto-load-btn").addEventListener("click", tryAutoLoad);
+
+  $("#file-input").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        onDataLoaded(data, file.name);
+      } catch (err) {
+        $("#loader-status").textContent = "File non valido: " + err.message;
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  // ---------- reviewer selection ----------
+  function setupReviewerPanel() {
+    const names = Array.from(
+      new Set([...(appData.meta.reviewers || []), ...appData.records.map((r) => r.assigned_to)])
+    );
+    const sel = $("#reviewer-select");
+    sel.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+    const last = localStorage.getItem("judgeReview::lastReviewer");
+    if (last && names.includes(last)) sel.value = last;
+    $("#reviewer-panel").style.display = "block";
+  }
+
+  $("#reviewer-confirm-btn").addEventListener("click", () => {
+    setReviewer($("#reviewer-select").value);
+  });
+
+  $("#change-reviewer-btn").addEventListener("click", () => {
+    $("#app-panel").style.display = "none";
+    $("#reviewer-panel").style.display = "block";
+  });
+
+  function setReviewer(name) {
+    currentReviewer = name;
+    reviews = loadReviewsFor(name);
+    localStorage.setItem("judgeReview::lastReviewer", name);
+    $("#reviewer-pill").textContent = `Revisore: ${name}`;
+    $("#change-reviewer-btn").classList.remove("hidden");
+    $("#reviewer-panel").style.display = "none";
+    $("#app-panel").style.display = "block";
+    setupOverviewReviewerSelect();
+    renderWorklist();
+    renderOverviewTable();
+    selectedId = null;
+    $("#detail-container").innerHTML = `<div class="panel hint">Seleziona una sequenza dalla lista a sinistra.</div>`;
+  }
+
+  // ---------- tabs ----------
+  $("#tab-mine").addEventListener("click", () => switchTab("mine"));
+  $("#tab-overview").addEventListener("click", () => {
+    renderOverviewTable();
+    switchTab("overview");
+  });
+  function switchTab(which) {
+    $("#tab-mine").classList.toggle("active", which === "mine");
+    $("#tab-overview").classList.toggle("active", which === "overview");
+    $("#mine-view").style.display = which === "mine" ? "grid" : "none";
+    $("#overview-view").style.display = which === "overview" ? "block" : "none";
+  }
+
+  // ---------- worklist (mine) ----------
+  function myRecords() {
+    return appData.records.filter((r) => r.assigned_to === currentReviewer);
+  }
+
+  function renderWorklist() {
+    const mine = myRecords();
+    const onlyPending = $("#filter-pending").checked;
+    const body = $("#worklist-body");
+    let doneCount = 0;
+    const rows = [];
+    mine.forEach((r, i) => {
+      const rev = getReview(r.id);
+      if (rev.completed) doneCount++;
+      if (onlyPending && rev.completed) return;
+      rows.push(`
+        <tr data-id="${escapeHtml(r.id)}" class="${r.id === selectedId ? "selected" : ""}">
+          <td>${i + 1}</td>
+          <td>${escapeHtml(r.domain)}</td>
+          <td><span class="badge ${r.judge.is_degenerating ? "degen" : "clean"}">${r.judge.is_degenerating ? "degenera" : "pulita"}</span></td>
+          <td><span class="badge conf-${escapeHtml(r.judge.confidence || "medium")}">${escapeHtml(r.judge.confidence || "?")}</span></td>
+          <td><span class="badge ${rev.completed ? "done" : "pending"}">${rev.completed ? "fatta" : "da fare"}</span></td>
+        </tr>`);
+    });
+    body.innerHTML = rows.join("");
+    $$("#worklist-body tr").forEach((tr) => tr.addEventListener("click", () => openRecord(tr.dataset.id)));
+    $("#progress-bar").max = mine.length || 1;
+    $("#progress-bar").value = doneCount;
+    $("#progress-bar").title = `${doneCount}/${mine.length} completate`;
+  }
+  $("#filter-pending").addEventListener("change", renderWorklist);
+
+  function openRecord(id) {
+    selectedId = id;
+    renderWorklist();
+    $("#detail-container").innerHTML = renderDetail(recordsById[id], { editable: true });
+    wireDetailEvents(id, true);
+  }
+
+  // ---------- text highlighting ----------
+  function buildSegments(text, ranges) {
+    const points = new Set([0, text.length]);
+    for (const r of ranges) {
+      points.add(Math.max(0, Math.min(text.length, r.start)));
+      points.add(Math.max(0, Math.min(text.length, r.end)));
+    }
+    const sorted = Array.from(points).sort((a, b) => a - b);
+    const segments = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const s = sorted[i], e = sorted[i + 1];
+      if (s >= e) continue;
+      const classes = ranges.filter((r) => r.start < e && r.end > s).map((r) => r.cls);
+      segments.push({ text: text.slice(s, e), classes });
+    }
+    return segments;
+  }
+
+  function renderCompletionHtml(text, ranges) {
+    const segs = buildSegments(text, ranges);
+    return segs
+      .map((seg) => {
+        const escaped = escapeHtml(seg.text);
+        if (!seg.classes.length) return escaped;
+        return `<mark class="${seg.classes.join(" ")}">${escaped}</mark>`;
+      })
+      .join("");
+  }
+
+  // Walks all text nodes under `container` in document order and sums their
+  // lengths until it reaches the DOM node/offset the click landed on -- this
+  // works no matter how many <mark> wrappers sit inside, because the segments
+  // above are built by slicing the *original* string, so total text-node
+  // length always equals completion_text.length.
+  function charOffsetFromPoint(container, clientX, clientY) {
+    let range = null;
+    if (document.caretRangeFromPoint) {
+      range = document.caretRangeFromPoint(clientX, clientY);
+    } else if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(clientX, clientY);
+      if (pos) {
+        range = document.createRange();
+        range.setStart(pos.offsetNode, pos.offset);
+      }
+    }
+    if (!range || !container.contains(range.startContainer)) return null;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+    let total = 0, node;
+    while ((node = walker.nextNode())) {
+      if (node === range.startContainer) return total + range.startOffset;
+      total += node.textContent.length;
+    }
+    return null;
+  }
+
+  // ---------- detail rendering ----------
+  function effectiveIsDegenerating(rev, record) {
+    return rev.classification_status === "corrected" ? rev.corrected_is_degenerating : record.judge.is_degenerating;
+  }
+
+  function renderDetail(record, opts) {
+    const editable = opts.editable && record.assigned_to === currentReviewer;
+    const rev = getReview(record.id);
+    const isDegen = effectiveIsDegenerating(rev, record);
+
+    const ranges = [];
+    if (record.judge.onset_char_start !== null && record.judge.onset_char_start !== undefined) {
+      ranges.push({ start: record.judge.onset_char_start, end: record.judge.onset_char_end, cls: "onset-judge" });
+    }
+    if (rev.position_status === "corrected" && rev.corrected_onset_char_start !== null) {
+      const len = record.judge.onset_quote ? record.judge.onset_quote.length : 40;
+      ranges.push({
+        start: rev.corrected_onset_char_start,
+        end: Math.min(record.completion_text.length, rev.corrected_onset_char_start + len),
+        cls: "onset-corrected",
+      });
+    }
+    const completionHtml = renderCompletionHtml(record.completion_text, ranges);
+
+    const heur = record.heuristics || {};
+    const heurLine = [
+      heur.max_repetition_score != null ? `repetition_score max = ${heur.max_repetition_score.toFixed(3)}` : null,
+      heur.lrs_period_repeat_count != null ? `LRS repeat count = ${heur.lrs_period_repeat_count}` : null,
+    ].filter(Boolean).join(" · ") || "non disponibile";
+
+    const notOwnerNote = editable
+      ? ""
+      : `<div class="warn-box">Questa sequenza è assegnata a <b>${escapeHtml(record.assigned_to)}</b>: solo ${escapeHtml(record.assigned_to)} può modificarne la revisione. Qui la vedi in sola lettura.</div>`;
+
+    return `
+    <div class="panel">
+      <div class="row" style="justify-content: space-between;">
+        <div>
+          <b>${escapeHtml(record.prompt_id)}</b> · rollout ${record.rollout_idx} · dominio ${escapeHtml(record.domain)}
+        </div>
+        <div class="row">
+          <span class="badge ${record.judge.is_degenerating ? "degen" : "clean"}">giudice: ${record.judge.is_degenerating ? "degenera" : "pulita"}</span>
+          <span class="badge conf-${escapeHtml(record.judge.confidence || "medium")}">confidence: ${escapeHtml(record.judge.confidence || "?")}</span>
+        </div>
+      </div>
+      ${notOwnerNote}
+
+      <details>
+        <summary>Prompt</summary>
+        <div class="prompt-text">${escapeHtml(record.prompt_text)}</div>
+      </details>
+
+      <details>
+        <summary>Info euristiche (contesto extra, ignora se preferisci giudicare "alla cieca")</summary>
+        <div class="hint">${heurLine}</div>
+      </details>
+
+      <div class="field">
+        <label class="field-label">Testo generato</label>
+        <div class="row hint" style="margin-bottom:6px;">
+          <span><span class="legend-swatch" style="background:var(--judge-onset)"></span>inizio segnalato dal giudice</span>
+          ${rev.position_status === "corrected" ? `<span><span class="legend-swatch" style="background:var(--corrected-onset)"></span>tuo punto corretto</span>` : ""}
+          ${editable ? `<span>· clicca nel testo per proporre un nuovo punto di inizio</span>` : ""}
+        </div>
+        <pre class="completion" id="completion-pre">${completionHtml}</pre>
+        <div class="pending-marker-box" id="pending-marker-box"></div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Verdetto del giudice (LLM)</label>
+        <div class="reasoning-text">${escapeHtml(record.judge.reasoning || "")}</div>
+        <p class="hint">onset_quote citato dal giudice: <i>"${escapeHtml(record.judge.onset_quote || "—")}"</i></p>
+      </div>
+
+      ${editable ? renderReviewForm(record, rev, isDegen) : ""}
+    </div>`;
+  }
+
+  function renderReviewForm(record, rev, isDegen) {
+    return `
+      <div class="field">
+        <label class="field-label">La classificazione è corretta?</label>
+        <div class="segctl" id="classification-ctl">
+          <button data-val="true" class="${isDegen ? "active" : ""}">Degenera</button>
+          <button data-val="false" class="${!isDegen ? "active" : ""}">Non degenera</button>
+        </div>
+        <p class="hint">${rev.classification_status === "corrected" ? "⚠️ Hai cambiato il verdetto del giudice." : "Verdetto del giudice confermato (default)."}</p>
+      </div>
+
+      <div class="field" id="position-field" style="${isDegen ? "" : "display:none"}">
+        <label class="field-label">Il punto di inizio (onset) è corretto?</label>
+        <div class="row">
+          <div class="segctl" id="position-ctl">
+            <button data-val="correct" class="${rev.position_status === "correct" ? "active" : ""}">Sì, corretto</button>
+            <button data-val="corrected" class="${rev.position_status === "corrected" ? "active" : ""}">No, lo correggo io</button>
+            <button data-val="ambiguous" class="${rev.position_status === "ambiguous" ? "active" : ""}">Non individuabile</button>
+          </div>
+        </div>
+        <p class="hint" id="position-hint">
+          ${rev.position_status === "corrected" && rev.corrected_onset_char_start !== null
+            ? "Punto corretto impostato (evidenziato in blu nel testo)."
+            : rev.position_status === "corrected"
+            ? "Clicca nel testo sopra nel punto esatto in cui inizia davvero la degenerazione, poi conferma."
+            : ""}
+        </p>
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="comment-input">Commento (spiega le modifiche fatte, se ce ne sono)</label>
+        <textarea id="comment-input" placeholder="Es: la ripetizione è in realtà un brute-force che avanza, non è degenerazione...">${escapeHtml(rev.comment || "")}</textarea>
+      </div>
+
+      <div class="field row" style="justify-content: space-between;">
+        <label class="completed-check">
+          <input type="checkbox" id="completed-check" ${rev.completed ? "checked" : ""} />
+          Ho completato la revisione di questa sequenza
+        </label>
+        <div class="row">
+          <button id="prev-btn">◀ Precedente</button>
+          <button id="next-pending-btn" class="primary">Prossima da revisionare ▶</button>
+          <button id="next-btn">Successiva ▶</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function wireDetailEvents(id, editable) {
+    const record = recordsById[id];
+    const pre = $("#completion-pre");
+
+    if (editable) {
+      pre.addEventListener("click", (e) => {
+        const rev = getReview(id);
+        if (rev.position_status !== "corrected") return;
+        const offset = charOffsetFromPoint(pre, e.clientX, e.clientY);
+        if (offset === null) return;
+        pendingClickOffset = offset;
+        const ctxStart = Math.max(0, offset - 15);
+        const ctxEnd = Math.min(record.completion_text.length, offset + 45);
+        const box = $("#pending-marker-box");
+        box.classList.add("visible");
+        box.innerHTML = `
+          Nuovo punto selezionato, contesto: <i>"…${escapeHtml(record.completion_text.slice(ctxStart, offset))}<b>▍</b>${escapeHtml(record.completion_text.slice(offset, ctxEnd))}…"</i>
+          <div class="row" style="margin-top:6px;">
+            <button id="confirm-marker-btn" class="primary">Conferma questo punto</button>
+            <button id="cancel-marker-btn">Annulla</button>
+          </div>`;
+        $("#confirm-marker-btn").addEventListener("click", () => {
+          saveReview(id, { corrected_onset_char_start: pendingClickOffset });
+          pendingClickOffset = null;
+          reopen(id);
+        });
+        $("#cancel-marker-btn").addEventListener("click", () => {
+          pendingClickOffset = null;
+          box.classList.remove("visible");
+          box.innerHTML = "";
+        });
+      });
+
+      const classCtl = $("#classification-ctl");
+      if (classCtl) {
+        classCtl.querySelectorAll("button").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const val = btn.dataset.val === "true";
+            const isDefault = val === record.judge.is_degenerating;
+            saveReview(id, {
+              classification_status: isDefault ? "confirmed" : "corrected",
+              corrected_is_degenerating: val,
+              // switching to "non degenera" makes any onset position moot
+              position_status: val ? getReview(id).position_status : "na",
+              corrected_onset_char_start: val ? getReview(id).corrected_onset_char_start : null,
+            });
+            reopen(id);
+          });
+        });
+      }
+
+      const posCtl = $("#position-ctl");
+      if (posCtl) {
+        posCtl.querySelectorAll("button").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const val = btn.dataset.val;
+            saveReview(id, {
+              position_status: val,
+              corrected_onset_char_start: val === "corrected" ? getReview(id).corrected_onset_char_start : null,
+            });
+            reopen(id);
+          });
+        });
+      }
+
+      const commentInput = $("#comment-input");
+      if (commentInput) {
+        commentInput.addEventListener("change", () => saveReview(id, { comment: commentInput.value }));
+      }
+
+      const completedCheck = $("#completed-check");
+      if (completedCheck) {
+        completedCheck.addEventListener("change", () => {
+          saveReview(id, { completed: completedCheck.checked });
+          renderWorklist();
+        });
+      }
+
+      const prevBtn = $("#prev-btn"), nextBtn = $("#next-btn"), nextPendingBtn = $("#next-pending-btn");
+      if (prevBtn) prevBtn.addEventListener("click", () => step(id, -1));
+      if (nextBtn) nextBtn.addEventListener("click", () => step(id, 1));
+      if (nextPendingBtn) nextPendingBtn.addEventListener("click", () => jumpToNextPending(id));
+    }
+  }
+
+  function reopen(id) {
+    if (selectedId === id) {
+      $("#detail-container").innerHTML = renderDetail(recordsById[id], { editable: true });
+      wireDetailEvents(id, true);
+    }
+    renderWorklist();
+  }
+
+  function step(id, delta) {
+    const mine = myRecords();
+    const idx = mine.findIndex((r) => r.id === id);
+    const next = mine[idx + delta];
+    if (next) openRecord(next.id);
+  }
+
+  function jumpToNextPending(id) {
+    const mine = myRecords();
+    const idx = mine.findIndex((r) => r.id === id);
+    for (let i = 1; i <= mine.length; i++) {
+      const cand = mine[(idx + i) % mine.length];
+      if (!getReview(cand.id).completed) { openRecord(cand.id); return; }
+    }
+  }
+
+  // ---------- overview ----------
+  function setupOverviewReviewerSelect() {
+    const names = Array.from(new Set(appData.records.map((r) => r.assigned_to))).sort();
+    const sel = $("#overview-reviewer-select");
+    sel.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+    sel.value = currentReviewer;
+    sel.onchange = () => renderOverviewList(sel.value);
+    renderOverviewList(sel.value);
+  }
+
+  function renderOverviewTable() {
+    const counts = appData.meta.reviewer_counts || {};
+    const rows = Object.entries(counts)
+      .map(([name, n]) => {
+        const own = name === currentReviewer ? myRecords().filter((r) => getReview(r.id).completed).length : "—";
+        return `<tr><td>${escapeHtml(name)}</td><td>${n}</td><td>${own}</td></tr>`;
+      })
+      .join("");
+    $("#overview-table").innerHTML =
+      `<thead><tr><th>Revisore</th><th>Assegnate</th><th>Completate (visibile solo per te)</th></tr></thead><tbody>${rows}</tbody>`;
+  }
+
+  function renderOverviewList(reviewerName) {
+    const recs = appData.records.filter((r) => r.assigned_to === reviewerName);
+    const rows = recs.map((r, i) => `
+      <tr data-id="${escapeHtml(r.id)}">
+        <td>${i + 1}</td><td>${escapeHtml(r.domain)}</td><td>${escapeHtml(r.prompt_id)}</td>
+        <td>${r.rollout_idx}</td>
+        <td><span class="badge ${r.judge.is_degenerating ? "degen" : "clean"}">${r.judge.is_degenerating ? "degenera" : "pulita"}</span></td>
+      </tr>`).join("");
+    $("#overview-list").innerHTML = `
+      <div class="worklist" style="max-height:40vh;">
+        <table><thead><tr><th>#</th><th>Dominio</th><th>prompt_id</th><th>rollout</th><th>Giudizio</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      </div>`;
+    $$("#overview-list tr[data-id]").forEach((tr) =>
+      tr.addEventListener("click", () => {
+        overviewSelectedId = tr.dataset.id;
+        $("#overview-detail-container").innerHTML = renderDetail(recordsById[overviewSelectedId], {
+          editable: recordsById[overviewSelectedId].assigned_to === currentReviewer,
+        });
+        wireDetailEvents(overviewSelectedId, recordsById[overviewSelectedId].assigned_to === currentReviewer);
+      })
+    );
+  }
+
+  // ---------- export / import ----------
+  function download(filename, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  $("#export-btn").addEventListener("click", () => {
+    const mine = myRecords();
+    const completed = mine.filter((r) => getReview(r.id).completed);
+    if (!completed.length) {
+      $("#export-status").textContent = "Nessuna sequenza completata da esportare ancora.";
+      return;
+    }
+    const payload = {
+      meta: {
+        reviewer: currentReviewer,
+        dataset_tag: appData.meta.dataset_tag,
+        backend: appData.meta.backend,
+        source_generated_at: appData.meta.generated_at,
+        exported_at: new Date().toISOString(),
+        n_reviewed: completed.length,
+        n_assigned: mine.length,
+      },
+      reviews: completed.map((r) => {
+        const rev = getReview(r.id);
+        const isDegen = effectiveIsDegenerating(rev, r);
+        return {
+          id: r.id,
+          prompt_id: r.prompt_id,
+          rollout_idx: r.rollout_idx,
+          judge_is_degenerating: r.judge.is_degenerating,
+          classification_status: rev.classification_status,
+          corrected_is_degenerating: isDegen,
+          judge_onset_quote: r.judge.onset_quote,
+          judge_onset_char_start: r.judge.onset_char_start,
+          position_status: rev.position_status,
+          corrected_onset_char_start: rev.corrected_onset_char_start,
+          corrected_onset_text:
+            rev.corrected_onset_char_start !== null
+              ? r.completion_text.slice(rev.corrected_onset_char_start, rev.corrected_onset_char_start + 60)
+              : null,
+          comment: rev.comment || "",
+          reviewed_at: rev.reviewed_at,
+        };
+      }),
+    };
+    const fname = `judge_review_${currentReviewer}_${appData.meta.dataset_tag}.json`.replace(/\s+/g, "_");
+    download(fname, payload);
+    $("#export-status").textContent = `Esportate ${completed.length}/${mine.length} sequenze in ${fname}.`;
+  });
+
+  $("#import-input").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!data.reviews) throw new Error("formato non riconosciuto");
+        let n = 0;
+        for (const item of data.reviews) {
+          const record = recordsById[item.id];
+          if (!record) continue;
+          reviews[item.id] = {
+            id: item.id,
+            classification_status: item.classification_status || "unset",
+            corrected_is_degenerating: item.corrected_is_degenerating,
+            position_status: item.position_status || "unset",
+            corrected_onset_char_start: item.corrected_onset_char_start,
+            comment: item.comment || "",
+            completed: true,
+            reviewed_at: item.reviewed_at,
+          };
+          n++;
+        }
+        persistReviews();
+        renderWorklist();
+        renderOverviewTable();
+        $("#export-status").textContent = `Importate ${n} revisioni da ${file.name}.`;
+      } catch (err) {
+        $("#export-status").textContent = "Import fallito: " + err.message;
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  $("#reset-btn").addEventListener("click", () => {
+    if (!confirm("Cancellare tutte le tue revisioni salvate in questo browser? Non si può annullare.")) return;
+    reviews = {};
+    persistReviews();
+    renderWorklist();
+    renderOverviewTable();
+    selectedId = null;
+    $("#detail-container").innerHTML = "";
+  });
+
+  $("#footer-note").textContent =
+    "Le revisioni sono salvate solo in questo browser (localStorage) finché non esporti il file JSON.";
+})();
+</script>
+</body>
+</html>
