@@ -21,7 +21,7 @@ echo "Branch: $(git -C $REPO rev-parse --abbrev-ref HEAD)"
 echo "Layer: $LAYER"
 
 # CPU-only eval (loads saved probe heads + reads cached activations, no training, no
-# GPU). See cluster/train_onset_probes.sbatch's comment for why PYTHONPATH must be set
+# GPU). See cluster/utils/onset/train_onset_probes.sbatch's comment for why PYTHONPATH must be set
 # explicitly (the container's baked `degeneration_probe` install is a separate, possibly
 # stale git checkout, not this mounted $REPO).
 srun --environment=$REPO/cluster/env.toml \

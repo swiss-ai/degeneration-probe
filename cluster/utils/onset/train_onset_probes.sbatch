@@ -21,7 +21,7 @@ echo "Branch: $(git -C $REPO rev-parse --abbrev-ref HEAD)"
 echo "Layer: $LAYER"
 
 # CPU-only (materializes cached activations into memory, trains tiny linear/MLP
-# heads -- no GPU needed). See cluster/layer_sweep.sbatch's comment for why
+# heads -- no GPU needed). See cluster/utils/onset/layer_sweep.sbatch's comment for why
 # PYTHONPATH must be set explicitly (the container's baked `degeneration_probe`
 # install is a separate, possibly-stale git checkout, not this mounted $REPO).
 srun --environment=$REPO/cluster/env.toml \

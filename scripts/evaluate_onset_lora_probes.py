@@ -1,7 +1,7 @@
 """Subtask K infra: score a trained LoRA onset-probe checkpoint (subtask I/J) on
 splits the training run itself never touched.
 
-`scripts/train_onset_lora_pilot.py` only ever evaluates on `val` (see its
+`scripts/train_onset_lora.py` only ever evaluates on `val` (see its
 `evaluation_results.json` / `eval_metrics.jsonl`). To compare the LoRA condition
 against the no-LoRA condition (subtask F, which covers `val` / `test_indomain` /
 `test_heldout_domains`) on equal footing, this script loads a saved checkpoint
@@ -12,7 +12,7 @@ Eval cost control: a full forward pass over every rollout in a split would be
 expensive (test_indomain has 3598 rollouts, test_heldout_domains 6300, run through
 the full 8B model). Instead this reuses subtask G's `select_lora_pilot_rollouts`
 -- every positive rollout plus a domain-stratified negative subsample -- sized so
-the positive:negative ratio matches what `train_onset_lora_pilot.py` used for its
+the positive:negative ratio matches what `train_onset_lora.py` used for its
 own `val` split (~3.5 negatives per positive), keeping per-checkpoint eval cost in
 the same ballpark as the pilot run's own val-scoring step rather than a much larger
 new commitment.

@@ -21,7 +21,7 @@ rollout-level train/val separation, no train-adjacent leakage):
       negative (EOS) rollout -- the same negative sample is reused across all 5
       horizons (only the positive side depends on N).
 
-Meant to run via `cluster/layer_sweep.sbatch` (CPU-only -- no GPU/model forward
+Meant to run via `cluster/utils/onset/layer_sweep.sbatch` (CPU-only -- no GPU/model forward
 pass needed, this only reads already-cached activations off disk). Writes
 `onset_labels/layer_sweep_auc.parquet` (columns: layer, horizon, auc, n_fit_pos,
 n_fit_neg, n_eval_pos, n_eval_neg).

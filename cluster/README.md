@@ -16,6 +16,8 @@ runtime.
 | `env.toml` | [Environment Definition File](https://docs.cscs.ch/software/container-engine/run/); defines mounts, env vars, NCCL hooks |
 | `train.sbatch` | Single training run (draft) |
 | `train_multirun.sbatch` | Parallel sweep across a GPU array (draft) |
+| `utils/dataset/` | Dataset generation/labeling/judging pipeline job scripts |
+| `utils/onset/` | Onset-detection probe pipeline job scripts (layer sweep, no-LoRA and LoRA train/eval — see `notebooks/inspect_onset_probes.ipynb` for the full subtask map) |
 
 ## Environment Design
 

@@ -9,11 +9,11 @@
 #SBATCH --gpus-per-task=1
 
 # Full-scale LoRA training for one onset-probe design -- multi-horizon (all 5 horizons)
-# or a single probe_N horizon -- see scripts/train_onset_lora_pilot.py's module
+# or a single probe_N horizon -- see scripts/train_onset_lora.py's module
 # docstring. Horizons are passed as the sbatch script's first positional arg, a
 # space-separated list, e.g.:
-#   sbatch --job-name=onset-lora-multi cluster/train_onset_lora_full.sbatch "5 20 50 100 200"
-#   sbatch --job-name=onset-lora-probe5 cluster/train_onset_lora_full.sbatch "5"
+#   sbatch --job-name=onset-lora-multi cluster/utils/onset/train_onset_lora_full.sbatch "5 20 50 100 200"
+#   sbatch --job-name=onset-lora-probe5 cluster/utils/onset/train_onset_lora_full.sbatch "5"
 
 set -euo pipefail
 trap 'echo "Job failed at $(date)" >&2' ERR
@@ -31,7 +31,7 @@ export HF_TOKEN="$(cat ~/keys/.hf_token)"
 export WANDB_API_KEY="$(cat ~/keys/.wandb_key)"
 
 srun --environment=$REPO/cluster/env.toml \
-    bash -c "PYTHONPATH=$REPO:\$PYTHONPATH python scripts/train_onset_lora_pilot.py \
+    bash -c "PYTHONPATH=$REPO:\$PYTHONPATH python scripts/train_onset_lora.py \
         --horizons $HORIZONS \
         --gradient-accumulation-steps 16 \
         --eval-steps 100 \

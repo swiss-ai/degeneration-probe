@@ -12,7 +12,7 @@ epoch for identical data, multiplying wall-clock time by the epoch count for no
 benefit (see the module docstring in `onset_dataset.materialize_features`).
 
 Per the 2026-07-12 plan change, this is meant to be run once per layer (e.g. via
-`cluster/train_onset_probes.sbatch`'s array over layer 0..32) rather than at a
+`cluster/utils/onset/train_onset_probes.sbatch`'s array over layer 0..32) rather than at a
 single "best" layer -- the probe heads are tiny and every layer's activations are
 already cached, so there's no compute reason to pick a winner ahead of time.
 

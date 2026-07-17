@@ -9,11 +9,11 @@
 #SBATCH --gpus-per-task=1
 
 # Scores one LoRA onset-probe checkpoint (subtask I/J) on test_indomain +
-# test_heldout_domains -- the two splits train_onset_lora_pilot.py never
+# test_heldout_domains -- the two splits train_onset_lora.py never
 # evaluates on (it only scores val). Probe id is the sbatch script's first
 # positional arg, e.g.:
-#   sbatch cluster/evaluate_onset_lora_probes.sbatch onset_multi_horizon_lora_pilot_layer16
-#   sbatch cluster/evaluate_onset_lora_probes.sbatch onset_probe_5_lora_pilot_layer16
+#   sbatch cluster/utils/onset/evaluate_onset_lora_probes.sbatch onset_multi_horizon_lora_pilot_layer16
+#   sbatch cluster/utils/onset/evaluate_onset_lora_probes.sbatch onset_probe_5_lora_pilot_layer16
 
 set -euo pipefail
 trap 'echo "Job failed at $(date)" >&2' ERR
