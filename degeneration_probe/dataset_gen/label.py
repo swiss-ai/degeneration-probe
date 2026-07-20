@@ -290,29 +290,29 @@ def _merge_spans(spans: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
 # checks *every* position in the sequence directly against the known
 # repeating unit, so it finds every genuine occurrence regardless of how it's
 # spaced relative to the others.
-_UNIT_MATCH_MIN_FRACTION = 0.8
 
 
 def _scan_for_unit_occurrences(
     tokens: Sequence[int],
     unit_start: int,
     period: int,
-    min_match_fraction: float = _UNIT_MATCH_MIN_FRACTION,
 ) -> List[Tuple[int, int]]:
-    """Find every occurrence of the `period`-token unit `tokens[unit_start :
-    unit_start + period]` anywhere in `tokens`, by directly scoring every
-    candidate window rather than assuming occurrences are evenly spaced.
+    """Find every exact occurrence of the `period`-token unit
+    `tokens[unit_start : unit_start + period]` anywhere in `tokens`, by
+    directly scoring every candidate window rather than assuming occurrences
+    are evenly spaced.
 
     Each candidate start `c` is scored by how many of its `period` tokens
     equal the unit position-for-position (not just a common prefix, since the
     part that differs between occurrences -- a differently-tokenizing label,
-    say -- isn't necessarily at the end of the window). A window counts as an
-    occurrence once at least `min_match_fraction` of its tokens match; this
-    tolerance is what lets an occurrence still be found when it doesn't align
-    byte-for-byte with the unit (a growing/shrinking element elsewhere in the
-    cycle, say). Accepted windows are merged into disjoint spans, so a run of
-    directly-adjacent occurrences (a continuous loop) collapses into one span
-    the same way separated occurrences don't.
+    say -- isn't necessarily at the end of the window), and only accepted as
+    an occurrence if *all* `period` tokens match -- kept exact, like the
+    initial match in `find_longest_repeated_substring`, rather than tolerating
+    partial mismatches, so a rollout's repeat count never counts something
+    LRS wouldn't also accept as a match on its own. Accepted windows are
+    merged into disjoint spans, so a run of directly-adjacent occurrences (a
+    continuous loop) collapses into one span the same way separated
+    occurrences don't.
 
     Vectorized over `c` with numpy: for each of the `period` positions within
     the unit, one O(n) comparison finds every `c` where that position matches,
@@ -326,13 +326,12 @@ def _scan_for_unit_occurrences(
     n_candidates = n - period + 1
     if n_candidates <= 0:
         return []
-    threshold = max(1, round(min_match_fraction * period))
 
     match_counts = np.zeros(n_candidates, dtype=np.int32)
     for k in range(period):
         match_counts += (arr[k : k + n_candidates] == unit[k])
 
-    accepted = np.flatnonzero(match_counts >= threshold)
+    accepted = np.flatnonzero(match_counts == period)
     spans = [(int(c), int(c) + period) for c in accepted]
     return _merge_spans(spans)
 

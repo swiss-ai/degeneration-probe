@@ -4,12 +4,15 @@ multi-horizon).
 For every rollout in the dataset, computes:
     - `is_positive`: `stop_reason == "length"` AND a defined onset position
       under the active onset metric (see `resolve_onset_position`). This is
-      the settled positive/negative rollout definition -- validated this
-      session against independent LLM-judge ground truth (stop_reason ==
-      "length" is 99.6% precise for real degeneration; `repetition_score >
-      0.8` alone is not, and must never be used as the primary label -- see
-      the project's onset-probes implementation prompt for the full
-      validation).
+      the settled positive/negative rollout definition -- validated against
+      independent LLM-judge ground truth (stop_reason == "length" precision
+      against the judge is 93.0-99.5% per dataset build, 97.1% pooled --
+      notably lower, ~93%, for apertus1p5-sft256k-4200, so that build's
+      probe labels carry a higher false-positive rate than the other two;
+      `repetition_score > 0.8` alone is worse still and must never be used
+      as the primary label -- see the project's onset-probes implementation
+      prompt for the full validation, and notebooks/inspect_dataset.ipynb
+      Section 7 for the current per-build numbers).
     - `onset_position`: resolved through `resolve_onset_position`, a single
       swappable seam over which onset-position signal to trust. Do not read
       `lrs_first_start_normalized_growing` (or any other field) directly

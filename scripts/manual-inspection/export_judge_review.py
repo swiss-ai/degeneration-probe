@@ -12,9 +12,10 @@ Scope: only rollouts that hit the token cap without reaching EOS
 (``stop_reason == "length"``, i.e. Section 7's "truncated" stratum in
 ``llm_judge.select_calibration_sample``) are included. That cap is a
 necessary (not sufficient) condition for real degeneration -- see
-``onset_labels.py``'s module docstring, which validated ``stop_reason ==
-"length"`` at 99.6% precision against LLM-judge ground truth -- so this is
-exactly the population where a manual pass is worth the effort: checking the
+``onset_labels.py``'s module docstring, which validates ``stop_reason ==
+"length"`` at 93.0-99.5% precision per dataset build (97.1% pooled) against
+LLM-judge ground truth -- so this is exactly the population where a manual
+pass is worth the effort: checking the
 judge's ``onset_quote`` position, and catching the rare misclassification
 (most often a false negative -- the judge reads genuine progress, e.g.
 brute-force enumeration, into what is actually a non-progressing loop).
