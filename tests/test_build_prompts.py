@@ -60,6 +60,7 @@ sample_source_rows = build_prompts_module.sample_source_rows
 build_domain_prompts = build_prompts_module.build_domain_prompts
 assign_splits = build_prompts_module.assign_splits
 sanity_check = build_prompts_module.sanity_check
+passes_min_value_filter = build_prompts_module.passes_min_value_filter
 
 
 def _fake_source(name: str, n_prompts: int) -> dict:
@@ -156,6 +157,26 @@ def test_sample_source_rows_clamps_when_fewer_rows_than_requested(capsys):
     assert set(sampled) == set(rows)
     captured = capsys.readouterr()
     assert "WARNING" in captured.out
+
+
+# --- passes_min_value_filter -----------------------------------------------------
+
+def test_passes_min_value_filter_noop_when_field_unset():
+    assert passes_min_value_filter({"rating": 800}, None, None) is True
+
+
+def test_passes_min_value_filter_keeps_values_at_or_above_min():
+    assert passes_min_value_filter({"rating": 2000}, "rating", 2000) is True
+    assert passes_min_value_filter({"rating": 3500}, "rating", 2000) is True
+
+
+def test_passes_min_value_filter_drops_values_below_min():
+    assert passes_min_value_filter({"rating": 1999}, "rating", 2000) is False
+
+
+def test_passes_min_value_filter_drops_missing_or_none_values():
+    assert passes_min_value_filter({}, "rating", 2000) is False
+    assert passes_min_value_filter({"rating": None}, "rating", 2000) is False
 
 
 # --- build_domain_prompts -------------------------------------------------------

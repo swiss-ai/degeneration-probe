@@ -72,6 +72,20 @@ def _default_in_domain_sources() -> List[Dict[str, Any]]:
             "prompt_field": "input",
             "n_prompts": 600,
         },
+        {
+            # MathArena/aime_2025's "train" split only has 30 rows total
+            # (AIME I + II 2025, 15 problems each) -- n_prompts is already
+            # capped at that real maximum; sample_source_rows() clamps to
+            # the available row count and warns rather than failing.
+            # In-domain (not held-out): split 70/15/15 like every other
+            # in-domain source, just at its own much smaller scale.
+            "name": "aime_2025",
+            "hf_repo": "MathArena/aime_2025",
+            "hf_subset": None,
+            "hf_split": "train",
+            "prompt_field": "problem",
+            "n_prompts": 30,
+        },
     ]
 
 
@@ -84,18 +98,6 @@ def _default_held_out_sources() -> List[Dict[str, Any]]:
             "hf_split": "train",
             "prompt_field": "Open-ended Verifiable Question",
             "n_prompts": 600,
-        },
-        {
-            # MathArena/aime_2025's "train" split only has 30 rows total
-            # (AIME I + II 2025, 15 problems each) -- n_prompts is already
-            # capped at that real maximum; sample_source_rows() clamps to
-            # the available row count and warns rather than failing.
-            "name": "aime_2025",
-            "hf_repo": "MathArena/aime_2025",
-            "hf_subset": None,
-            "hf_split": "train",
-            "prompt_field": "problem",
-            "n_prompts": 30,
         },
     ]
 

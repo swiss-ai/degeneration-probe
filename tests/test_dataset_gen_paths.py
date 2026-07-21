@@ -81,7 +81,7 @@ def test_generations_shard_path(config):
     assert got == Path("/tmp/dataset_gen_test/generations/deepmath_103k/shard_00003.parquet")
 
 
-def test_labels_shard_path_held_out_source(config):
+def test_labels_shard_path_in_domain_source(config):
     got = paths_module.labels_shard_path(config, "aime_2025", 0)
     assert got == Path("/tmp/dataset_gen_test/labels/aime_2025/shard_00000.parquet")
 
@@ -131,7 +131,7 @@ def test_configured_domain_names(config):
 
 
 def test_is_held_out_domain(config):
-    assert paths_module.is_held_out_domain(config, "aime_2025") is True
+    assert paths_module.is_held_out_domain(config, "aime_2025") is False
     assert paths_module.is_held_out_domain(config, "medical_o1") is True
     assert paths_module.is_held_out_domain(config, "deepmath_103k") is False
     with pytest.raises(ValueError):
@@ -181,12 +181,18 @@ def test_apertus_instruct_yaml_matches_config_schema():
     loaded = DatasetGenConfig.from_yaml(APERTUS_INSTRUCT_YAML)
 
     assert loaded.model_name == "swiss-ai/Apertus-8B-Instruct-2509"
-    assert len(loaded.in_domain_sources) == 4
-    assert all(src["n_prompts"] == 600 for src in loaded.in_domain_sources)
+    assert len(loaded.in_domain_sources) == 5
+    assert {src["name"]: src["n_prompts"] for src in loaded.in_domain_sources} == {
+        "deepmath_103k": 600,
+        "numinamath_1_5": 600,
+        "if_sft_data_verified": 600,
+        "llama_nemotron": 600,
+        "aime_2025": 30,
+    }
     assert len(loaded.held_out_sources) == 2
     assert {src["name"]: src["n_prompts"] for src in loaded.held_out_sources} == {
         "medical_o1": 600,
-        "aime_2025": 30,
+        "codeforces": 600,
     }
     assert loaded.max_new_tokens == 4096
     assert loaded.split_fractions == {"train": 0.70, "val": 0.15, "test_indomain": 0.15}

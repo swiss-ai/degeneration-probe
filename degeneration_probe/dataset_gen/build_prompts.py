@@ -40,6 +40,12 @@ raised from an initial 5,000 (1.4% sampled, at an earlier 70-prompt-per-source
 scale) to 20,000 for the current ~600-prompt-per-source build (3% sampled).
 Small sources are fully downloaded and sampled with an exact Fisher-Yates
 shuffle over all rows.
+
+A source's optional ``filter_field`` / ``min_value`` keys (unset by default)
+restrict the pool sampled from to rows where ``row[filter_field] >=
+min_value`` before the same Fisher-Yates sample runs -- e.g. codeforces uses
+this to sample only from problems rated 2000+, rather than the whole
+difficulty range.
 """
 
 from __future__ import annotations
@@ -48,7 +54,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -165,27 +171,50 @@ def _is_large_repo(hf_repo: str) -> bool:
     return total_bytes > LARGE_REPO_STREAMING_THRESHOLD_BYTES
 
 
-def _fetch_full(hf_repo: str, hf_subset: Any, hf_split: str, prompt_field: str) -> List[SourceRow]:
+def passes_min_value_filter(example: Dict[str, Any], filter_field: Optional[str], min_value: Optional[float]) -> bool:
+    """Whether `example` should be kept, given an optional source-level
+    `filter_field` / `min_value` (e.g. {"filter_field": "rating", "min_value":
+    2000} to keep only Codeforces problems rated >= 2000). No-op (keeps
+    everything) when `filter_field` is unset -- the default for every
+    existing source."""
+    if filter_field is None:
+        return True
+    value = example.get(filter_field)
+    return value is not None and value >= min_value
+
+
+def _fetch_full(
+    hf_repo: str, hf_subset: Any, hf_split: str, prompt_field: str,
+    filter_field: Optional[str] = None, min_value: Optional[float] = None,
+) -> List[SourceRow]:
     from datasets import load_dataset
 
     ds = load_dataset(hf_repo, hf_subset, split=hf_split)
+    if filter_field is not None:
+        ds = ds.filter(lambda example: passes_min_value_filter(example, filter_field, min_value))
     column_values = ds[prompt_field]
     return [(i, extract_prompt_text(v)) for i, v in enumerate(column_values)]
 
 
 def _fetch_streaming_sample(
-    hf_repo: str, hf_subset: Any, hf_split: str, prompt_field: str, n_prompts: int, seed: int
+    hf_repo: str, hf_subset: Any, hf_split: str, prompt_field: str, n_prompts: int, seed: int,
+    filter_field: Optional[str] = None, min_value: Optional[float] = None,
 ) -> List[SourceRow]:
     """Read a bounded prefix of a streamed split and sample from it.
 
     Only ever reads ``STREAMING_PREFIX_SCAN_SIZE`` examples from the front of
     the stream (regardless of the split's total size), then reuses the same
     deterministic ``sample_source_rows`` shuffle-and-sample used for
-    fully-downloaded sources. See module docstring for the tradeoff.
+    fully-downloaded sources. See module docstring for the tradeoff. If
+    ``filter_field`` is set, filtering happens before the prefix is taken, so
+    the ``STREAMING_PREFIX_SCAN_SIZE`` examples counted are already
+    filter-matching ones.
     """
     from datasets import load_dataset
 
     ds = load_dataset(hf_repo, hf_subset, split=hf_split, streaming=True)
+    if filter_field is not None:
+        ds = ds.filter(lambda example: passes_min_value_filter(example, filter_field, min_value))
     ds = ds.take(STREAMING_PREFIX_SCAN_SIZE)
 
     prefix_rows: List[SourceRow] = [
@@ -203,18 +232,30 @@ def _fetch_streaming_sample(
 
 
 def fetch_and_sample_source(source: Dict[str, Any], seed: int) -> List[SourceRow]:
-    """Load ``source``'s HF dataset and return its sampled (row_id, prompt_text) rows."""
+    """Load ``source``'s HF dataset and return its sampled (row_id, prompt_text) rows.
+
+    ``source``'s optional ``filter_field`` / ``min_value`` keys (both unset
+    by default) restrict the pool sampled from to rows where
+    ``row[filter_field] >= min_value`` -- e.g. codeforces's
+    ``filter_field: rating, min_value: 2000`` to sample only from
+    Master-level-or-harder problems, while still using the same random
+    Fisher-Yates sample as every other source.
+    """
     hf_repo = source["hf_repo"]
     hf_subset = source.get("hf_subset")
     hf_split = source["hf_split"]
     prompt_field = source["prompt_field"]
     n_prompts = source["n_prompts"]
+    filter_field = source.get("filter_field")
+    min_value = source.get("min_value")
 
     if _is_large_repo(hf_repo):
         print(f"  (repo exceeds {LARGE_REPO_STREAMING_THRESHOLD_BYTES / 1024**3:.0f} GiB -- using streaming sample)")
-        return _fetch_streaming_sample(hf_repo, hf_subset, hf_split, prompt_field, n_prompts, seed)
+        return _fetch_streaming_sample(
+            hf_repo, hf_subset, hf_split, prompt_field, n_prompts, seed, filter_field, min_value
+        )
 
-    rows = _fetch_full(hf_repo, hf_subset, hf_split, prompt_field)
+    rows = _fetch_full(hf_repo, hf_subset, hf_split, prompt_field, filter_field, min_value)
     return sample_source_rows(rows, n_prompts, seed)
 
 

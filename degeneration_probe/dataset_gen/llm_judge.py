@@ -9,17 +9,16 @@ against something closer to ground truth.
 
 Two pieces:
 
-1. ``select_calibration_sample`` -- builds the rollout sample to judge, from
-   two strata (a rollout can land in only one, "truncated" takes priority):
-     - "truncated": hit ``max_new_tokens`` without reaching EOS. The
-       population most likely to contain real degeneration loops.
-     - "flagged_natural_eos": heuristically flagged (``max_repetition_score >
-       DEGENERATION_THRESHOLD`` or ``lrs_period_repeat_count >=
-       MIN_PERIOD_REPEAT_COUNT``) but the model stopped on its own -- the
-       interesting population for checking false positives (or degeneration
-       that self-terminates).
-   Written once to ``paths.llm_judge_sample_path`` so the sample is fixed and
-   reproducible across judge backends/reruns.
+1. ``select_calibration_sample`` -- builds the rollout sample to judge: every
+   rollout that hit ``max_new_tokens`` without reaching EOS ("truncated"),
+   the population most likely to contain real degeneration loops. Rollouts
+   that reached EOS on their own are never judged, regardless of heuristic
+   score -- ``stop_reason == "length"`` alone is already a strong proxy for
+   real degeneration against LLM-judge ground truth (93.0-99.5% precision per
+   dataset build, 97.1% pooled -- see ``onset_labels.py``'s module
+   docstring), so spending judge calls on the natural-EOS population wasn't
+   worth it. Written once to ``paths.llm_judge_sample_path`` so the sample is
+   fixed and reproducible across judge backends/reruns.
 
 2. A backend-agnostic judging loop (``run_judging``) built on a small
    ``JudgeBackend`` protocol with three implementations -- ``AnthropicBackend``
@@ -54,10 +53,12 @@ from degeneration_probe.dataset_gen.label import write_shard_atomic
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
-# Matches label.py's DEFAULT_DEGENERATION_THRESHOLD / DEFAULT window's
-# canonical cutoff -- kept as a separate constant here (rather than importing
-# label.py's) because this one specifically defines the *judge sample*, not
-# the labeling pipeline itself.
+# Not used by select_calibration_sample (judge sample is truncated-only, see
+# its docstring) -- kept here for notebooks/inspect_dataset.ipynb's Section 7,
+# which recomputes a heuristic_flag independently to check it against judge
+# verdicts. Matches label.py's DEFAULT_DEGENERATION_THRESHOLD / DEFAULT
+# window's canonical cutoff, duplicated here (rather than imported) so this
+# stays independent of the labeling pipeline's own default.
 DEGENERATION_THRESHOLD = 0.8
 MIN_PERIOD_REPEAT_COUNT = 3
 
@@ -186,6 +187,36 @@ candidate as onset_quote; if it still says NOT FOUND, set onset_quote to null ra
 guessing further (this does not change is_degenerating, only onset_quote). Do not call the \
 tool a third time or keep iterating."""
 
+VERIFY_ONSET_QUOTE_TOOL_NAME = "verify_onset_quote"
+VERIFY_ONSET_QUOTE_TOOL_DESCRIPTION = (
+    "Check whether a candidate onset_quote string appears verbatim in the completion "
+    "under judgment. Always call this before including onset_quote in your final answer."
+)
+
+
+def _verify_onset_quote_message(candidate: str, completion_text: str) -> str:
+    """Same verbatim/length check as onset_quote's downstream validation
+    (``_onset_quote_is_valid`` / ``find_string_in_tokens``), phrased as the tool-result text the
+    judge model reads -- a call reporting FOUND here guarantees FOUND there too."""
+    if len(candidate.split()) < MIN_ONSET_QUOTE_WORDS:
+        return (
+            f"TOO SHORT -- onset_quote must be a longer, more distinctive span (roughly "
+            f"5-15 words), not a single word or short fragment, even if it happens to "
+            f"appear verbatim. Copy a longer contiguous span directly from the completion "
+            f"and try again."
+        )
+    count = completion_text.count(candidate)
+    if count == 0:
+        return (
+            "NOT FOUND -- this exact text does not appear in the completion. Copy a "
+            "shorter or more carefully transcribed span directly from the completion "
+            "text and try again."
+        )
+    return (
+        f"FOUND -- {count} verbatim occurrence(s) in the completion, first at character "
+        f"offset {completion_text.find(candidate)}. Safe to use as onset_quote."
+    )
+
 JUDGE_USER_TEMPLATE = """PROMPT:
 {prompt_text}
 
@@ -209,14 +240,17 @@ class AnthropicBackend:
 
     name = "anthropic"
 
-    def __init__(self, model: str = DEFAULT_ANTHROPIC_MODEL) -> None:
+    def __init__(self, model: str = DEFAULT_ANTHROPIC_MODEL, api_key: Optional[str] = None) -> None:
         import anthropic
 
         self.model = model
-        # Zero-arg client resolves ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
-        # an `ant auth login` OAuth profile, in that order -- works with a
-        # Pro/Max subscription login as well as a plain API key.
-        self.client = anthropic.Anthropic()
+        # Same file-based-key convention as OpenRouterBackend, rather than the
+        # env-var-resolving zero-arg client -- this backend is pay-per-token
+        # (e.g. an AI-center-issued key), a distinct credential from the
+        # claude_agent_sdk backend's per-person OAuth subscription tokens, so
+        # it gets its own key file rather than overloading ANTHROPIC_API_KEY.
+        key = api_key or _read_key_file(Path.home() / "keys" / ".anthropic_api_key_ai_center")
+        self.client = anthropic.Anthropic(api_key=key)
 
     def judge(self, prompt_text: str, completion_text: str) -> JudgeVerdict:
         response = self.client.messages.create(
@@ -335,39 +369,14 @@ class ClaudeAgentSDKBackend:
         # model is judging -- no file/bash access, just a plain substring search (the same
         # check `find_string_in_tokens`/`resolve_onset_position(metric="onset_quote")` do
         # downstream), so a call confirming FOUND here guarantees FOUND there too.
-        #
-        # Also rejects too-short candidates before the substring check: a bare-existence check
-        # alone can't catch a generic word (observed in practice: the model outputting the
-        # literal placeholder "test" as onset_quote, which happened to verbatim-match a
-        # coincidental, unrelated occurrence of that common word elsewhere in the completion --
-        # e.g. a ratio-test convergence problem's own "ratio test" phrase) -- verbatim existence
-        # is necessary but not sufficient for onset_quote to be meaningful.
         @tool(
-            "verify_onset_quote",
-            "Check whether a candidate onset_quote string appears verbatim in the completion "
-            "under judgment. Always call this before including onset_quote in your final answer.",
+            VERIFY_ONSET_QUOTE_TOOL_NAME,
+            VERIFY_ONSET_QUOTE_TOOL_DESCRIPTION,
             {"candidate": str},
         )
         async def verify_onset_quote(args):
-            candidate = args["candidate"]
-            if len(candidate.split()) < MIN_ONSET_QUOTE_WORDS:
-                return {"content": [{"type": "text", "text": (
-                    f"TOO SHORT -- onset_quote must be a longer, more distinctive span (roughly "
-                    f"5-15 words), not a single word or short fragment, even if it happens to "
-                    f"appear verbatim. Copy a longer contiguous span directly from the completion "
-                    f"and try again."
-                )}]}
-            count = completion_text.count(candidate)
-            if count == 0:
-                return {"content": [{"type": "text", "text": (
-                    "NOT FOUND -- this exact text does not appear in the completion. Copy a "
-                    "shorter or more carefully transcribed span directly from the completion "
-                    "text and try again."
-                )}]}
-            return {"content": [{"type": "text", "text": (
-                f"FOUND -- {count} verbatim occurrence(s) in the completion, first at character "
-                f"offset {completion_text.find(candidate)}. Safe to use as onset_quote."
-            )}]}
+            message = _verify_onset_quote_message(args["candidate"], completion_text)
+            return {"content": [{"type": "text", "text": message}]}
 
         onset_quote_server = create_sdk_mcp_server(
             name="onset_quote_check", tools=[verify_onset_quote]
@@ -582,16 +591,15 @@ def build_backend(
 # --- calibration sample selection -----------------------------------------------
 
 def select_calibration_sample(config: DatasetGenConfig) -> pd.DataFrame:
-    """Build the judge sample: every truncated rollout, plus every rollout
-    heuristically flagged as degenerating that nonetheless reached EOS on its
-    own. Returns one row per rollout with prompt_id, rollout_idx, domain,
-    stratum, prompt_text, completion_text.
+    """Build the judge sample: every rollout that hit ``max_new_tokens``
+    without reaching EOS. Returns one row per rollout with prompt_id,
+    rollout_idx, domain, stratum, prompt_text, completion_text.
     """
     domains = sorted(paths.configured_domain_names(config))
 
     prompts_df = pd.read_parquet(paths.prompts_path(config), columns=["prompt_id", "domain", "prompt_text"])
 
-    gen_frames, lab_frames = [], []
+    gen_frames = []
     for domain in domains:
         gen_frames.append(
             pd.read_parquet(
@@ -599,51 +607,16 @@ def select_calibration_sample(config: DatasetGenConfig) -> pd.DataFrame:
                 columns=["prompt_id", "rollout_idx", "generated_text", "stop_reason"],
             )
         )
-        lab_frames.append(
-            pd.read_parquet(
-                paths.labels_shard_path(config, domain, 0),
-                columns=["prompt_id", "rollout_idx", "repetition_score", "lrs_period_repeat_count"],
-            )
-        )
     gen = pd.concat(gen_frames, ignore_index=True)
-    lab = pd.concat(lab_frames, ignore_index=True)
 
-    lab = lab.copy()
-    lab["max_repetition_score"] = lab["repetition_score"].apply(_safe_nanmax)
-    lab["lrs_period_repeat_count"] = lab["lrs_period_repeat_count"].fillna(0)
-
-    merged = gen.merge(
-        lab[["prompt_id", "rollout_idx", "max_repetition_score", "lrs_period_repeat_count"]],
-        on=["prompt_id", "rollout_idx"],
-        how="left",
-    )
-    if len(merged) != len(gen):
-        raise ValueError("merge changed row count -- duplicate (prompt_id, rollout_idx) in labels")
-
-    truncated = merged["stop_reason"] != "eos"
-    flagged = (merged["max_repetition_score"] > DEGENERATION_THRESHOLD) | (
-        merged["lrs_period_repeat_count"] >= MIN_PERIOD_REPEAT_COUNT
-    )
-
-    merged["stratum"] = None
-    merged.loc[truncated, "stratum"] = "truncated"
-    merged.loc[(~truncated) & flagged, "stratum"] = "flagged_natural_eos"
-    sample = merged[merged["stratum"].notna()].copy()
+    sample = gen[gen["stop_reason"] != "eos"].copy()
+    sample["stratum"] = "truncated"
 
     sample = sample.merge(prompts_df, on="prompt_id", how="left")
     sample = sample.rename(columns={"generated_text": "completion_text"})
     return sample[
         ["prompt_id", "rollout_idx", "domain", "stratum", "prompt_text", "completion_text"]
     ].reset_index(drop=True)
-
-
-def _safe_nanmax(arr) -> float:
-    import numpy as np
-
-    arr = np.asarray(arr, dtype=float)
-    if arr.size == 0 or bool(np.all(np.isnan(arr))):
-        return float("nan")
-    return float(np.nanmax(arr))
 
 
 # --- resumable judging loop ------------------------------------------------------

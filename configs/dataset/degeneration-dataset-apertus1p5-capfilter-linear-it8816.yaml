@@ -72,6 +72,19 @@ in_domain_sources:
     prompt_field: "input"
     n_prompts: 600
 
+  # MathArena/aime_2025's "train" split only has 30 rows total (AIME I + II
+  # 2025, 15 problems each) -- n_prompts is already capped at that real
+  # maximum. build_prompts.py's sample_source_rows() clamps to the available
+  # row count and warns rather than failing. In-domain (not held-out): split
+  # 70/15/15 across train/val/test_indomain like every other in-domain
+  # source, just at its own much smaller scale (~21/4/5 prompts).
+  - name: aime_2025
+    hf_repo: "MathArena/aime_2025"
+    hf_subset: null
+    hf_split: "train"
+    prompt_field: "problem"
+    n_prompts: 30
+
 held_out_sources:
   - name: medical_o1
     hf_repo: "FreedomIntelligence/medical-o1-verifiable-problem"
@@ -80,16 +93,20 @@ held_out_sources:
     prompt_field: "Open-ended Verifiable Question"
     n_prompts: 600
 
-  # MathArena/aime_2025's "train" split only has 30 rows total (AIME I + II
-  # 2025, 15 problems each) -- n_prompts is already capped at that real
-  # maximum. build_prompts.py's sample_source_rows() clamps to the available
-  # row count and warns rather than failing.
-  - name: aime_2025
-    hf_repo: "MathArena/aime_2025"
-    hf_subset: null
+  # "verifiable-prompts" carries a pre-built, language-specific `prompt`
+  # field (one row per problem x {cpp, python}). filter_field/min_value
+  # restrict sampling to rating >= 2000 (Codeforces Master-level-or-harder;
+  # ~6,800/16,676 rows qualify) before the same random Fisher-Yates sample
+  # every other source uses -- a hard-coding domain, not a "hardest possible"
+  # one.
+  - name: codeforces
+    hf_repo: "open-r1/codeforces"
+    hf_subset: "verifiable-prompts"
     hf_split: "train"
-    prompt_field: "problem"
-    n_prompts: 30
+    prompt_field: "prompt"
+    n_prompts: 600
+    filter_field: "rating"
+    min_value: 2000
 
 n_rollouts_per_prompt: 10
 max_new_tokens: 4096

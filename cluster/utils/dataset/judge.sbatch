@@ -23,9 +23,24 @@ source .venv/bin/activate
 # override with e.g. --export=ALL,CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml
 CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
 
+# "claude_agent_sdk" (default) rotates personal Pro/Max subscription OAuth
+# tokens below. "anthropic" is pay-per-token against a single API key (the
+# AI-center-issued key at ~/keys/.anthropic_api_key_ai_center, see
+# AnthropicBackend) -- no per-account usage window, so no rotation needed,
+# just one run. Override with e.g. --export=ALL,BACKEND=anthropic
+BACKEND="${BACKEND:-claude_agent_sdk}"
+
 echo "Commit: $(git rev-parse HEAD)"
 echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
-echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
+echo "Job: $SLURM_JOB_ID  Config: $CONFIG  Backend: $BACKEND"
+
+if [[ "$BACKEND" != "claude_agent_sdk" ]]; then
+    python -m degeneration_probe.dataset_gen.llm_judge \
+        --config "$CONFIG" \
+        --backend "$BACKEND"
+    echo "Judging run done."
+    exit 0
+fi
 
 # Rotate across accounts, in order, resuming the same results_claude_agent_sdk.parquet
 # manifest each time -- llm_judge.py already skips rows marked "ok" and stops
@@ -44,11 +59,13 @@ from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 config = DatasetGenConfig.from_yaml("$CONFIG")
 sample = pd.read_parquet(paths.llm_judge_sample_path(config))
+sample_keys = set(zip(sample["prompt_id"], sample["rollout_idx"]))
 results_path = paths.llm_judge_results_path(config, "claude_agent_sdk")
 done = 0
 if results_path.exists():
     results = pd.read_parquet(results_path)
-    done = int((results["status"] == "ok").sum())
+    ok = results[results["status"] == "ok"]
+    done = len(set(zip(ok["prompt_id"], ok["rollout_idx"])) & sample_keys)
 print(len(sample) - done)
 PY
 }
