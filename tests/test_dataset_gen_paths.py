@@ -2,9 +2,8 @@
 
 Loads the dataset_gen modules directly by file path (bypassing
 ``degeneration_probe/__init__.py``), the same pattern used in
-test_repetition_converter.py / test_metrics.py, since the top-level package
-``__init__`` pulls in torch/transformers/peft which aren't required for this
-lightweight, no-model-loading corner of the codebase.
+other dataset-generation tests, since this is a lightweight, no-model-loading
+corner of the codebase.
 """
 
 import importlib.util
@@ -17,14 +16,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_GEN_DIR = REPO_ROOT / "degeneration_probe" / "dataset_gen"
-APERTUS_INSTRUCT_YAML = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
-APERTUS1P5_CAPFILTER_YAML = (
-    REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml"
+APERTUS_INSTRUCT_YAML = (
+    REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
 )
-APERTUS1P5_SFT256K_YAML = (
-    REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus1p5-sft256k-4200.yaml"
-)
-ALL_DATASET_YAMLS = [APERTUS_INSTRUCT_YAML, APERTUS1P5_CAPFILTER_YAML, APERTUS1P5_SFT256K_YAML]
 
 
 def _load_module(name: str, file_path: Path):
@@ -127,6 +121,7 @@ def test_configured_domain_names(config):
         "llama_nemotron",
         "medical_o1",
         "aime_2025",
+        "codeforces",
     }
 
 
@@ -142,7 +137,7 @@ def test_all_output_dirs_are_under_output_root(config):
     dirs = paths_module.all_output_dirs(config)
     assert all(str(d).startswith("/tmp/dataset_gen_test") for d in dirs)
 
-    # one subfolder per actual source name (6 total) under generations/,
+    # one subfolder per actual source name (7 total) under generations/,
     # labels/, and activations/ -- not one shared folder per split.
     for domain in paths_module.configured_domain_names(config):
         assert paths_module.generations_dir(config, domain) in dirs
@@ -152,9 +147,9 @@ def test_all_output_dirs_are_under_output_root(config):
     generations_subdirs = [d for d in dirs if d.parent.name == "generations"]
     labels_subdirs = [d for d in dirs if d.parent.name == "labels"]
     activations_subdirs = [d for d in dirs if d.parent.name == "activations"]
-    assert len(generations_subdirs) == 6
-    assert len(labels_subdirs) == 6
-    assert len(activations_subdirs) == 6
+    assert len(generations_subdirs) == 7
+    assert len(labels_subdirs) == 7
+    assert len(activations_subdirs) == 7
 
     # the coarse split names must not appear as folders themselves
     assert not any(d.name in ("in_domain", "held_out") for d in dirs)
@@ -198,41 +193,10 @@ def test_apertus_instruct_yaml_matches_config_schema():
     assert loaded.split_fractions == {"train": 0.70, "val": 0.15, "test_indomain": 0.15}
 
 
-@pytest.mark.parametrize("yaml_path", ALL_DATASET_YAMLS, ids=lambda p: p.stem)
-def test_dataset_yaml_loads_and_points_at_its_own_output_root(yaml_path):
-    """Every one of the three dataset configs must load, and each must write
-    to a distinct output_root/work_root named after that same dataset (this
-    was the actual bug class the full_scale -> degeneration-dataset-*
-    rename risked: a copy-pasted config silently pointing at the wrong, or
-    another dataset's, storage location)."""
-    loaded = DatasetGenConfig.from_yaml(yaml_path)
-    assert loaded.output_root.name == yaml_path.stem
-    assert loaded.work_root.name == f"{yaml_path.stem}_work"
-
-
-def test_all_three_datasets_share_identical_sampling_params():
-    """The three datasets are meant to be directly comparable -- same prompt
-    sample, same rollout budget -- differing only in which model produced
-    the completions (model_name/tokenizer_name) and where they're stored
-    (output_root/work_root)."""
-    configs = [DatasetGenConfig.from_yaml(p) for p in ALL_DATASET_YAMLS]
-    comparable_fields = [
-        "in_domain_sources",
-        "held_out_sources",
-        "n_rollouts_per_prompt",
-        "max_new_tokens",
-        "temperature",
-        "top_p",
-        "seed",
-        "split_fractions",
-    ]
-    baseline = configs[0]
-    for other in configs[1:]:
-        for field_name in comparable_fields:
-            assert getattr(other, field_name) == getattr(baseline, field_name), field_name
-
-    model_names = {c.model_name for c in configs}
-    assert len(model_names) == 3, "each dataset must point at a distinct model"
+def test_dataset_yaml_points_at_its_own_output_root():
+    loaded = DatasetGenConfig.from_yaml(APERTUS_INSTRUCT_YAML)
+    assert loaded.output_root.name == APERTUS_INSTRUCT_YAML.stem
+    assert loaded.work_root.name == f"{APERTUS_INSTRUCT_YAML.stem}_work"
 
 
 def test_source_missing_required_key_raises():

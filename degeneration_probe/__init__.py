@@ -1,7 +1,6 @@
-"""Probe module for feature detection."""
+"""Training and data tooling for degeneration probes."""
 
+from .config import ExperimentConfig
+
+__all__ = ["ExperimentConfig"]
 __version__ = "0.1.0"
-
-# Only lightweight, always-needed types at the top level
-from .types import ProbingItem, AnnotatedSpan
-from .config import ProbeConfig, TrainingConfig, EvaluationConfig

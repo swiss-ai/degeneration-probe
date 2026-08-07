@@ -98,12 +98,11 @@ straight pool.
 
 ## Views to test per metric (2026-07-22 addition)
 
-`docs/analysis/probe_eval_and_training_protocol.md` §1 defines three
-complementary "views" for evaluating a trained probe against the
-degeneration frontier. The same three views are the right lens for
+Three complementary views are useful when evaluating a detector against the
+degeneration boundary. The same three views are the right lens for
 Entropy/TTR/LRS-as-detectors too, so the plan should explicitly cover all
-three, not just rollout-level detection. **Never cite that document (or the
-term "frontier"/"view A/B/C") from `main.tex`** — restate each view in
+three, not just rollout-level detection. **Do not use the internal
+"view A/B/C" terminology in `main.tex`** — restate each view in
 self-contained terms there, since the paper's readers don't have that
 context; this section is for our own tracking only.
 
@@ -256,9 +255,8 @@ makes exactly the cross-metric comparison the document's own intro promises
    averaging in a metric computed on 0-8 examples with equal weight to one
    computed on 100+.
 
-   **`medical_o1` treatment, per `docs/analysis/probe_eval_and_training_protocol.md`
-   §1.6 (2026-07-22 discussion):** that doc already flags this exact domain
-   for the probe's own `test_heldout_domains` evaluation — 1 positive
+   **`medical_o1` treatment:** prior analysis flags this exact domain for
+   `test_heldout_domains` evaluation — 1 positive
    rollout out of 6000, "essentially undefined... a single positive example
    carries no statistical weight... should be treated as anecdotal rather
    than a generalization estimate," and states the general rule that "the
@@ -270,7 +268,7 @@ makes exactly the cross-metric comparison the document's own intro promises
    split, used only to keep metric-threshold tuning and reporting disjoint):
    - **Do not** re-hash, re-tag, or otherwise adjust the split to force a
      nonzero `medical_o1` test count — that is exactly the resampling the
-     doc rules out, and it wouldn't fix anything anyway: `medical_o1` has
+     evaluation rules out, and it wouldn't fix anything anyway: `medical_o1` has
      exactly 1 positive rollout in its *entire* 6000-row population (itself
      already 100% `test_heldout_domains`), so no split assignment can give
      both halves a meaningful count. It's a data-scarcity fact about the
@@ -282,8 +280,7 @@ makes exactly the cross-metric comparison the document's own intro promises
    - Exclude it from the domain-balanced macro-average outright (not just
      visually flag it), same treatment as the borderline `aime_2025`/
      `codeforces` rows but for a stronger reason (0 vs. merely low n).
-   - `main.tex` must **not** cite `probe_eval_and_training_protocol.md` or
-     its "View A/B/C"/"frontier" terminology — restate the anecdotal-only
+   - `main.tex` must **not** use the internal "View A/B/C" terminology — restate the anecdotal-only
      caveat for `medical_o1` in self-contained terms local to the unified
      Empirical Performance section.
 3. **Section placement: `\subsection`**, confirmed — stays under "2

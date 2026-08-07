@@ -1,62 +1,53 @@
 # Degeneration probe
 
-A research pipeline for measuring LLM text degeneration (e.g. repetition loops)
-and training a probe to detect it from hidden activations.
+This repository trains one per-token task, `degeneration`, on the materialized
+`degeneration-dataset-apertus-8b-instruct` build. The probe is a scalar linear
+layer attached to Apertus layer 30, with optional LoRA adapters.
 
----
+## Configuration
 
-Please note that this is still *work in progress*, some of the scripts and approaches might not be most efficient, docs might not be complete.
+Hydra composes three independent groups from `configs/main.yaml`:
 
-For a complete list of TODOs, please refer to the [issues page](https://github.com/Luca-Sartori/degeneration-probe/issues).
+- `configs/model/apertus.yaml`: model, tokenizer and model dtype;
+- `configs/training/degeneration.yaml`: probe, LoRA, loss, optimizer, runtime,
+  validation, checkpoints and W&B;
+- `configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml`: materialized
+  build path, splits, tokenization and sampling.
 
-## Background
+The separate generation recipe is in
+`configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml`.
 
-Probes can be used to detect a model's behaviour by using its hidden activations. By training a small probe (usually a single layer MLP), we can predict the model's behaviour — in this case, whether it is producing *degenerating* (e.g. repetitive) text.
+## Training
 
+The default loss is BCE. For a rollout with a defined `onset_position`, tokens
+before onset are `0` and tokens at or after onset are `1`. EOS rollouts are all
+zero; truncated rollouts without a defined onset are excluded.
 
-## Models supported
-
-While the code was tested for `Apertus_8B_Instruct_2509` and `Meta_Llama_3.1_8B_Instruct`, it should work for any standard language model from `transformers` library. 
-
-
-## Installation
-
-The basic installation setup for a local machine:
+```bash
+uv run python scripts/train_probe.py
 ```
 
-# 1. Clone and enter
-git clone https://github.com/Luca-Sartori/degeneration-probe
-cd degeneration-probe
+Use MSE against the original per-token `repetition_score` with:
 
-# 2. Install uv if needed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 3. Create env and install (with CUDA torch on Linux)
-uv sync
-
-# 4. Store your API keys
-mkdir -p ~/keys
-echo "hf_..." > ~/keys/.hf_token
-echo "..."    > ~/keys/.wandb_key
-
-# 5. Run a training job
-uv run python scripts/train_probe.py model=llama training=no_lora dataset=our_long_form
+```bash
+uv run python scripts/train_probe.py training.loss.name=mse
 ```
----
 
-To set up the environment on the clariden cluster, please follow the [cluster guide](cluster/README.md).
+All W&B settings are under `training.wandb`; disable logging with
+`training.wandb.enabled=false`.
 
+Validation currently reports loss, valid-token count and basic target/prediction
+statistics. `ValidationMetric` provides an empty registry for future metrics.
 
+## Dataset pipeline
 
+Rollout generation, repetition labeling, onset materialization, LLM judging and
+activation caching remain independent pipeline stages under
+`degeneration_probe/dataset_gen/`. Their default CLI build config is the file in
+`configs/dataset/builds/`.
 
-## Acknowledgements
+## Tests
 
-This project started as a fork of [`swiss-ai/feature-probes`](https://github.com/swiss-ai/feature-probes),
-created by Tymoteusz Kwieciński and supervised by Anna Hedström and Imanol Schlag,
-shared under the [Apache 2.0](./LICENSE.md) license.
-
-That repo was itself developed initially as a project for Large Scale AI Engineering together
-with Klejdi Sevdari, Michał Korniak and Jack Peck — see the original
-[repo](https://github.com/sevdari/hallucination_probes).
-
-The initial project was developed as an extension of the paper [*Real-Time Detection of Hallucinated Entities in Long-Form Generation* Obeso et. al.](https://arxiv.org/abs/2509.03531).
+```bash
+uv run pytest
+```

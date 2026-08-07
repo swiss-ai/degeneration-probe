@@ -1,0 +1,57 @@
+short_name: degeneration
+task: degeneration
+
+probe:
+  id: ${model.short_name}_degeneration_${dataset.short_name}_${training.loss.name}_layer${training.probe.layer}
+  layer: 30
+  dtype: float32
+  normalization: layernorm
+  context_window_size: 1
+
+lora:
+  enabled: true
+  layers: all
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+
+loss:
+  name: bce
+  bce:
+    use_pos_weight: true
+  mse:
+    output_activation: sigmoid
+
+optimizer:
+  probe_learning_rate: 1e-4
+  lora_learning_rate: 1e-4
+  weight_decay: 0.0
+
+runtime:
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  num_train_epochs: 1
+  max_steps: -1
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  logging_steps: 10
+  dataloader_num_workers: 0
+  seed: 42
+
+validation:
+  strategy: epoch
+  steps: null
+  # Extension point for future onset_detection and early_detection metrics.
+  metrics: []
+
+checkpoint:
+  output_dir: ${oc.env:PROBE_OUTPUT_DIR,outputs}/${training.probe.id}
+  save_each_epoch: true
+
+wandb:
+  enabled: true
+  project: degeneration-probes
+  name: ${model.short_name}_degeneration_${dataset.short_name}_layer${training.probe.layer}
+  tags: [degeneration, apertus, lora]
+  mode: online

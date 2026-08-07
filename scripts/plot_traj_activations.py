@@ -9,12 +9,12 @@ If two .npz files are passed (base and LoRA), produces side-by-side figures so t
 two variants can be compared at a glance.
 """
 
+from __future__ import annotations
+
 SCORE_VMIN = 0.5
 SCORE_VMAX = 1.0
 SCORE_CMAP = "viridis"
 TSNE_MAX_POINTS = 1500  # subsample input points above this to keep t-SNE fast
-
-from __future__ import annotations
 
 import argparse
 from pathlib import Path

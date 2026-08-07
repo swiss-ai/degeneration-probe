@@ -51,7 +51,7 @@ from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.dataset_gen.label import write_shard_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
 # Not used by select_calibration_sample (judge sample is truncated-only, see
 # its docstring) -- kept here for notebooks/inspect_dataset.ipynb's Section 7,

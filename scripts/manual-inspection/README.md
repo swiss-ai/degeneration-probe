@@ -34,7 +34,7 @@ eligible — a failed/unjudged row has no verdict to review yet.
 
 ```bash
 .venv/bin/python scripts/manual-inspection/export_judge_review.py \
-  --config configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml \
+  --config configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml \
   --reviewers "alice,bob,carlo" \
   --out-dir /path/to/handoff/dir
 ```

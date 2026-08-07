@@ -16,8 +16,7 @@ breakdown. Use ``is_held_out_domain`` to check which split a given source
 belongs to without collapsing the folder structure.
 
 Layout under ``config.output_root`` (e.g.
-``degeneration-dataset-apertus-8b-instruct/``, or either of its two
-sibling per-checkpoint datasets)::
+``degeneration-dataset-apertus-8b-instruct/``)::
 
     manifest.json
     prompts/prompts.parquet

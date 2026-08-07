@@ -19,7 +19,7 @@
 # since waves are pre-submitted as a fixed-length chain up front.
 #
 # Usage: bash cluster/utils/dataset/submit_generation.sh
-#        CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml \
+#        CONFIG=configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml \
 #            bash cluster/utils/dataset/submit_generation.sh
 
 set -euo pipefail
@@ -27,8 +27,7 @@ set -euo pipefail
 REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe
 cd "$REPO"
 
-# One of three equally-important dataset configs (see configs/dataset/).
-CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
+CONFIG="${CONFIG:-configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml}"
 # Short tag for job names/logs, e.g. "apertus-8b-instruct" from
 # "degeneration-dataset-apertus-8b-instruct.yaml" -- keeps job names for
 # different datasets' generation runs distinguishable in `squeue`.

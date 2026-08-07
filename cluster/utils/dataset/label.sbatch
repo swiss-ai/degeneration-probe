@@ -15,9 +15,7 @@ REPO=/iopsstor/scratch/cscs/$USER/degeneration-probe
 mkdir -p $REPO/cluster/log
 cd $REPO
 
-# One of three equally-important dataset configs (see configs/dataset/) --
-# override with e.g. --export=ALL,CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml
-CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
+CONFIG="${CONFIG:-configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml}"
 
 echo "Commit: $(git rev-parse HEAD)"
 echo "Branch: $(git rev-parse --abbrev-ref HEAD)"

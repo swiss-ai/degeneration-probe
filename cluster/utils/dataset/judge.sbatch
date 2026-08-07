@@ -19,9 +19,7 @@ cd $REPO
 # runs directly against the repo's .venv like label.sbatch.
 source .venv/bin/activate
 
-# One of three equally-important dataset configs (see configs/dataset/) --
-# override with e.g. --export=ALL,CONFIG=configs/dataset/degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml
-CONFIG="${CONFIG:-configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml}"
+CONFIG="${CONFIG:-configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml}"
 
 # "claude_agent_sdk" (default) rotates personal Pro/Max subscription OAuth
 # tokens below. "anthropic" is pay-per-token against a single API key (the

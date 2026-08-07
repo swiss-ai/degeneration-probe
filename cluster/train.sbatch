@@ -23,7 +23,4 @@ export WANDB_API_KEY="$(cat ~/keys/.wandb_key)"
 [[ -f ~/keys/.hf_token_write ]] && export HF_WRITE_TOKEN="$(cat ~/keys/.hf_token_write)"
 
 srun --environment=$REPO/cluster/env.toml \
-    python scripts/train_probe.py \
-        model=apertus \
-        training=no_lora \
-        dataset=repetition_instruct_token_level
+    python scripts/train_probe.py

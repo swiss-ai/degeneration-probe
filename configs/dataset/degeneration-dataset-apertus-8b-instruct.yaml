@@ -1,100 +1,22 @@
-# Config for the degeneration-dataset-apertus-8b-instruct build -- rollouts
-# from the HF-hosted swiss-ai/Apertus-8B-Instruct-2509 model. One of three
-# equally-important, directly-comparable datasets built from the same prompt
-# sample (same sources, same n_prompts, same seed); see the sibling
-# degeneration-dataset-apertus1p5-*.yaml configs, which differ only in
-# model_name/tokenizer_name and output_root/work_root. Matches
-# degeneration_probe.dataset_gen.config.DatasetGenConfig field-for-field --
-# load with
-# DatasetGenConfig.from_yaml("configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml").
-#
-# n_prompts is ~600 per source (aime_2025 capped at its real 30-row maximum)
-# to roughly match the scale of the current production "balanced" HF dataset
-# (lorenzo0312/degeneration-probe-instruct-token-level-balanced, 2,973 rows).
-# max_new_tokens is 4096 rather than a shorter cap: an earlier, shorter-cap
-# trial run showed llama_nemotron alone had 21.9% of its rollouts hit a
-# 1024-token cap without reaching EOS (a real, hand-verified
-# "visited[u-1] and visited[u-1] and ..." loop was still forming when cut
-# off), so a short cap was likely truncating degeneration before it could
-# occur.
+short_name: apertus-8b-instruct
+build_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct
+build_config: configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml
 
-model_name: "swiss-ai/Apertus-8B-Instruct-2509"
+splits:
+  train: train
+  validation: val
+  test_indomain: test_indomain
+  test_heldout_domains: test_heldout_domains
 
-in_domain_sources:
-  - name: deepmath_103k
-    hf_repo: "zwhe99/DeepMath-103K"
-    hf_subset: null
-    hf_split: "train"
-    prompt_field: "question"
-    n_prompts: 600
+tokenization:
+  max_length: 4608
+  max_completion_length: 4096
+  prompt_truncation_side: left
 
-  - name: numinamath_1_5
-    hf_repo: "AI-MO/NuminaMath-1.5"
-    hf_subset: null
-    hf_split: "train"
-    prompt_field: "problem"
-    n_prompts: 600
-
-  - name: if_sft_data_verified
-    hf_repo: "allenai/IF_sft_data_verified"
-    hf_subset: null
-    hf_split: "train"
-    prompt_field: "messages"
-    n_prompts: 600
-
-  - name: llama_nemotron
-    hf_repo: "nvidia/Llama-Nemotron-Post-Training-Dataset"
-    hf_subset: "SFT"
-    hf_split: "code"
-    prompt_field: "input"
-    n_prompts: 600
-
-  # MathArena/aime_2025's "train" split only has 30 rows total (AIME I + II
-  # 2025, 15 problems each) -- n_prompts is already capped at that real
-  # maximum. build_prompts.py's sample_source_rows() clamps to the available
-  # row count and warns rather than failing. In-domain (not held-out): split
-  # 70/15/15 across train/val/test_indomain like every other in-domain
-  # source, just at its own much smaller scale (~21/4/5 prompts).
-  - name: aime_2025
-    hf_repo: "MathArena/aime_2025"
-    hf_subset: null
-    hf_split: "train"
-    prompt_field: "problem"
-    n_prompts: 30
-
-held_out_sources:
-  - name: medical_o1
-    hf_repo: "FreedomIntelligence/medical-o1-verifiable-problem"
-    hf_subset: null
-    hf_split: "train"
-    prompt_field: "Open-ended Verifiable Question"
-    n_prompts: 600
-
-  # "verifiable-prompts" carries a pre-built, language-specific `prompt`
-  # field (one row per problem x {cpp, python}). filter_field/min_value
-  # restrict sampling to rating >= 2000 (Codeforces Master-level-or-harder;
-  # ~6,800/16,676 rows qualify) before the same random Fisher-Yates sample
-  # every other source uses -- a hard-coding domain, not a "hardest possible"
-  # one.
-  - name: codeforces
-    hf_repo: "open-r1/codeforces"
-    hf_subset: "verifiable-prompts"
-    hf_split: "train"
-    prompt_field: "prompt"
-    n_prompts: 600
-    filter_field: "rating"
-    min_value: 2000
-
-n_rollouts_per_prompt: 10
-max_new_tokens: 4096
-temperature: 0.7
-top_p: 0.9
-seed: 42
-
-output_root: "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct"
-work_root: "/capstor/scratch/cscs/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct_work"
-
-split_fractions:
-  train: 0.70
-  val: 0.15
-  test_indomain: 0.15
+sampling:
+  # Keep every rollout with a defined onset and sample EOS rollouts per domain.
+  train_negative_rollouts_per_positive: 4.0
+  # Final evaluation keeps every usable rollout.
+  evaluation_negative_rollouts_per_positive: null
+  domain_stratified: true
+  seed: 42

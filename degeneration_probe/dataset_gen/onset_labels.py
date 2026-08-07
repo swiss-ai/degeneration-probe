@@ -1,22 +1,12 @@
-"""Onset-label materialization for the degeneration-onset probes (`probe_N` /
-multi-horizon).
+"""Materialize the onset position used by degeneration training.
 
 For every rollout in the dataset, computes:
     - `is_positive`: `stop_reason == "length"` AND a defined onset position
-      under the active onset metric (see `resolve_onset_position`). This is
-      the settled positive/negative rollout definition -- validated against
-      independent LLM-judge ground truth (stop_reason == "length" precision
-      against the judge is 93.0-99.5% per dataset build, 97.1% pooled --
-      notably lower, ~93%, for apertus1p5-sft256k-4200, so that build's
-      probe labels carry a higher false-positive rate than the other two;
-      `repetition_score > 0.8` alone is worse still and must never be used
-      as the primary label -- see the project's onset-probes implementation
-      prompt for the full validation, and notebooks/inspect_dataset.ipynb
-      Section 7 for the current per-build numbers).
+      under the active onset metric (see `resolve_onset_position`).
     - `onset_position`: resolved through `resolve_onset_position`, a single
       swappable seam over which onset-position signal to trust. Do not read
       `lrs_first_start_normalized_growing` (or any other field) directly
-      anywhere else in the probe-training pipeline -- always go through this
+      anywhere else in the training pipeline -- always go through this
       function, so that adopting a better signal later (e.g. the LLM judge's
       `onset_quote`, once populated at scale) is a one-line config change,
       not a pipeline rewrite.
@@ -50,10 +40,7 @@ from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.dataset_gen.label import write_shard_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
-
-# Candidate horizons for the sparsity sanity check / eventual probe_N training.
-DEFAULT_HORIZONS = (5, 20, 50, 100, 200)
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
 OnsetMetric = Literal["lrs_normalized_growing", "onset_quote"]
 DEFAULT_ONSET_METRIC: OnsetMetric = "lrs_normalized_growing"
@@ -226,49 +213,6 @@ def compute_onset_labels(
     return pd.concat(frames, ignore_index=True)
 
 
-# --- sanity checks: eligible-token counts per horizon, multi-region flag ----------
-
-def eligible_token_counts_per_horizon(
-    onset_labels_df: pd.DataFrame, horizons: Sequence[int] = DEFAULT_HORIZONS
-) -> pd.DataFrame:
-    """Reproduce the label-sparsity table from the implementation prompt: for
-    each horizon N, total eligible tokens and how many of them are positive
-    under `y_N(t) = 1 if (onset - t) <= N else 0`.
-
-    Eligible tokens = every position in negative rollouts (all label 0) plus
-    positions `t in [0, onset]` (onset inclusive) in positive rollouts with a
-    defined onset. For a positive rollout, the number of positions with
-    `(onset - t) <= N` is `min(N, onset) + 1` (all of them if `onset <= N`,
-    otherwise exactly `N + 1`).
-
-    Negative rollout here means `stop_reason == "eos"` specifically (not just
-    "not positive") -- rollouts that hit the token cap (`stop_reason ==
-    "length"`) but have no defined onset under the active metric are neither
-    positive nor negative and must be excluded from both sums entirely, per
-    the onset-position metric's documented limitations.
-    """
-    negative = onset_labels_df[onset_labels_df["stop_reason"] == "eos"]
-    positive = onset_labels_df[onset_labels_df["is_positive"]]
-
-    n_negative_tokens = int(negative["num_tokens"].sum())
-    onsets = positive["onset_position"].astype(int).to_numpy()
-    n_positive_eligible_tokens = int((onsets + 1).sum())
-    total_eligible = n_negative_tokens + n_positive_eligible_tokens
-
-    rows = []
-    for horizon in horizons:
-        positive_tokens = int(sum(min(horizon, onset) + 1 for onset in onsets))
-        rows.append(
-            {
-                "horizon": horizon,
-                "eligible_tokens": total_eligible,
-                "positive_tokens": positive_tokens,
-                "positive_rate": positive_tokens / total_eligible if total_eligible else float("nan"),
-            }
-        )
-    return pd.DataFrame.from_records(rows)
-
-
 # --- CLI entry point -----------------------------------------------------------
 
 def main() -> None:
@@ -286,11 +230,6 @@ def main() -> None:
         choices=["lrs_normalized_growing", "onset_quote"],
         help="Which onset-position signal to resolve through (default: lrs_normalized_growing). "
         "'onset_quote' is not usable yet -- see llm_judge.py, subtask L in the implementation prompt.",
-    )
-    parser.add_argument(
-        "--horizons", nargs="*", type=int, default=list(DEFAULT_HORIZONS),
-        help="Horizons (in tokens) to report eligible/positive token counts for, as a sanity check "
-        "against the label-sparsity table (default: 5 20 50 100 200).",
     )
     args = parser.parse_args()
 
@@ -328,11 +267,6 @@ def main() -> None:
     if len(multi_region) > 0:
         sample_cols = ["prompt_id", "rollout_idx", "n_lrs_regions_normalized_growing"]
         print(multi_region[sample_cols].head(10).to_string(index=False))
-
-    print("\nEligible/positive token counts per horizon (sanity check vs. the label-sparsity table):")
-    counts_df = eligible_token_counts_per_horizon(onset_labels_df, horizons=args.horizons)
-    print(counts_df.to_string(index=False))
-
 
 if __name__ == "__main__":
     main()

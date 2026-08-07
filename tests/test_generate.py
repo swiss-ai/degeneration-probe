@@ -112,9 +112,8 @@ def test_derive_seed_matches_all_full_scale_prompt_ids_no_collisions():
 
     Builds synthetic ids matching the real per-domain naming scheme and
     per-domain n_prompts from
-    configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml (shared by
-    all three dataset configs -- rather than depending on the large,
-    environment-specific prompts.parquet file).
+    configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml rather
+    than depending on the large, environment-specific prompts.parquet file.
     """
     domains = {
         "deepmath_103k": 600,
@@ -123,11 +122,12 @@ def test_derive_seed_matches_all_full_scale_prompt_ids_no_collisions():
         "llama_nemotron": 600,
         "medical_o1": 600,
         "aime_2025": 30,
+        "codeforces": 600,
     }
     prompt_ids = [
         f"{domain}_{i:05d}" for domain, n in domains.items() for i in range(n)
     ]
-    assert len(prompt_ids) == 3030
+    assert len(prompt_ids) == 3630
     seeds = [derive_seed(42, pid, r) for pid in prompt_ids for r in range(10)]
     assert len(seeds) == len(set(seeds))
 

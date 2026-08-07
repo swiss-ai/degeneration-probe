@@ -19,15 +19,9 @@ import yaml
 SOURCE_REQUIRED_KEYS = {"name", "hf_repo", "hf_subset", "hf_split", "prompt_field", "n_prompts"}
 
 # Default storage locations for the dataset. These point at this pipeline's
-# author's own capstor paths -- anyone building their own copy of the dataset
-# (rather than reading the shared one) should override output_root/work_root
-# to a path they can write to. See
-# configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml and
-# notebooks/inspect_dataset.ipynb Section 1 for the canonical build's actual
-# location and how to point a fresh build elsewhere. These defaults describe
-# only that one (the HF Apertus-8B-Instruct) build; the two sibling
-# local-checkpoint builds (see configs/dataset/degeneration-dataset-apertus1p5-*.yaml)
-# each have their own output_root/work_root and are not represented here.
+# author's own capstor paths. Anyone building a separate copy should override
+# output_root/work_root to writable locations. The canonical generation config
+# lives under configs/dataset/builds/.
 DEFAULT_OUTPUT_ROOT = Path(
     "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/"
     "degeneration-dataset-apertus-8b-instruct"
@@ -99,6 +93,16 @@ def _default_held_out_sources() -> List[Dict[str, Any]]:
             "prompt_field": "Open-ended Verifiable Question",
             "n_prompts": 600,
         },
+        {
+            "name": "codeforces",
+            "hf_repo": "open-r1/codeforces",
+            "hf_subset": "verifiable-prompts",
+            "hf_split": "train",
+            "prompt_field": "prompt",
+            "n_prompts": 600,
+            "filter_field": "rating",
+            "min_value": 2000,
+        },
     ]
 
 
@@ -120,11 +124,9 @@ class DatasetGenConfig:
         n_prompts: number of prompts to sample from this source
 
     The field defaults below mirror
-    configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml (that one
-    build); load the config file for whichever of the three (equally
-    important) datasets you're working with directly via ``from_yaml``
-    rather than relying on these defaults for anything other than quick/ad
-    hoc use.
+    configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml;
+    load that file via ``from_yaml`` rather than relying on defaults in a
+    production run.
 
     ``model_name`` and ``tokenizer_name`` both accept either an HF Hub repo
     id (e.g. "swiss-ai/Apertus-8B-Instruct-2509") or a local directory path

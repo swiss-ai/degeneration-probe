@@ -89,7 +89,7 @@ from degeneration_probe.dataset_gen.generate import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
 Task = Tuple[str, int]  # (prompt_id, rollout_idx)
 
@@ -341,7 +341,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=str, default=str(DEFAULT_CONFIG_PATH),
-        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml).",
+        help="Path to the DatasetGenConfig YAML file.",
     )
     parser.add_argument(
         "--domains", nargs="*", default=None,

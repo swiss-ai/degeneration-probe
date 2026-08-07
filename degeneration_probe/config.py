@@ -1,267 +1,265 @@
-"""Configuration classes for probe training."""
+"""Typed configuration for the single ``degeneration`` training task."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union, Literal
+from typing import Any, Dict, List, Optional, Union
 
-from degeneration_probe.utils.probe_loader import LOCAL_PROBES_DIR
-from degeneration_probe.utils.model_utils import get_num_layers
-from degeneration_probe.data.dataset import TokenizedProbingDatasetConfig
+
+def _as_float(value: Any) -> float:
+    return float(value) if isinstance(value, str) else value
+
+
+@dataclass
+class ModelConfig:
+    short_name: str
+    name: str
+    tokenizer_name: Optional[str] = None
+    dtype: str = "bfloat16"
+
 
 @dataclass
 class ProbeConfig:
-    """Configuration for a probe model."""
-    probe_id: str = "probe"  
-    
-    model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-    layer: Optional[int] = None  # Which layer to attach the probe to
-    
-    # LoRA configuration
-    lora_layers: Optional[Union[List[int], str]] = "all"  # Which layers to apply LoRA to
-    lora_r: int = 16  # LoRA rank
-    lora_alpha: int = 32  # LoRA alpha scaling
-    lora_dropout: float = 0.05  # LoRA dropout
+    id: str
+    layer: int = 30
+    dtype: str = "float32"
+    normalization: str = "layernorm"
+    context_window_size: int = 1
 
-    # Loading configuration
-    load_from: Optional[Literal['disk', 'hf']] = None  # "disk", "hf", or None
-    probe_path: Optional[Path] = None  # Local path for disk loading
-    hf_repo_id: Optional[str] = "tkwiecinski/hallucination-probes"  # HuggingFace repository ID
-    
-    threshold: float = 0.5  # Classification threshold
-    context_window_size: int = 1  # Size of context window for the probe
-    probe_dtype: str = "auto"  # auto | float32 | float16 | bfloat16
-    normalize_before_head: str = "none"  # none | layernorm | rmsnorm | l2
-    attention_probe_n_heads: int = 4  # Number of attention heads for the probe (only used when probe_head_type="attention")
-    probe_head_type: str = "linear"  # linear | attention
-    n_outputs: int = 1  # 1 for a single-horizon probe_N head; K for the multi-horizon head
+    def __post_init__(self) -> None:
+        if self.layer < 0:
+            raise ValueError("training.probe.layer must be non-negative")
+        if self.context_window_size < 1:
+            raise ValueError("training.probe.context_window_size must be at least 1")
+        if self.normalization not in {"none", "layernorm", "rmsnorm", "l2"}:
+            raise ValueError("training.probe.normalization must be none, layernorm, rmsnorm, or l2")
 
-    def __post_init__(self):
-        """Validate configuration."""
-        self.probe_path = LOCAL_PROBES_DIR / self.probe_id
 
-        if self.load_from == "hf" and not self.hf_repo_id:
-            raise ValueError("hf_repo_id must be specified when load_from='hf'")
+@dataclass
+class LoraConfig:
+    enabled: bool = True
+    layers: Union[str, List[int]] = "all"
+    rank: int = 16
+    alpha: int = 32
+    dropout: float = 0.05
 
-        if self.load_from in ['disk'] and not self.probe_path.exists():
-            raise ValueError(f"Probe with ID {self.probe_id} not found in disk at path {self.probe_path}")
+    def __post_init__(self) -> None:
+        self.dropout = _as_float(self.dropout)
+        if isinstance(self.layers, str) and self.layers not in {"all", "none"}:
+            raise ValueError("training.lora.layers must be 'all', 'none', or a list of layer indices")
 
-        if self.layer is None:
-            # default to hooking the value head at the last layer of the underlying LM
-            self.layer = get_num_layers(self.model_name) - 1
-        
-        if (not isinstance(self.context_window_size, int) or self.context_window_size < 0):
-            raise ValueError("context_window must be a positive integer.")
 
-        allowed_probe_dtypes = {"auto", "fp32", "float32", "fp16", "float16", "bf16", "bfloat16"}
-        probe_dtype_key = str(self.probe_dtype).strip().lower()
-        if probe_dtype_key not in allowed_probe_dtypes:
-            raise ValueError(
-                f"Unsupported probe_dtype={self.probe_dtype!r}. "
-                "Use one of: auto, float32, float16, bfloat16"
-            )
+@dataclass
+class BceLossConfig:
+    use_pos_weight: bool = True
 
-        allowed_norms = {"none", "layernorm", "rmsnorm", "l2"}
-        norm_key = str(self.normalize_before_head).strip().lower()
-        if norm_key not in allowed_norms:
-            raise ValueError(
-                f"Unsupported normalize_before_head={self.normalize_before_head!r}. "
-                "Use one of: none, layernorm, rmsnorm, l2"
-            )
-        if str(self.probe_head_type).strip().lower() not in {"linear", "attention"}:
-            raise ValueError(
-                f"Unsupported probe_head_type={self.probe_head_type!r}. Use 'linear' or 'attention'."
-            )
 
-        if isinstance(self.lora_layers, str):
-            if self.lora_layers == 'all':
-                # default to training LoRA adaptors on all layers
-                # (up to the layer where we hook the value head)
-                self.lora_layers = list(range(0, self.layer + 1))
-            elif self.lora_layers.lower() == 'none':
-                self.lora_layers = []
-            else:
-                self.lora_layers = [int(layer) for layer in self.lora_layers.strip('[').strip(']').split(",")]
-                assert len(self.lora_layers) > 0
-        elif self.lora_layers is None:
-            self.lora_layers = []
-        assert all(isinstance(l, int) for l in self.lora_layers)
+@dataclass
+class MseLossConfig:
+    output_activation: str = "sigmoid"
+
+    def __post_init__(self) -> None:
+        if self.output_activation != "sigmoid":
+            raise ValueError("Only sigmoid is supported for training.loss.mse.output_activation")
+
+
+@dataclass
+class LossConfig:
+    name: str = "bce"
+    bce: BceLossConfig = field(default_factory=BceLossConfig)
+    mse: MseLossConfig = field(default_factory=MseLossConfig)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.bce, dict):
+            self.bce = BceLossConfig(**self.bce)
+        if isinstance(self.mse, dict):
+            self.mse = MseLossConfig(**self.mse)
+        if self.name not in {"bce", "mse"}:
+            raise ValueError("training.loss.name must be either 'bce' or 'mse'")
+
+
+@dataclass
+class OptimizerConfig:
+    probe_learning_rate: float = 1e-4
+    lora_learning_rate: float = 1e-4
+    weight_decay: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.probe_learning_rate = _as_float(self.probe_learning_rate)
+        self.lora_learning_rate = _as_float(self.lora_learning_rate)
+        self.weight_decay = _as_float(self.weight_decay)
+
+
+@dataclass
+class RuntimeConfig:
+    per_device_train_batch_size: int = 1
+    per_device_eval_batch_size: int = 1
+    gradient_accumulation_steps: int = 16
+    num_train_epochs: float = 1.0
+    max_steps: int = -1
+    max_grad_norm: float = 1.0
+    gradient_checkpointing: bool = True
+    logging_steps: int = 10
+    dataloader_num_workers: int = 0
+    seed: int = 42
+
+    def __post_init__(self) -> None:
+        self.num_train_epochs = _as_float(self.num_train_epochs)
+        self.max_grad_norm = _as_float(self.max_grad_norm)
+
+
+@dataclass
+class ValidationConfig:
+    strategy: str = "epoch"
+    steps: Optional[int] = None
+    metrics: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.strategy not in {"no", "steps", "epoch"}:
+            raise ValueError("training.validation.strategy must be no, steps, or epoch")
+        if self.strategy == "steps" and not self.steps:
+            raise ValueError("training.validation.steps is required when strategy='steps'")
+
+
+@dataclass
+class CheckpointConfig:
+    output_dir: str = "outputs/degeneration_probe"
+    save_each_epoch: bool = True
+
+    @property
+    def path(self) -> Path:
+        return Path(self.output_dir)
+
+
+@dataclass
+class WandbConfig:
+    enabled: bool = True
+    project: str = "degeneration-probes"
+    name: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    mode: str = "online"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"online", "offline", "disabled"}:
+            raise ValueError("training.wandb.mode must be online, offline, or disabled")
 
 
 @dataclass
 class TrainingConfig:
-    """Configuration for probe training."""
-    
-    task: Literal["hallucination", "repetition_score", "onset_multi_horizon"] = "hallucination"
-    wandb_project: str = "hallucination-probes"
-    wandb_name: Optional[str] = None
-    wandb_tags: List[str] = field(default_factory=list)
+    task: str
+    short_name: str
+    probe: ProbeConfig
+    lora: LoraConfig = field(default_factory=LoraConfig)
+    loss: LossConfig = field(default_factory=LossConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    wandb: WandbConfig = field(default_factory=WandbConfig)
 
-    probe_config: ProbeConfig = field(default_factory=ProbeConfig)
-
-    # Only used when task == "onset_multi_horizon". `onset_horizons` must match
-    # probe_config.n_outputs in length/order (head i predicts onset_horizons[i]).
-    # `onset_horizon_weights`, if set, must be the same length and is normalized to
-    # sum to len(onset_horizons) inside compute_multi_horizon_bce_loss; None means
-    # uniform weighting. The caller (e.g. the pilot run script) is expected to pass
-    # explicit inverse-positive-rate weights computed from the training data, the
-    # same way scripts/train_onset_probes.py does for the no-LoRA condition.
-    onset_horizons: List[int] = field(default_factory=lambda: [5, 20, 50, 100, 200])
-    onset_horizon_weights: Optional[List[float]] = None
-    
-    upload_to_hf: bool = False
-    save_evaluation_metrics: bool = True
-    save_roc_curves: bool = False
-    dump_raw_eval_results: bool = False
-    
-    # Training hyperparameters
-    per_device_train_batch_size: int = 4
-    per_device_eval_batch_size: int = 4
-    high_loss_threshold: Optional[float] = None  # Threshold for masking high-loss tokens
-    lambda_lm: float = 0.0  # Weight for language modeling loss regularization
-    lambda_kl: float = 0.0  # Weight for KL divergence regularization
-    anneal_max_aggr: bool = True  # Whether to anneal span-level max aggregation loss
-    anneal_warmup: float = 1.0  # Fraction of training for span loss warmup
-    learning_rate: float = 5e-5  # Overall learning rate (deprecated)
-    probe_head_lr: Optional[float] = 5e-3 # Separate LR for probe head
-    lora_lr: Optional[float] = 5e-5  # Separate LR for LoRA parameters
-    regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
-    regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
-    degeneration_threshold: float = 0.8
-    sparsity_penalty_weight: Optional[float] = None
-    num_train_samples: Optional[int] = None  # Limit training samples
-    max_steps: int = -1  # Override num_epochs if set
-    num_train_epochs: int = 1
-    enable_gradient_checkpointing: bool = True
-    gradient_accumulation_steps: int = 1
-    max_grad_norm: float = 1.0
-    eval_steps: Optional[int] = -1  # Only manually evaluate at the end
-    evaluation_strategy: str = "no"  # "steps", "epoch", or "no"
-    logging_steps: int = 10
-    seed: int = 42
-    model_dtype: str = "auto"  # auto | float32 | float16 | bfloat16
-    
-    # Dataset configuration
-    train_datasets: List[dict] = field(default_factory=list)
-    eval_datasets: List[dict] = field(default_factory=list)
-    
-    # These will be populated in __post_init__
-    train_dataset_configs: List[TokenizedProbingDatasetConfig] = field(default_factory=list, init=False)
-    eval_dataset_configs: List[TokenizedProbingDatasetConfig] = field(default_factory=list, init=False)
-    
-    def __post_init__(self):
-        """Post-initialization processing."""
-        if isinstance(self.probe_config, dict):
-            self.probe_config = ProbeConfig(**self.probe_config)
-        
-        # Handle special values
-        if self.eval_steps == -1:
-            self.eval_steps = None
-        
-        # Handle learning rates
-        if self.probe_head_lr is None:
-            self.probe_head_lr = self.learning_rate
-        if self.lora_lr is None:
-            self.lora_lr = self.learning_rate
-        
-        # Parse dataset configurations
-        self.train_dataset_configs = [
-            TokenizedProbingDatasetConfig(**config)
-            for config in self.train_datasets
-        ]
-        
-        self.eval_dataset_configs = [
-            TokenizedProbingDatasetConfig(**config)
-            for config in self.eval_datasets
-        ]
-
-        # Convert scientific notation strings to floats
-        # otherwise yaml parses e.g. '1e-6' as a string instead of a float
-        float_fields = [
-            'learning_rate', 'probe_head_lr', 'lora_lr', 'max_grad_norm', 
-            'anneal_warmup', 'lambda_lm', 'lambda_kl', 'sparsity_penalty_weight',
-            'degeneration_threshold'
-        ]
-        for field_name in float_fields:
-            value = getattr(self, field_name)
-            if value is not None and isinstance(value, str):
-                setattr(self, field_name, float(value))
-
-        allowed_model_dtypes = {"auto", "fp32", "float32", "fp16", "float16", "bf16", "bfloat16"}
-        model_dtype_key = str(self.model_dtype).strip().lower()
-        if model_dtype_key not in allowed_model_dtypes:
-            raise ValueError(
-                f"Unsupported model_dtype={self.model_dtype!r}. "
-                "Use one of: auto, float32, float16, bfloat16"
-            )
-
-        if self.task not in {"hallucination", "repetition_score", "onset_multi_horizon"}:
-            raise ValueError("task must be one of: 'hallucination', 'repetition_score', 'onset_multi_horizon'")
-        if self.regression_loss not in {"mse", "smooth_l1", "l1"}:
-            raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
-        if self.regression_output_activation not in {"sigmoid", "none"}:
-            raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
-        if not 0.0 <= self.degeneration_threshold <= 1.0:
-            raise ValueError("degeneration_threshold must be between 0.0 and 1.0")
-        if self.task == "onset_multi_horizon":
-            if self.onset_horizon_weights is not None and len(self.onset_horizon_weights) != len(self.onset_horizons):
-                raise ValueError("onset_horizon_weights must be the same length as onset_horizons")
-            if self.probe_config.n_outputs != len(self.onset_horizons):
-                raise ValueError(
-                    f"probe_config.n_outputs ({self.probe_config.n_outputs}) must equal "
-                    f"len(onset_horizons) ({len(self.onset_horizons)}) for task='onset_multi_horizon'"
-                )
+    def __post_init__(self) -> None:
+        nested = {
+            "probe": ProbeConfig,
+            "lora": LoraConfig,
+            "loss": LossConfig,
+            "optimizer": OptimizerConfig,
+            "runtime": RuntimeConfig,
+            "validation": ValidationConfig,
+            "checkpoint": CheckpointConfig,
+            "wandb": WandbConfig,
+        }
+        for name, cls in nested.items():
+            value = getattr(self, name)
+            if isinstance(value, dict):
+                setattr(self, name, cls(**value))
+        if self.task != "degeneration":
+            raise ValueError("The only supported task is 'degeneration'")
 
 
 @dataclass
-class EvaluationConfig:
-    """Configuration for probe evaluation."""
+class SplitConfig:
+    train: str = "train"
+    validation: str = "val"
+    test_indomain: str = "test_indomain"
+    test_heldout_domains: str = "test_heldout_domains"
 
-    task: Literal["hallucination", "repetition_score", "onset_multi_horizon"] = "hallucination"
-    probe_config: ProbeConfig = field(default_factory=ProbeConfig)
-    regression_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
-    regression_output_activation: Literal["sigmoid", "none"] = "sigmoid"
-    degeneration_threshold: float = 0.8
-    onset_horizons: List[int] = field(default_factory=lambda: [5, 20, 50, 100, 200])
+    @property
+    def final_evaluation(self) -> List[str]:
+        return [self.validation, self.test_indomain, self.test_heldout_domains]
 
-    datasets: List[dict] = field(default_factory=list)
-    per_device_eval_batch_size: int = 8
-    
-    output_dir: Optional[Path] = None
-    save_predictions: bool = True
-    save_roc_curves: bool = True
-    save_raw_results: bool = False  # Save all predictions and labels
-    
-    # This will be populated in __post_init__
-    dataset_configs: List[TokenizedProbingDatasetConfig] = field(default_factory=list, init=False)
-    
-    def __post_init__(self):
-        """Post-initialization processing."""
-        if isinstance(self.probe_config, dict):
-            self.probe_config = ProbeConfig(**self.probe_config)
 
-        if isinstance(self.degeneration_threshold, str):
-            self.degeneration_threshold = float(self.degeneration_threshold)
-        
-        self.dataset_configs = [
-            TokenizedProbingDatasetConfig(**dataset_config)
-            for dataset_config in self.datasets
-        ]
+@dataclass
+class TokenizationConfig:
+    max_length: int = 4608
+    max_completion_length: int = 4096
+    prompt_truncation_side: str = "left"
 
-        if self.task not in {"hallucination", "repetition_score", "onset_multi_horizon"}:
-            raise ValueError("task must be one of: 'hallucination', 'repetition_score', 'onset_multi_horizon'")
-        if self.task == "onset_multi_horizon" and self.probe_config.n_outputs != len(self.onset_horizons):
-            raise ValueError(
-                f"probe_config.n_outputs ({self.probe_config.n_outputs}) must equal "
-                f"len(onset_horizons) ({len(self.onset_horizons)}) for task='onset_multi_horizon'"
-            )
-        if self.regression_loss not in {"mse", "smooth_l1", "l1"}:
-            raise ValueError("regression_loss must be one of: mse, smooth_l1, l1")
-        if self.regression_output_activation not in {"sigmoid", "none"}:
-            raise ValueError("regression_output_activation must be either 'sigmoid' or 'none'")
-        if not 0.0 <= self.degeneration_threshold <= 1.0:
-            raise ValueError("degeneration_threshold must be between 0.0 and 1.0")
+    def __post_init__(self) -> None:
+        if self.max_length < 1 or self.max_completion_length < 1:
+            raise ValueError("dataset.tokenization lengths must be positive")
+        if self.max_completion_length > self.max_length:
+            raise ValueError("dataset.tokenization.max_completion_length cannot exceed max_length")
+        if self.prompt_truncation_side not in {"left", "right"}:
+            raise ValueError("dataset.tokenization.prompt_truncation_side must be left or right")
 
-        if self.output_dir is None:
-            self.output_dir = self.probe_config.probe_path / "evaluation_results"
 
-# %%
+@dataclass
+class SamplingConfig:
+    train_negative_rollouts_per_positive: Optional[float] = 4.0
+    evaluation_negative_rollouts_per_positive: Optional[float] = None
+    domain_stratified: bool = True
+    seed: int = 42
+
+    def __post_init__(self) -> None:
+        for name in ("train_negative_rollouts_per_positive", "evaluation_negative_rollouts_per_positive"):
+            value = getattr(self, name)
+            if value is not None:
+                value = _as_float(value)
+                if value < 0:
+                    raise ValueError(f"dataset.sampling.{name} must be non-negative or null")
+                setattr(self, name, value)
+
+
+@dataclass
+class DatasetConfig:
+    short_name: str
+    build_root: str
+    build_config: str
+    splits: SplitConfig = field(default_factory=SplitConfig)
+    tokenization: TokenizationConfig = field(default_factory=TokenizationConfig)
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
+
+    def __post_init__(self) -> None:
+        for name, cls in {
+            "splits": SplitConfig,
+            "tokenization": TokenizationConfig,
+            "sampling": SamplingConfig,
+        }.items():
+            value = getattr(self, name)
+            if isinstance(value, dict):
+                setattr(self, name, cls(**value))
+
+
+@dataclass
+class ExperimentConfig:
+    model: ModelConfig
+    training: TrainingConfig
+    dataset: DatasetConfig
+
+    def __post_init__(self) -> None:
+        for name, cls in {
+            "model": ModelConfig,
+            "training": TrainingConfig,
+            "dataset": DatasetConfig,
+        }.items():
+            value = getattr(self, name)
+            if isinstance(value, dict):
+                setattr(self, name, cls(**value))
+
+    @classmethod
+    def from_dict(cls, config: Dict[str, Any]) -> "ExperimentConfig":
+        unexpected = set(config) - {"model", "training", "dataset"}
+        if unexpected:
+            raise ValueError(f"Unexpected top-level config sections: {sorted(unexpected)}")
+        return cls(**config)

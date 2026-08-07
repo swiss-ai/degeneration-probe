@@ -1,629 +1,415 @@
-"""Tokenized dataset classes with token-level labels for probe training."""
+"""Local Parquet loader and token-aligned dataset for degeneration training."""
 
-import random
-from copy import deepcopy
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import warnings
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Literal, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+import pandas as pd
 import torch
-import datasets
-from jaxtyping import Float, Int
-from termcolor import colored
-from torch import Tensor
 from torch.utils.data import Dataset
-from tqdm import tqdm
-from transformers import AutoTokenizer
 
-from degeneration_probe.utils.tokenization import find_assistant_tokens_slice, find_string_in_tokens, slice_to_list
-from degeneration_probe.types import AnnotatedSpan, ProbingItem
-from degeneration_probe.data. converters import get_prepare_function
+from degeneration_probe.config import DatasetConfig, TokenizationConfig
 
-@dataclass
-class TokenizedProbingDatasetConfig:
-    """Configuration for tokenizing and labeling a probing dataset at token level."""
-    
-    dataset_id: str
-    hf_repo: str
-    subset: Optional[str] = None
-    split: str = "train"
-    max_length: int = 2048
-    ignore_buffer: int = 0  # Buffer around spans to ignore
-    default_ignore: bool = False  # If true, ignore tokens not in any span
-    last_span_token: bool = False  # If true, only label the last token of each span
-    pos_weight: float = 1.0  # Weight for positive (hallucination) tokens
-    neg_weight: float = 1.0  # Weight for negative (supported) tokens
-    shuffle: bool = True
-    seed: int = 42
-    process_on_the_fly: bool = False
-    max_num_samples: Optional[int] = None
-    max_completion_length: Optional[int] = None
-    prompt_truncation_side: Literal["left", "right"] = "left"
-
-    def __post_init__(self):
-        if self.max_length <= 0:
-            raise ValueError("max_length must be positive")
-        if self.max_completion_length is not None and self.max_completion_length <= 0:
-            raise ValueError("max_completion_length must be positive when set")
-        if self.prompt_truncation_side not in {"left", "right"}:
-            raise ValueError("prompt_truncation_side must be either 'left' or 'right'")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-class TokenizedProbingDataset(Dataset):
-    """Dataset for probing model activations with annotated spans."""
-    
-    def __init__(
-        self,
-        items: List[ProbingItem],
-        config: TokenizedProbingDatasetConfig,
-        tokenizer: AutoTokenizer,
-    ):
-        self.config = config
-        self.tokenizer = tokenizer
-        self.items = deepcopy(items)
-        self.processed_items = [None] * len(items)
-        self.debug_mode = False
-        self.print_first_example = False
-        
-        self._num_skipped_spans: int = 0
-        self._num_added_spans: int = 0
-        self._num_truncated_prompts: int = 0
-        self._num_truncated_completions: int = 0
-        self._num_token_label_mismatches: int = 0
-        
-        if self.config.shuffle:
-            self._shuffle_items()
-        
-        # Limit samples if specified (do this after shuffling)
-        if self.config.max_num_samples:
-            self.items = self.items[:self.config.max_num_samples]
-            self.processed_items = self.processed_items[:self.config.max_num_samples]
-        
-        if not self.config.process_on_the_fly:
-            self._process_items()
-    
-    def _process_items(self):
-        """Pre-process all items in the dataset."""
-        for i, item in tqdm(enumerate(self.items), desc=f"Processing items ({self.config.dataset_id})", total=len(self.items)):
-            if i == 0 and self.print_first_example:
-                self.debug_mode = True
-            else:
-                self.debug_mode = False
-            
-            processed_item = self._process_item(item)
-            if processed_item:
-                self.processed_items[i] = processed_item
-        
-        print(f"Dataset {self.config.dataset_id} stats:")
-        print(f"\t- Number of added spans: {self._num_added_spans}")
-        print(f"\t- Number of skipped spans: {self._num_skipped_spans} / {self._num_added_spans + self._num_skipped_spans}")
-        print(f"\t- Total number of items: {len(self.items)}")
-        if any((self._num_truncated_prompts, self._num_truncated_completions, self._num_token_label_mismatches)):
-            print(f"\t- Repetition prompts truncated: {self._num_truncated_prompts}")
-            print(f"\t- Repetition completions truncated: {self._num_truncated_completions}")
-            print(f"\t- Repetition token-label length mismatches: {self._num_token_label_mismatches}")
-    
-    def _process_item(self, item: ProbingItem) -> Dict:
-        """Process a single example into tokenized format with labels."""
-        if item.token_labels is not None:
-            return self._process_token_level_item(item)
+@dataclass(frozen=True)
+class DegenerationRecord:
+    prompt_id: str
+    rollout_idx: int
+    domain: str
+    split: str
+    prompt_text: str
+    generated_token_ids: Sequence[int]
+    targets: Sequence[float]
 
-        conversation = [
-            {'role': 'user', 'content': item.prompt},
-            {'role': 'assistant', 'content': item.completion}
-        ]
-        full_text = self.tokenizer.apply_chat_template(conversation, tokenize=False)
-        
-        if self.tokenizer.bos_token and self.tokenizer.bos_token in full_text:
-            full_text = full_text.replace(self.tokenizer.bos_token, '')
-        
-        encoding = self.tokenizer(
-            full_text,
-            truncation=True,
-            max_length=self.config.max_length,
-            padding='max_length',
-            return_tensors='pt',
-            padding_side='right'
-        )
-        
-        input_ids: Int[Tensor, "seq_len"] = encoding["input_ids"][0]
-        attention_mask: Int[Tensor, "seq_len"] = encoding["attention_mask"][0]
-        
-        labels, weights, pos_spans, neg_spans = self._compute_positional_labels(
-            input_ids=input_ids,
-            item=item,
-            attention_mask=attention_mask,
-        )
-        
-        input_str: str = self.tokenizer.decode(input_ids)
-        assistant_tokens_slice = find_assistant_tokens_slice(input_ids, input_str, self.tokenizer)
-        completion_start_idx = assistant_tokens_slice.stop
-        
-        lm_labels = input_ids.clone()
-        lm_labels[:completion_start_idx] = -100  # ignore all tokens in the prompt
-        lm_labels[attention_mask == 0] = -100  # ignore padding tokens
-        
-        return {
-            "input_ids": input_ids,  # Int[Tensor, "seq_len"]
-            "attention_mask": attention_mask,  # Int[Tensor, "seq_len"]
-            "classification_labels": labels,  # Float[Tensor, "seq_len"]
-            "classification_weights": weights,  # Float[Tensor, "seq_len"]
-            "pos_spans": pos_spans,  # List[List[int]]
-            "neg_spans": neg_spans,  # List[List[int]]
-            "lm_labels": lm_labels,  # Int[Tensor, "seq_len"]
-        }
 
-    def _process_token_level_item(self, item: ProbingItem) -> Dict:
-        """Process token-level generation labels without searching for assistant markers."""
-        prompt_text = self._build_generation_prompt(item.prompt)
-        prompt_ids = self._tokenize_without_special_tokens(prompt_text)
-        # Prefer the item's own exact completion token ids (e.g. from a prior generation
-        # run) over retokenizing `item.completion` -- retokenization isn't guaranteed to
-        # round-trip losslessly, which can silently misalign `token_labels` against the
-        # wrong tokens. See `ProbingItem.completion_token_ids`'s docstring.
-        if item.completion_token_ids is not None:
-            completion_ids = list(item.completion_token_ids)
+def derive_bce_targets(
+    num_tokens: int,
+    *,
+    stop_reason: str,
+    onset_position: Optional[float],
+) -> Optional[List[float]]:
+    """Build the binary target, or return ``None`` for an unusable rollout."""
+    if stop_reason == "eos":
+        return [0.0] * num_tokens
+    if onset_position is None or pd.isna(onset_position):
+        return None
+    onset = int(onset_position)
+    if onset < 0 or onset >= num_tokens:
+        raise ValueError(f"onset_position={onset} is outside a {num_tokens}-token rollout")
+    return [0.0] * onset + [1.0] * (num_tokens - onset)
+
+
+def derive_mse_targets(repetition_score: Sequence[float], num_tokens: int) -> List[float]:
+    """Align the original scores to token IDs; unmatched positions stay masked."""
+    targets = [float("nan")] * num_tokens
+    for index, value in enumerate(list(repetition_score)[:num_tokens]):
+        if value is not None:
+            targets[index] = float(value)
+    return targets
+
+
+def _stable_seed(seed: int, *parts: str) -> int:
+    digest = hashlib.sha256("::".join(parts).encode("utf-8")).digest()
+    return (seed + int.from_bytes(digest[:4], "little")) % (2**32)
+
+
+def select_rollouts(
+    onset_labels: pd.DataFrame,
+    *,
+    split: str,
+    negative_rollouts_per_positive: Optional[float],
+    domain_stratified: bool,
+    seed: int,
+) -> pd.DataFrame:
+    """Keep defined-onset rollouts and a deterministic sample of EOS rollouts."""
+    split_rows = onset_labels[onset_labels["split"] == split].copy()
+    positive_mask = split_rows["is_positive"].astype(bool) & split_rows["onset_position"].notna()
+    negative_mask = split_rows["stop_reason"].eq("eos")
+    positives = split_rows[positive_mask]
+    negatives = split_rows[negative_mask]
+
+    if negative_rollouts_per_positive is None:
+        sampled_negatives = negatives
+    else:
+        target = min(len(negatives), round(len(positives) * negative_rollouts_per_positive))
+        if target == 0:
+            sampled_negatives = negatives.iloc[:0]
+        elif not domain_stratified:
+            sampled_negatives = negatives.sample(n=target, random_state=_stable_seed(seed, split))
         else:
-            completion_ids = self._tokenize_without_special_tokens(item.completion)
+            # Allocate proportionally by domain using the largest-remainder method.
+            sizes = negatives.groupby("domain", sort=True).size()
+            quotas = sizes / sizes.sum() * target
+            allocations = np.floor(quotas).astype(int)
+            remainder = target - int(allocations.sum())
+            for domain in (quotas - allocations).sort_values(ascending=False).index[:remainder]:
+                allocations.loc[domain] += 1
+            frames = []
+            for domain, count in allocations.items():
+                if count:
+                    group = negatives[negatives["domain"] == domain]
+                    frames.append(
+                        group.sample(
+                            n=min(int(count), len(group)),
+                            random_state=_stable_seed(seed, split, str(domain)),
+                        )
+                    )
+            sampled_negatives = pd.concat(frames, ignore_index=False) if frames else negatives.iloc[:0]
 
-        raw_completion_len = len(completion_ids)
-        completion_limit = self.config.max_completion_length or self.config.max_length
-        completion_limit = min(completion_limit, self.config.max_length)
-        completion_ids = completion_ids[:completion_limit]
-        if raw_completion_len > len(completion_ids):
-            self._num_truncated_completions += 1
-
-        prompt_budget = max(0, self.config.max_length - len(completion_ids))
-        if len(prompt_ids) > prompt_budget:
-            self._num_truncated_prompts += 1
-            if prompt_budget == 0:
-                prompt_ids = []
-            elif self.config.prompt_truncation_side == "left":
-                prompt_ids = prompt_ids[-prompt_budget:]
-            else:
-                prompt_ids = prompt_ids[:prompt_budget]
-
-        real_input_ids = prompt_ids + completion_ids
-        prompt_len = len(prompt_ids)
-        completion_len = len(completion_ids)
-        seq_len = len(real_input_ids)
-
-        pad_token_id = self._get_pad_token_id()
-        input_ids = torch.full((self.config.max_length,), pad_token_id, dtype=torch.long)
-        attention_mask = torch.zeros((self.config.max_length,), dtype=torch.long)
-        classification_labels = torch.full((self.config.max_length,), -100.0, dtype=torch.float32)
-        classification_weights = torch.zeros((self.config.max_length,), dtype=torch.float32)
-        lm_labels = torch.full((self.config.max_length,), -100, dtype=torch.long)
-
-        if seq_len > 0:
-            input_ids[:seq_len] = torch.tensor(real_input_ids, dtype=torch.long)
-            attention_mask[:seq_len] = 1
-
-        token_labels = torch.tensor(item.token_labels, dtype=torch.float32)
-        num_labels = min(len(token_labels), completion_len)
-        if len(token_labels) != completion_len:
-            self._num_token_label_mismatches += 1
-
-        if num_labels > 0:
-            label_start = prompt_len
-            label_stop = label_start + num_labels
-            classification_labels[label_start:label_stop] = token_labels[:num_labels]
-
-        valid_label_mask = classification_labels != -100.0
-        classification_weights[valid_label_mask] = 1.0
-
-        if completion_len > 0:
-            completion_start = prompt_len
-            completion_stop = completion_start + completion_len
-            lm_labels[completion_start:completion_stop] = input_ids[completion_start:completion_stop]
-
-        self._num_added_spans += int(valid_label_mask.sum().item())
-        self._num_skipped_spans += max(0, len(token_labels) - num_labels)
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "classification_labels": classification_labels,
-            "classification_weights": classification_weights,
-            "pos_spans": [],
-            "neg_spans": [],
-            "lm_labels": lm_labels,
-        }
-
-    def _build_generation_prompt(self, prompt: str) -> str:
-        """Build the chat prefix that immediately precedes generated tokens."""
-        conversation = [{'role': 'user', 'content': prompt}]
-        try:
-            prompt_text = self.tokenizer.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        except TypeError:
-            prompt_text = self.tokenizer.apply_chat_template(conversation, tokenize=False)
-
-        if self.tokenizer.bos_token and self.tokenizer.bos_token in prompt_text:
-            prompt_text = prompt_text.replace(self.tokenizer.bos_token, '')
-
-        return prompt_text
-
-    def _tokenize_without_special_tokens(self, text: str) -> List[int]:
-        return self.tokenizer(
-            text,
-            add_special_tokens=False,
-            return_attention_mask=False,
-        )["input_ids"]
-
-    def _get_pad_token_id(self) -> int:
-        if self.tokenizer.pad_token_id is not None:
-            return self.tokenizer.pad_token_id
-        if self.tokenizer.eos_token_id is not None:
-            return self.tokenizer.eos_token_id
-        return 0
-    
-    def print_token_labels(
-        self,
-        input_ids: torch.Tensor,
-        positive_indices: List[int],
-        negative_indices: List[int],
-        ignore_indices: List[int],
-        spans: List[AnnotatedSpan]
-    ):
-        """Debug method to print how tokens have been labeled."""
-
-        tokens = [self.tokenizer.decode(tok) for tok in input_ids]
-
-        print(f"================================================")
-        print(f"Number of spans: {len(spans)}")
-        print(f"Number of non-factual (hallucinated) spans: {len([f for f in spans if f.label == 1.0])}")
-        print(f"Number of N/A spans: {len([f for f in spans if f.label == -100])}")
-        print(f"Number of factual spans: {len([f for f in spans if f.label == 0.0])}")
-        print(f"Legend: red - positive, green - negative, blue - ignored")
-
-        for i, token in enumerate(tokens):
-            if token == self.tokenizer.eos_token:
-                continue
-
-            if i in positive_indices:
-                print(colored(token, 'red'), end='')
-            elif i in negative_indices:
-                print(colored(token, 'green'), end='')
-            elif i in ignore_indices:
-                print(colored(token, 'blue'), end='')
-            else:
-                print(token, end='')
-
-        print(f"================================================")
-    
-    def _compute_positional_labels(
-        self,
-        input_ids: torch.Tensor,
-        item: ProbingItem,
-        attention_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[List[int]], List[List[int]]]:
-        """
-        Computes positional labels for a sequence of tokens based on annotated spans.
-        
-        For each span in the example:
-        - If it's a hallucination (label 1.0): Sets span tokens to 1.0 and nearby tokens within
-          ignore_buffer to -100.0
-        - If it's a supported fact (label 0.0): Sets span tokens to 0.0 and nearby tokens within
-          ignore_buffer to -100.0
-        - If it's unlabeled/undecided (label -100.0): Sets span tokens to -100.0
-        
-        Args:
-            input_ids: Input token IDs
-            item: ProbingItem containing the spans and their labels
-            
-        Returns:
-            Tuple of (labels, weights, pos_spans, neg_spans)
-        """
-        input_str: str = self.tokenizer.decode(input_ids)
-        
-        positive_indices: List[int] = []    # indices of hallucinated spans
-        negative_indices: List[int] = []    # indices of supported spans
-        ignore_indices: List[int] = []      # indices to ignore in training
-        
-        positive_spans: List[List[int]] = []
-        negative_spans: List[List[int]] = []
-        
-        def get_nearby_indices(span_indices: List[int]) -> List[int]:
-            left_window = list(range(max(0, span_indices[0] - self.config.ignore_buffer), span_indices[0]))
-            right_window = list(range(span_indices[-1] + 1, min(len(input_ids), span_indices[-1] + 1 + self.config.ignore_buffer)))
-            return left_window + right_window
-        
-        # Find assistant tokens slice to know where to start looking for spans
-        assistant_tokens_slice = find_assistant_tokens_slice(
-            input_ids,
-            input_str,
-            self.tokenizer
-        )
-        completion_start_idx = assistant_tokens_slice.stop
-        cur_idx = assistant_tokens_slice.stop
-
-        if item.token_labels is not None:
-            return self._compute_token_level_labels(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                completion_start_idx=completion_start_idx,
-                item=item,
-            )
-        
-        # Sort spans by their index in the text
-        spans = sorted(item.spans, key=lambda x: x.index)
-        
-        for span in spans:
-            if span.span not in input_str:
-                self._num_skipped_spans += 1
-                continue
-            
-            try:
-                # First try to find the span after the assistant tokens
-                positions_slice = find_string_in_tokens(span.span, input_ids[cur_idx:], self.tokenizer)
-                positions_slice = slice(positions_slice.start + cur_idx, positions_slice.stop + cur_idx)
-            except (AssertionError, ValueError):
-                try:
-                    # If not found, try the whole input_ids
-                    print(f"Repeating position_slice search on all tokens after failing to find span {repr(span.span)} in input_ids[cur_idx:]: {repr(self.tokenizer.decode(input_ids[cur_idx:]))[:50]}...")
-                    positions_slice = find_string_in_tokens(span.span, input_ids, self.tokenizer)
-                except (AssertionError, ValueError) as e:
-                    print(f"Span {repr(span.span)} not found in input_ids, skipping entity")
-                    self._num_skipped_spans += 1
-                    continue
-            
-            if positions_slice is None:
-                continue
-            
-            span_indices = slice_to_list(positions_slice, len(input_ids))
-            if not span_indices:
-                continue
-            
-            cur_idx = positions_slice.start
-            
-            if self.config.last_span_token:
-                # If last_span_token is true, only use the last token of the span
-                span_indices = [span_indices[-1]]
-            
-            # Get indices of tokens to ignore around this span
-            nearby_indices = get_nearby_indices(span_indices)
-            
-            if span.label == 1.0:  # Hallucination
-                positive_indices.extend(span_indices)
-                ignore_indices.extend(nearby_indices)
-                positive_spans.append([span_indices[0], span_indices[-1]])
-            elif span.label == 0.0:  # Supported
-                negative_indices.extend(span_indices)
-                negative_spans.append([span_indices[0], span_indices[-1]])
-            else:  # -100.0 (ignored)
-                ignore_indices.extend(span_indices)
-            
-            self._num_added_spans += 1
-        
-        # Remove duplicates and sort
-        positive_indices = sorted(list(set(positive_indices)))
-        negative_indices = sorted(list(set(negative_indices) - set(positive_indices)))
-        ignore_indices = sorted(list(set(ignore_indices) - set(positive_indices) - set(negative_indices)))
-        
-        # Initialize labels and weights
-        default_label = -100.0 if self.config.default_ignore else 0.0
-        labels = torch.full((len(input_ids),), default_label, dtype=torch.float32)
-        
-        # Set labels and weights
-        labels[input_ids == self.tokenizer.pad_token_id] = -100.0
-        labels[:completion_start_idx] = -100.0
-        labels[ignore_indices] = -100.0
-        labels[positive_indices] = 1.0
-        labels[negative_indices] = 0.0
-        
-        weights = torch.full((len(input_ids),), 1.0, dtype=torch.float32)
-        weights[ignore_indices] = 0.0  # N/A weight
-        weights[positive_indices] = self.config.pos_weight
-        weights[negative_indices] = self.config.neg_weight
-        
-        if self.debug_mode:
-            self.print_token_labels(input_ids, positive_indices, negative_indices, ignore_indices, spans)
-        
-        return labels, weights, positive_spans, negative_spans
-
-    def _compute_token_level_labels(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        completion_start_idx: int,
-        item: ProbingItem,
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[List[int]], List[List[int]]]:
-        """Map precomputed token-level scores onto the tokenized assistant response."""
-        labels = torch.full((len(input_ids),), -100.0, dtype=torch.float32)
-        weights = torch.zeros((len(input_ids),), dtype=torch.float32)
-
-        token_labels = torch.tensor(item.token_labels, dtype=torch.float32)
-        available_completion_indices = torch.where(
-            (attention_mask == 1)
-            & (torch.arange(len(input_ids), device=attention_mask.device) >= completion_start_idx)
-            & (input_ids != self.tokenizer.pad_token_id)
-        )[0]
-        try:
-            completion_slice = find_string_in_tokens(
-                item.completion,
-                input_ids[completion_start_idx:],
-                self.tokenizer,
-            )
-            completion_start = completion_start_idx + completion_slice.start
-            completion_stop = completion_start_idx + completion_slice.stop
-            available_completion_indices = torch.arange(
-                completion_start,
-                completion_stop,
-                device=attention_mask.device,
-            )
-        except (AssertionError, ValueError):
-            pass
-
-        if len(token_labels) == 0 or len(available_completion_indices) == 0:
-            return labels, weights, [], []
-
-        num_labels = min(len(token_labels), len(available_completion_indices))
-        if len(token_labels) != len(available_completion_indices):
-            print(
-                f"Token-label count mismatch for item: got {len(token_labels)} labels "
-                f"and {len(available_completion_indices)} assistant tokens. "
-                f"Using first {num_labels} aligned positions."
-            )
-
-        target_indices = available_completion_indices[:num_labels].cpu()
-        labels[target_indices] = token_labels[:num_labels]
-
-        valid_mask = labels != -100.0
-        weights[valid_mask] = 1.0
-
-        self._num_added_spans += int(valid_mask.sum().item())
-        self._num_skipped_spans += max(0, len(token_labels) - num_labels)
-
-        return labels, weights, [], []
-    
-    def _shuffle_items(self):
-        """Shuffle the items using the configured seed."""
-        random.seed(self.config.seed)
-        random.shuffle(self.items)
-        random.seed(self.config.seed)
-        random.shuffle(self.processed_items)
-    
-    def __len__(self):
-        return len(self.items)
-    
-    def __getitem__(self, idx):
-        if self.config.process_on_the_fly and self.processed_items[idx] is None:
-            self.processed_items[idx] = self._process_item(self.items[idx])
-        
-        return self.processed_items[idx]
-    
-    def __add__(self, other):
-        """
-        Concatenate two TokenizedProbingDataset instances.
-        
-        Args:
-            other: Another TokenizedProbingDataset instance to concatenate
-            
-        Returns:
-            TokenizedProbingDataset: A new dataset containing items from both
-        """
-        if not isinstance(other, TokenizedProbingDataset):
-            raise TypeError(f"Can only concatenate with another TokenizedProbingDataset, got {type(other)}")
-        
-        if self.config.max_length != other.config.max_length:
-            raise ValueError("Can't concatenate datasets of different token lengths")
-        
-        if self.config.shuffle != other.config.shuffle:
-            raise ValueError("Can't concatenate datasets if one of them (but not the other) are shuffled")
-        
-        # Create a new dataset with combined items
-        combined_items = self.items + other.items
-        combined_processed_items = self.processed_items + other.processed_items
-        
-        # Use the configuration from the first dataset
-        new_dataset = TokenizedProbingDataset(
-            items=[],  # we don't want to recompute everything again
-            tokenizer=self.tokenizer,
-            config=self.config,
-        )
-        
-        new_dataset.items = combined_items
-        new_dataset.processed_items = combined_processed_items
-        
-        if self.config.shuffle:
-            new_dataset._shuffle_items()
-        
-        return new_dataset
-    
-    def __radd__(self, other):
-        return self.__add__(other)
+    selected = pd.concat([positives, sampled_negatives], ignore_index=True)
+    if selected.empty:
+        return selected
+    return selected.sort_values(["domain", "prompt_id", "rollout_idx"], kind="stable").reset_index(drop=True)
 
 
-def tokenized_probing_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-    """
-    Collate function for DataLoader that handles variable-length tokenized sequences.
-    
-    Args:
-        batch: List of tokenized dataset items
-    
-    Returns:
-        Batched dictionary with padded sequences
-    """
-    # Find max length in batch
-    max_len = max(len(item["input_ids"]) for item in batch)
-    
-    # Initialize batched tensors
-    batch_size = len(batch)
-    input_ids = torch.full((batch_size, max_len), 0, dtype=torch.long)
-    attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
-    classification_labels = torch.full((batch_size, max_len), -100.0, dtype=torch.float32)
-    classification_weights = torch.zeros((batch_size, max_len), dtype=torch.float32)
-    lm_labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
-    
-    # Lists for spans
-    pos_spans = []
-    neg_spans = []
-    
-    # Fill in the batch
-    for i, item in enumerate(batch):
-        seq_len = len(item["input_ids"])
-        input_ids[i, :seq_len] = item["input_ids"]
-        attention_mask[i, :seq_len] = item["attention_mask"]
-        classification_labels[i, :seq_len] = item["classification_labels"]
-        classification_weights[i, :seq_len] = item["classification_weights"]
-        lm_labels[i, :seq_len] = item["lm_labels"]
-        pos_spans.append(item["pos_spans"])
-        neg_spans.append(item["neg_spans"])
-    
+def _resolve_repo_path(path: str) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+
+
+def _source_names(config: dict) -> set[str]:
     return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "classification_labels": classification_labels,
-        "classification_weights": classification_weights,
-        "lm_labels": lm_labels,
-        "pos_spans": pos_spans,
-        "neg_spans": neg_spans,
+        source["name"]
+        for key in ("in_domain_sources", "held_out_sources")
+        for source in config.get(key, [])
     }
 
 
-def create_probing_dataset(
-    cfg: TokenizedProbingDatasetConfig,
-    tokenizer: AutoTokenizer
-) -> TokenizedProbingDataset:
-    """
-    Create a probing dataset from configuration.
-    
-    This loads the dataset from HuggingFace and processes it using the
-    appropriate dataset-specific preparation function.
-    """
-    # Lazy import to avoid circular dependency
-    
-    # Load dataset from HuggingFace
-    if cfg.subset:
-        raw_hf_dataset = datasets.load_dataset(cfg.hf_repo, cfg.subset, split=cfg.split)
-    else:
-        raw_hf_dataset = datasets.load_dataset(cfg.hf_repo, split=cfg.split)
+def validate_build_artifacts(config: DatasetConfig) -> None:
+    """Fail on missing artifacts and warn when generation metadata is stale."""
+    root = Path(config.build_root)
+    prompts = root / "prompts" / "prompts.parquet"
+    onset = root / "onset_labels" / "onset_labels.parquet"
+    for required in (prompts, onset):
+        if not required.is_file():
+            raise FileNotFoundError(f"Required dataset artifact not found: {required}")
 
-    # Handle max_num_samples
-    if cfg.max_num_samples is not None:
-        if cfg.shuffle:
-            print(f"Shuffling and truncating dataset to {cfg.max_num_samples} / {len(raw_hf_dataset)} samples")
-            assert cfg.seed is not None, "Seed must be provided if shuffle is True"
-            raw_hf_dataset = raw_hf_dataset.shuffle(seed=cfg.seed)
+    onset_df = pd.read_parquet(onset, columns=["domain"])
+    for domain in sorted(onset_df["domain"].dropna().unique()):
+        for artifact in ("generations", "labels"):
+            shards = sorted((root / artifact / str(domain)).glob("*.parquet"))
+            if not shards:
+                raise FileNotFoundError(f"No {artifact} Parquet shard found for domain {domain!r}")
+
+    build_config_path = _resolve_repo_path(config.build_config)
+    manifest_path = root / "manifest.json"
+    if not build_config_path.is_file() or not manifest_path.is_file():
+        missing = build_config_path if not build_config_path.is_file() else manifest_path
+        warnings.warn(f"Cannot compare dataset metadata because {missing} is missing", stacklevel=2)
+        return
+
+    import yaml
+
+    with build_config_path.open("r", encoding="utf-8") as handle:
+        expected = yaml.safe_load(handle)
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        materialized = json.load(handle).get("config", {})
+    mismatch = (
+        expected.get("model_name") != materialized.get("model_name")
+        or _source_names(expected) != _source_names(materialized)
+    )
+    if mismatch:
+        warnings.warn(
+            "The build YAML and manifest.json disagree. Required artifacts were verified; "
+            "onset_labels.parquet remains the source of truth for domains and splits.",
+            stacklevel=2,
+        )
+
+
+def _read_selected_domain_shards(
+    root: Path,
+    artifact: str,
+    selected: pd.DataFrame,
+    columns: List[str],
+) -> pd.DataFrame:
+    """Read one domain at a time and immediately discard unselected rows."""
+    frames = []
+    keys = ["prompt_id", "rollout_idx"]
+    for domain in sorted(selected["domain"].astype(str).unique()):
+        selected_keys = selected.loc[selected["domain"].astype(str) == domain, keys]
+        shard_paths = sorted((root / artifact / domain).glob("*.parquet"))
+        for path in shard_paths:
+            shard = pd.read_parquet(path, columns=columns)
+            frames.append(shard.merge(selected_keys, on=keys, how="inner"))
+    return pd.concat(frames, ignore_index=True)
+
+
+def _assert_unique(frame: pd.DataFrame, columns: List[str], name: str) -> None:
+    duplicates = frame.duplicated(columns, keep=False)
+    if duplicates.any():
+        sample = frame.loc[duplicates, columns].head().to_dict("records")
+        raise ValueError(f"Duplicate {name} keys for {columns}: {sample}")
+
+
+def load_degeneration_records(
+    config: DatasetConfig,
+    *,
+    split: str,
+    loss_name: str,
+    training: bool,
+) -> List[DegenerationRecord]:
+    """Join all local artifacts on ``(prompt_id, rollout_idx)``."""
+    if loss_name not in {"bce", "mse"}:
+        raise ValueError(f"Unknown loss {loss_name!r}")
+    validate_build_artifacts(config)
+    root = Path(config.build_root)
+    onset = pd.read_parquet(root / "onset_labels" / "onset_labels.parquet")
+    ratio = (
+        config.sampling.train_negative_rollouts_per_positive
+        if training
+        else config.sampling.evaluation_negative_rollouts_per_positive
+    )
+    selected = select_rollouts(
+        onset,
+        split=split,
+        negative_rollouts_per_positive=ratio,
+        domain_stratified=config.sampling.domain_stratified,
+        seed=config.sampling.seed,
+    )
+    if selected.empty:
+        raise ValueError(f"No usable rollouts found for split {split!r}")
+
+    keys = ["prompt_id", "rollout_idx"]
+    _assert_unique(selected, keys, "onset label")
+    prompts = pd.read_parquet(
+        root / "prompts" / "prompts.parquet", columns=["prompt_id", "prompt_text"]
+    )
+    selected_prompt_ids = set(selected["prompt_id"])
+    prompts = prompts[prompts["prompt_id"].isin(selected_prompt_ids)].reset_index(drop=True)
+    generations = _read_selected_domain_shards(
+        root,
+        "generations",
+        selected,
+        ["prompt_id", "rollout_idx", "generated_token_ids"],
+    )
+    labels = _read_selected_domain_shards(
+        root,
+        "labels",
+        selected,
+        ["prompt_id", "rollout_idx", "repetition_score"],
+    )
+    _assert_unique(prompts, ["prompt_id"], "prompt")
+    _assert_unique(generations, keys, "generation")
+    _assert_unique(labels, keys, "label")
+
+    merged = selected.merge(prompts, on="prompt_id", how="left", validate="many_to_one")
+    merged = merged.merge(generations, on=keys, how="left", validate="one_to_one")
+    merged = merged.merge(labels, on=keys, how="left", validate="one_to_one")
+    required_columns = ["prompt_text", "generated_token_ids", "repetition_score"]
+    if merged[required_columns].isna().any().any():
+        bad = merged.loc[merged[required_columns].isna().any(axis=1), keys].head().to_dict("records")
+        raise ValueError(f"Dataset join left missing artifacts for rollout keys: {bad}")
+
+    records: List[DegenerationRecord] = []
+    for row in merged.itertuples(index=False):
+        token_ids = np.asarray(row.generated_token_ids, dtype=np.int64)
+        if loss_name == "bce":
+            targets = derive_bce_targets(
+                len(token_ids), stop_reason=row.stop_reason, onset_position=row.onset_position
+            )
+            if targets is None:  # Defensive: select_rollouts already excludes these.
+                continue
         else:
-            print(f"Truncating dataset to first {cfg.max_num_samples} / {len(raw_hf_dataset)} samples")
-        raw_hf_dataset = raw_hf_dataset.select(range(min(cfg.max_num_samples, len(raw_hf_dataset))))
+            targets = derive_mse_targets(row.repetition_score, len(token_ids))
+        targets = np.asarray(targets, dtype=np.float32)
+        if loss_name == "mse" and not np.isfinite(targets).any():
+            continue
+        records.append(
+            DegenerationRecord(
+                prompt_id=str(row.prompt_id),
+                rollout_idx=int(row.rollout_idx),
+                domain=str(row.domain),
+                split=str(row.split),
+                prompt_text=str(row.prompt_text),
+                generated_token_ids=token_ids,
+                targets=targets,
+            )
+        )
+    return records
 
-    print(f"Loading dataset: {cfg.hf_repo} | {cfg.subset} | {cfg.split}")
 
-    # Get appropriate preparation function
-    prepare_function = get_prepare_function(cfg.hf_repo, cfg.subset)
+class DegenerationTokenDataset(Dataset):
+    """Prepend a tokenized prompt while preserving generated token IDs exactly."""
 
-    # Convert HF dataset to list of probing items
-    probing_items: List[ProbingItem] = prepare_function(raw_hf_dataset)
+    def __init__(
+        self,
+        records: List[DegenerationRecord],
+        tokenizer,
+        tokenization: TokenizationConfig,
+        *,
+        shuffle: bool = False,
+        seed: int = 42,
+    ) -> None:
+        self.records = list(records)
+        self.tokenizer = tokenizer
+        self.tokenization = tokenization
+        if shuffle:
+            order = np.random.default_rng(seed).permutation(len(self.records))
+            self.records = [self.records[index] for index in order]
 
-    tokenized_probing_dataset = TokenizedProbingDataset(
-        items=probing_items,
-        config=cfg,
-        tokenizer=tokenizer
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def _prompt_ids(self, prompt: str) -> List[int]:
+        conversation = [{"role": "user", "content": prompt}]
+        try:
+            text = self.tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True
+            )
+        except TypeError:
+            text = self.tokenizer.apply_chat_template(conversation, tokenize=False)
+        if self.tokenizer.bos_token and self.tokenizer.bos_token in text:
+            text = text.replace(self.tokenizer.bos_token, "")
+        return list(
+            self.tokenizer(text, add_special_tokens=False, return_attention_mask=False)["input_ids"]
+        )
+
+    def __getitem__(self, index: int) -> Dict[str, object]:
+        record = self.records[index]
+        completion_ids = record.generated_token_ids[: self.tokenization.max_completion_length]
+        completion_targets = record.targets[: len(completion_ids)]
+        prompt_ids = self._prompt_ids(record.prompt_text)
+        prompt_budget = self.tokenization.max_length - len(completion_ids)
+        if len(prompt_ids) > prompt_budget:
+            prompt_ids = (
+                prompt_ids[-prompt_budget:]
+                if self.tokenization.prompt_truncation_side == "left" and prompt_budget
+                else prompt_ids[:prompt_budget]
+            )
+
+        input_ids = torch.tensor(prompt_ids + list(completion_ids), dtype=torch.long)
+        targets = torch.full((len(input_ids),), float("nan"), dtype=torch.float32)
+        if len(completion_targets):
+            targets[len(prompt_ids) :] = torch.tensor(completion_targets, dtype=torch.float32)
+        target_mask = torch.isfinite(targets)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+            "targets": targets,
+            "target_mask": target_mask,
+            "pad_token_id": self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id is not None
+            else (self.tokenizer.eos_token_id or 0),
+            "prompt_id": record.prompt_id,
+            "rollout_idx": record.rollout_idx,
+            "domain": record.domain,
+            "split": record.split,
+        }
+
+    def target_counts(self) -> Tuple[int, int]:
+        """Return negative and positive valid-token counts for BCE weighting."""
+        negative = positive = 0
+        limit = self.tokenization.max_completion_length
+        for record in self.records:
+            for target in record.targets[:limit]:
+                if not math.isfinite(target):
+                    continue
+                if target == 1.0:
+                    positive += 1
+                elif target == 0.0:
+                    negative += 1
+                else:
+                    raise ValueError("BCE targets must be exactly 0 or 1")
+        return negative, positive
+
+
+def degeneration_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]:
+    max_length = max(len(item["input_ids"]) for item in batch)
+    batch_size = len(batch)
+    pad_token_id = int(batch[0]["pad_token_id"])
+    input_ids = torch.full((batch_size, max_length), pad_token_id, dtype=torch.long)
+    attention_mask = torch.zeros((batch_size, max_length), dtype=torch.long)
+    targets = torch.full((batch_size, max_length), float("nan"), dtype=torch.float32)
+    target_mask = torch.zeros((batch_size, max_length), dtype=torch.bool)
+    for row, item in enumerate(batch):
+        length = len(item["input_ids"])
+        input_ids[row, :length] = item["input_ids"]
+        attention_mask[row, :length] = item["attention_mask"]
+        targets[row, :length] = item["targets"]
+        target_mask[row, :length] = item["target_mask"]
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "targets": targets,
+        "target_mask": target_mask,
+        "prompt_id": [item["prompt_id"] for item in batch],
+        "rollout_idx": [item["rollout_idx"] for item in batch],
+        "domain": [item["domain"] for item in batch],
+        "split": [item["split"] for item in batch],
+    }
+
+
+def create_degeneration_dataset(
+    config: DatasetConfig,
+    tokenizer,
+    *,
+    split: str,
+    loss_name: str,
+    training: bool,
+) -> DegenerationTokenDataset:
+    records = load_degeneration_records(
+        config, split=split, loss_name=loss_name, training=training
+    )
+    return DegenerationTokenDataset(
+        records,
+        tokenizer,
+        config.tokenization,
+        shuffle=training,
+        seed=config.sampling.seed,
     )
 
-    return tokenized_probing_dataset
+
+def compute_pos_weight(dataset: DegenerationTokenDataset) -> float:
+    negative, positive = dataset.target_counts()
+    if positive == 0:
+        raise ValueError("Cannot compute BCE pos_weight: the training set has no positive tokens")
+    return negative / positive

@@ -47,6 +47,7 @@ def get_device() -> torch.device:
 
 def load_model_and_tokenizer(
     model_name: str,
+    tokenizer_name: Optional[str] = None,
     device_map: Optional[Union[str, dict]] = "auto",
     torch_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
@@ -77,7 +78,7 @@ def load_model_and_tokenizer(
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
+        tokenizer_name or model_name,
         trust_remote_code=True,
         padding_side='right'
     )

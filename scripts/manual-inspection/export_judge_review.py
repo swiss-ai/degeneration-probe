@@ -25,7 +25,7 @@ exported -- a failed/unjudged row has no verdict to review yet.
 
 Usage:
     .venv/bin/python scripts/manual-inspection/export_judge_review.py \\
-        --config configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml \\
+        --config configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml \\
         --reviewers alice,bob,carlo \\
         --out-dir /path/to/handoff/dir
 """
@@ -47,7 +47,7 @@ from degeneration_probe.dataset_gen import paths
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
 HTML_APP_PATH = Path(__file__).resolve().parent / "judge_review.html"
 
 # Confidence tiers the judge itself reports, worst-first -- used only to bias

@@ -57,9 +57,8 @@ _ngram_ttr = label_module._ngram_ttr
 sliding_window_repetition = label_module.sliding_window_repetition
 find_longest_repeated_substring = label_module.find_longest_repeated_substring
 _minimal_period = label_module._minimal_period
-_extend_periodic_region = label_module._extend_periodic_region
 _merge_spans = label_module._merge_spans
-_periodic_regions_for_match = label_module._periodic_regions_for_match
+_scan_for_unit_occurrences = label_module._scan_for_unit_occurrences
 label_rollout = label_module.label_rollout
 label_shard = label_module.label_shard
 aggregate_prompt_stats = label_module.aggregate_prompt_stats
@@ -202,7 +201,7 @@ def test_find_longest_repeated_substring_close_repeat_can_still_beat_a_longer_ga
     assert result["lrs_repeated_token_ids"] == [1, 1]
 
 
-# --- _minimal_period / _extend_periodic_region ----------------------------------
+# --- _minimal_period / occurrence scan ------------------------------------------
 
 def test_minimal_period_finds_repeating_unit():
     # [1,2,3,1,2,3]: period-3 (m=6, evenly divisible).
@@ -224,21 +223,19 @@ def test_minimal_period_holds_even_when_it_does_not_evenly_divide_length():
     assert _minimal_period([1, 2, 1, 2, 1]) == 2
 
 
-def test_extend_periodic_region_grows_to_the_full_periodic_run():
+def test_occurrence_scan_merges_a_full_periodic_run():
     # period-3 unit [1,2,3] repeated exactly 4 times, filling the sequence.
     tokens = [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]
-    start, end = _extend_periodic_region(tokens, start=0, period=3)
-    assert (start, end) == (0, 12)
+    assert _scan_for_unit_occurrences(tokens, unit_start=0, period=3) == [(0, 12)]
 
 
-def test_extend_periodic_region_stops_at_a_break():
+def test_occurrence_scan_stops_at_a_break():
     # period-2 unit [1,2] repeated 3 times, then something unrelated.
     tokens = [1, 2, 1, 2, 1, 2, 9, 9, 9]
-    start, end = _extend_periodic_region(tokens, start=0, period=2)
-    assert (start, end) == (0, 6)
+    assert _scan_for_unit_occurrences(tokens, unit_start=0, period=2) == [(0, 6)]
 
 
-# --- _merge_spans / _periodic_regions_for_match ----------------------------------
+# --- _merge_spans / occurrence scan ---------------------------------------------
 
 def test_merge_spans_combines_overlapping_and_touching():
     assert _merge_spans([(0, 5), (5, 10), (20, 25)]) == [(0, 10), (20, 25)]
@@ -248,16 +245,16 @@ def test_merge_spans_keeps_disjoint_spans_separate():
     assert _merge_spans([(8, 13), (0, 5)]) == [(0, 5), (8, 13)]
 
 
-def test_periodic_regions_for_match_merges_when_gap_is_a_multiple_of_period():
+def test_occurrence_scan_merges_when_gap_is_a_multiple_of_period():
     # [1,2,3] repeated 4 times (gap between occurrences 0 and 6 is a multiple
     # of period=3) -- extending from either occurrence reaches the same
     # single contiguous run.
     tokens = [1, 2, 3] * 4
-    regions = _periodic_regions_for_match(tokens, first_start=0, second_start=6, period=3)
+    regions = _scan_for_unit_occurrences(tokens, unit_start=0, period=3)
     assert regions == [(0, 12)]
 
 
-def test_periodic_regions_for_match_keeps_disjoint_when_gap_is_unrelated_content():
+def test_occurrence_scan_keeps_disjoint_when_gap_is_unrelated_content():
     # An atomic (period == length) 5-token chunk repeated at positions 0 and
     # 8, with 3 tokens of unrelated filler in between (gap=8 is not a
     # multiple of period=5) -- the two occurrences must stay two separate
@@ -265,7 +262,7 @@ def test_periodic_regions_for_match_keeps_disjoint_when_gap_is_unrelated_content
     paragraph = [10, 20, 30, 40, 50]
     filler = [99, 98, 97]
     tokens = paragraph + filler + paragraph
-    regions = _periodic_regions_for_match(tokens, first_start=0, second_start=8, period=5)
+    regions = _scan_for_unit_occurrences(tokens, unit_start=0, period=5)
     assert regions == [(0, 5), (8, 13)]
 
 
@@ -332,18 +329,9 @@ def test_find_longest_repeated_substring_atomic_chunk_repeated_with_a_real_gap()
     assert result["lrs_unit_token_ids"] == paragraph
 
 
-def test_find_longest_repeated_substring_finds_all_cycles_despite_a_changing_token():
-    # Regression test (real data: a rollout that loops through the same
-    # broken derivation 9 times, incrementing a step counter every cycle).
-    # The binary search can only ever match the content shared between
-    # exactly two cycles, so its chosen pair can accidentally include one
-    # extra token beyond the true stable unit if two cycles' counters happen
-    # to share a leading digit -- here cycle 0 and cycle 1's marker tokens
-    # are both 77, so the raw match is unit+marker (6 tokens), not just the
-    # 5-token unit. Bug this guards against: without a gap-aligned rescan,
-    # only cycles 0 and 1 are ever found ("repeated 2x"), and every other
-    # cycle -- despite the unit itself being byte-identical throughout -- is
-    # invisible because its marker token differs from 77.
+def test_find_longest_repeated_substring_keeps_the_exact_matched_unit():
+    # The exact LRS match includes the marker shared by the first two cycles.
+    # The occurrence scan does not trim a suffix merely to find more cycles.
     unit = [10, 20, 30, 40, 50]
 
     def cycle(i, marker):
@@ -358,13 +346,11 @@ def test_find_longest_repeated_substring_finds_all_cycles_despite_a_changing_tok
     assert result["lrs_length"] == 6  # unit + the accidentally-shared marker
     assert result["lrs_first_start"] == 0
     assert result["lrs_second_start"] == 8
-    # Trimmed down to the 5-token unit that's actually stable across ALL
-    # six cycles, not the 6-token match that only held for the first pair.
-    assert result["lrs_period"] == 5
-    assert result["lrs_unit_token_ids"] == unit
-    assert result["lrs_region_starts"] == [0, 8, 16, 24, 32, 40]
-    assert result["lrs_region_ends"] == [5, 13, 21, 29, 37, 45]
-    assert result["lrs_period_repeat_count"] == 6
+    assert result["lrs_period"] == 6
+    assert result["lrs_unit_token_ids"] == unit + [77]
+    assert result["lrs_region_starts"] == [0, 8]
+    assert result["lrs_region_ends"] == [6, 14]
+    assert result["lrs_period_repeat_count"] == 2
 
 
 def test_find_longest_repeated_substring_no_match_has_none_period_fields():
@@ -420,23 +406,7 @@ def test_label_shard_produces_one_row_per_rollout_with_expected_columns():
     )
     labels_df = label_shard(generations_df, window_size=4, ttr_ngram=1, lrs_min_length=2)
 
-    assert list(labels_df.columns) == [
-        "prompt_id",
-        "rollout_idx",
-        "repetition_score",
-        "entropy",
-        "lrs_length",
-        "lrs_score",
-        "lrs_first_start",
-        "lrs_second_start",
-        "lrs_gap",
-        "lrs_repeated_token_ids",
-        "lrs_period",
-        "lrs_period_repeat_count",
-        "lrs_region_starts",
-        "lrs_region_ends",
-        "lrs_unit_token_ids",
-    ]
+    assert list(labels_df.columns) == label_module.LABEL_COLUMNS
     assert len(labels_df) == 2
     assert set(labels_df["rollout_idx"]) == {0, 1}
 

@@ -62,7 +62,7 @@ from degeneration_probe.dataset_gen import paths
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "degeneration-dataset-apertus-8b-instruct.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
 
 # HF repos whose total (all-files) size exceeds this many bytes are read in
 # streaming mode with a bounded prefix scan instead of being fully
@@ -392,7 +392,7 @@ def main() -> None:
         "--config",
         type=str,
         default=str(DEFAULT_CONFIG_PATH),
-        help="Path to a DatasetGenConfig YAML file (default: configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml).",
+        help="Path to the DatasetGenConfig YAML file.",
     )
     args = parser.parse_args()
 

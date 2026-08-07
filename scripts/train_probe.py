@@ -1,244 +1,195 @@
-"""Training script for hallucination detection probes."""
-import hydra
-from omegaconf import DictConfig, OmegaConf
+"""Train the scalar degeneration probe from the local materialized dataset."""
 
-import os
-import json
+from __future__ import annotations
+
 import atexit
 import sys
-from pathlib import Path
-from typing import List
 from dataclasses import asdict
-import argparse
+from pathlib import Path
 
-# When running as `python probe/train.py`, prefer local repo modules over any
-# previously installed `probe` package from site-packages.
-REPO_ROOT = Path(__file__).resolve().parent.parent
+import hydra
+import torch
+from dotenv import load_dotenv
+from hydra.utils import to_absolute_path
+from omegaconf import DictConfig, OmegaConf
+from transformers import TrainerCallback, TrainingArguments
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import torch
-import wandb
-from torch.utils.data import Subset
-from transformers import TrainingArguments, TrainerCallback
-from dotenv import load_dotenv
-
-from degeneration_probe.utils.file_utils import save_jsonl, save_json, load_yaml
-from degeneration_probe.utils.model_utils import load_model_and_tokenizer, print_trainable_parameters, resolve_torch_dtype
-from degeneration_probe.utils.probe_loader import upload_probe_to_hf
-
-from degeneration_probe.data.dataset import TokenizedProbingDataset, create_probing_dataset, tokenized_probing_collate_fn
-from degeneration_probe.config import TrainingConfig
-from degeneration_probe.probes.value_head_probe import setup_probe
+from degeneration_probe.config import ExperimentConfig
+from degeneration_probe.data.dataset import (
+    compute_pos_weight,
+    create_degeneration_dataset,
+    degeneration_collate_fn,
+)
+from degeneration_probe.evaluation.metrics import build_validation_metrics
+from degeneration_probe.probes.linear_probe import setup_probe
 from degeneration_probe.training.trainer import ProbeTrainer
+from degeneration_probe.utils.file_utils import save_json
+from degeneration_probe.utils.model_utils import (
+    load_model_and_tokenizer,
+    print_trainable_parameters,
+    resolve_torch_dtype,
+)
 
 
-def main(training_config: TrainingConfig):
-    """Main training function."""
-
-    # Load environment variables from .env if present
+def run(config: ExperimentConfig, resolved_config: dict) -> dict:
     load_dotenv()
+    # Validate extension names before allocating the language model.
+    build_validation_metrics(config.training.validation.metrics)
+    output_dir = Path(to_absolute_path(config.training.checkpoint.output_dir))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_json(resolved_config, output_dir / "resolved_config.json")
 
-    if training_config.upload_to_hf:
-        assert os.environ.get("HF_WRITE_TOKEN", None) is not None
-    
-    wandb.init(project=training_config.wandb_project, 
-               name=training_config.probe_config.probe_id,
-               tags=training_config.wandb_tags or None,
+    tracking_enabled = config.training.wandb.enabled and config.training.wandb.mode != "disabled"
+    if tracking_enabled:
+        import wandb
+
+        wandb.init(
+            project=config.training.wandb.project,
+            name=config.training.wandb.name,
+            tags=config.training.wandb.tags or None,
+            mode=config.training.wandb.mode,
+            config=resolved_config,
         )
 
-    print("Training config:")
-    for key, value in asdict(training_config).items():
-        print(f"\t{key}: {value}")
-
-    # Load model and tokenizer
-    print(f"Loading model: {training_config.probe_config.model_name}")
+    print("Resolved config:")
+    print(OmegaConf.to_yaml(OmegaConf.create(resolved_config), resolve=True))
     model, tokenizer = load_model_and_tokenizer(
-        training_config.probe_config.model_name,
-        torch_dtype=resolve_torch_dtype(training_config.model_dtype),
+        config.model.name,
+        tokenizer_name=config.model.tokenizer_name,
+        torch_dtype=resolve_torch_dtype(config.model.dtype),
     )
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    if config.training.runtime.gradient_checkpointing and hasattr(
+        model, "gradient_checkpointing_enable"
+    ):
+        model.gradient_checkpointing_enable()
 
-    if hasattr(model, 'config'):
-        try:
-            model.config.use_cache = False
-        except Exception:
-            pass
-    if training_config.enable_gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
-        try:
-            model.gradient_checkpointing_enable()
-        except Exception:
-            pass
-    
-    print(f"Setting up probe: {training_config.probe_config.probe_id}")
-    model, probe = setup_probe(model, training_config.probe_config, seed=training_config.seed)
-
+    _, probe = setup_probe(
+        model,
+        config.training.probe,
+        config.training.lora,
+        seed=config.training.runtime.seed,
+    )
     print_trainable_parameters(probe)
 
-    # Load datasets
-    print("Loading datasets:")
-    train_datasets: List[TokenizedProbingDataset] = [
-        create_probing_dataset(config, tokenizer)
-        for config in training_config.train_dataset_configs
-    ]
-    eval_datasets: List[TokenizedProbingDataset] = [
-        create_probing_dataset(config, tokenizer)
-        for config in training_config.eval_dataset_configs
-    ]
-    
-    # Concatenate training datasets
-    train_dataset = train_datasets[0]
-    for dataset in train_datasets[1:]:
-        train_dataset += dataset
-
-    # If requested, shuffle and shave down the training dataset to a fixed number of samples
-    if training_config.num_train_samples is not None:
-        total = len(train_dataset)
-        num = max(0, min(int(training_config.num_train_samples), total))
-        if num < total:
-            g = torch.Generator()
-            g.manual_seed(training_config.seed)
-            perm = torch.randperm(total, generator=g).tolist()
-            selected_indices = perm[:num]
-            train_dataset = Subset(train_dataset, selected_indices)
-            print(f"Using a subset of the training dataset: {num}/{total} samples")
-
-    eval_strategy = training_config.evaluation_strategy
-    if eval_strategy == "steps" and training_config.eval_steps is None:
-        eval_strategy = "no"
-    hf_eval_dataset = eval_datasets[0] if eval_strategy != "no" and eval_datasets else None
-
-    training_args = TrainingArguments(
-        output_dir=str(training_config.probe_config.probe_path),
-        per_device_train_batch_size=training_config.per_device_train_batch_size,
-        per_device_eval_batch_size=training_config.per_device_eval_batch_size,
-        max_steps=training_config.max_steps,
-        num_train_epochs=training_config.num_train_epochs,
-        logging_steps=training_config.logging_steps,
-        eval_steps=training_config.eval_steps,
-        remove_unused_columns=False,
-        label_names=["classification_labels", "lm_labels"],
-        report_to="wandb",
-        run_name=training_config.probe_config.probe_id,
-        eval_strategy=eval_strategy,
-        logging_first_step=True,
-        logging_strategy="steps",
-        max_grad_norm=training_config.max_grad_norm,
-        gradient_accumulation_steps=training_config.gradient_accumulation_steps,
-        learning_rate=training_config.learning_rate,
-        seed=training_config.seed,
+    loss_name = config.training.loss.name
+    splits = config.dataset.splits
+    train_dataset = create_degeneration_dataset(
+        config.dataset,
+        tokenizer,
+        split=splits.train,
+        loss_name=loss_name,
+        training=True,
     )
-    
-    # Add separate learning rates to training_args
-    training_args.probe_head_lr = training_config.probe_head_lr
-    training_args.lora_lr = training_config.lora_lr
+    validation_dataset = create_degeneration_dataset(
+        config.dataset,
+        tokenizer,
+        split=splits.validation,
+        loss_name=loss_name,
+        training=False,
+    )
+    test_indomain_dataset = create_degeneration_dataset(
+        config.dataset,
+        tokenizer,
+        split=splits.test_indomain,
+        loss_name=loss_name,
+        training=False,
+    )
+    test_heldout_dataset = create_degeneration_dataset(
+        config.dataset,
+        tokenizer,
+        split=splits.test_heldout_domains,
+        loss_name=loss_name,
+        training=False,
+    )
+    pos_weight = None
+    if loss_name == "bce":
+        pos_weight = (
+            compute_pos_weight(train_dataset)
+            if config.training.loss.bce.use_pos_weight
+            else 1.0
+        )
+        print(f"Training BCE pos_weight: {pos_weight:.6g}")
 
-    # Disable checkpoint saving
-    # (there's a weird bug that occurs when trying to save during training)
-    training_args.set_save(strategy="no")
+    runtime = config.training.runtime
+    validation = config.training.validation
+    training_args = TrainingArguments(
+        output_dir=str(output_dir),
+        per_device_train_batch_size=runtime.per_device_train_batch_size,
+        per_device_eval_batch_size=runtime.per_device_eval_batch_size,
+        gradient_accumulation_steps=runtime.gradient_accumulation_steps,
+        num_train_epochs=runtime.num_train_epochs,
+        max_steps=runtime.max_steps,
+        max_grad_norm=runtime.max_grad_norm,
+        logging_steps=runtime.logging_steps,
+        dataloader_num_workers=runtime.dataloader_num_workers,
+        eval_strategy=validation.strategy,
+        eval_steps=validation.steps,
+        save_strategy="no",
+        remove_unused_columns=False,
+        label_names=["targets"],
+        report_to=["wandb"] if tracking_enabled else [],
+        run_name=config.training.wandb.name,
+        learning_rate=config.training.optimizer.probe_learning_rate,
+        weight_decay=config.training.optimizer.weight_decay,
+        seed=runtime.seed,
+        logging_first_step=True,
+    )
 
     trainer = ProbeTrainer(
-        probe=probe,
-        eval_datasets=eval_datasets,
-        cfg=training_config,
+        model=probe,
+        cfg=config.training,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=hf_eval_dataset,
-        data_collator=tokenized_probing_collate_fn,
-        eval_steps=training_config.eval_steps,
-        tokenizer=tokenizer,
+        eval_dataset=validation_dataset,
+        validation_dataset=validation_dataset,
+        final_evaluation_datasets={
+            splits.validation: validation_dataset,
+            splits.test_indomain: test_indomain_dataset,
+            splits.test_heldout_domains: test_heldout_dataset,
+        },
+        pos_weight=pos_weight,
+        data_collator=degeneration_collate_fn,
     )
 
-    def save_model_callback(epoch=None):
-        """Save probe weights, tokenizer and training config to disk.
+    def save_checkpoint(path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        probe.save(path)
+        tokenizer.save_pretrained(path)
+        save_json(asdict(config), path / "training_config.json")
 
-        If epoch is provided, save into probe_path/epoch_{epoch}; otherwise
-        save into probe_path (final/exit checkpoint).
-        """
-        base_path = training_config.probe_config.probe_path
-        save_path = base_path / f"epoch_{epoch}" if epoch is not None else base_path
-        save_path.mkdir(parents=True, exist_ok=True)
-        probe.save(save_path)
-        tokenizer.save_pretrained(save_path)
-        save_json(training_config, save_path / "training_config.json")
-        print(f"Saved checkpoint to {save_path}")
-
-    class SaveEpochCheckpointCallback(TrainerCallback):
+    class EpochCheckpointCallback(TrainerCallback):
         def on_epoch_end(self, args, state, control, **kwargs):
-            epoch = int(round(state.epoch)) if state.epoch is not None else 0
-            save_model_callback(epoch=epoch)
+            if config.training.checkpoint.save_each_epoch:
+                epoch = int(round(state.epoch or 0))
+                save_checkpoint(output_dir / f"epoch_{epoch}")
 
-    trainer.add_callback(SaveEpochCheckpointCallback())
-
-    # Register save callback for unexpected exits
-    atexit.register(save_model_callback)
-
-    print("Training...")
+    trainer.add_callback(EpochCheckpointCallback())
+    atexit.register(save_checkpoint, output_dir)
     trainer.train()
+    save_checkpoint(output_dir)
+    final_metrics = trainer.evaluate_final()
+    save_json(final_metrics, output_dir / "final_evaluation.json")
+    atexit.unregister(save_checkpoint)
 
-    # Save the model
-    print(f"Saving model to {training_config.probe_config.probe_path}")
-    save_model_callback()
+    if tracking_enabled:
+        import wandb
 
-    # Force the final evaluation to run even if step/epoch evals already populated
-    # the cache — we need the raw-prediction dump and ROC artifacts.
-    trainer._last_eval_metrics = None
-    eval_metrics = trainer.evaluate(
-        save_roc_curves=training_config.save_roc_curves,
-        dump_raw_eval_results=training_config.dump_raw_eval_results,
-        verbose=True,
-    )
+        wandb.finish()
+    return final_metrics
 
-    if training_config.save_evaluation_metrics:
-        save_json(
-            eval_metrics,
-            training_config.probe_config.probe_path / "evaluation_results.json"
-        )
-
-    wandb.finish()
-
-    if training_config.upload_to_hf:
-        print(f"Uploading probe to HuggingFace Hub...")
-        try:
-            upload_probe_to_hf(
-                repo_id=training_config.probe_config.hf_repo_id,
-                probe_id=training_config.probe_config.probe_id,
-                token=os.environ.get("HF_WRITE_TOKEN"),
-            )
-        except Exception as exc:
-            print(f"WARNING: Upload to HuggingFace failed: {exc}")
-            print("WARNING: Training completed and artifacts remain available locally.")
 
 @hydra.main(version_base="1.3", config_path="../configs", config_name="main")
-def hydra_entry(cfg: DictConfig):
-    """
-    Hydra parses the yaml files and overrides, then passes a DictConfig here.
-    We convert it to a standard Python dictionary, then unpack it into your
-    existing TrainingConfig dataclass.
-    """
-    # 1. Convert DictConfig to a standard dictionary recursively
-    config_dict = OmegaConf.to_container(cfg, resolve=True)
+def hydra_entry(cfg: DictConfig) -> None:
+    resolved = OmegaConf.to_container(cfg, resolve=True)
+    experiment = ExperimentConfig.from_dict(resolved)
+    run(experiment, resolved)
 
-    # remove hydra artifacts
-    config_dict.pop("model", None)
-    config_dict.pop("training", None)
-    config_dict.pop("dataset", None)
-    
-    # 2. Instantiate your existing dataclass
-    training_config = TrainingConfig(**config_dict)
-
-    # Optional: redirect outputs to a custom dir (e.g. a per-run timestamped folder)
-    # set via $PROBE_OUTPUT_DIR before launching. Falls back to LOCAL_PROBES_DIR/<probe_id>.
-    custom_output = os.environ.get("PROBE_OUTPUT_DIR")
-    if custom_output:
-        new_probe_path = Path(custom_output) / training_config.probe_config.probe_id
-        training_config.probe_config.probe_path = new_probe_path
-        training_config.output_dir = new_probe_path / "evaluation_results"
-        print(f"[train_probe] PROBE_OUTPUT_DIR set → probe_path={new_probe_path}")
-
-    # 3. Call your original main function
-    main(training_config)
 
 if __name__ == "__main__":
-    # Remove the argparse block entirely
-
     hydra_entry()
