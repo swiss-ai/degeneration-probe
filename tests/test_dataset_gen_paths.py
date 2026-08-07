@@ -16,9 +16,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_GEN_DIR = REPO_ROOT / "degeneration_probe" / "dataset_gen"
-APERTUS_INSTRUCT_YAML = (
-    REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
-)
+BUILD_CONFIG_DIR = REPO_ROOT / "configs" / "dataset" / "builds"
+APERTUS_INSTRUCT_YAML = BUILD_CONFIG_DIR / "degeneration-dataset-apertus-8b-instruct.yaml"
+ALL_DATASET_YAMLS = sorted(BUILD_CONFIG_DIR.glob("degeneration-dataset-*.yaml"))
 
 
 def _load_module(name: str, file_path: Path):
@@ -197,6 +197,32 @@ def test_dataset_yaml_points_at_its_own_output_root():
     loaded = DatasetGenConfig.from_yaml(APERTUS_INSTRUCT_YAML)
     assert loaded.output_root.name == APERTUS_INSTRUCT_YAML.stem
     assert loaded.work_root.name == f"{APERTUS_INSTRUCT_YAML.stem}_work"
+
+
+@pytest.mark.parametrize("yaml_path", ALL_DATASET_YAMLS, ids=lambda path: path.stem)
+def test_every_dataset_build_config_loads_and_uses_its_own_roots(yaml_path):
+    loaded = DatasetGenConfig.from_yaml(yaml_path)
+    assert loaded.output_root.name == yaml_path.stem
+    assert loaded.work_root.name == f"{yaml_path.stem}_work"
+
+
+def test_all_dataset_builds_keep_identical_sampling_parameters():
+    assert len(ALL_DATASET_YAMLS) == 3
+    configs = [DatasetGenConfig.from_yaml(path) for path in ALL_DATASET_YAMLS]
+    comparable_fields = [
+        "in_domain_sources",
+        "held_out_sources",
+        "n_rollouts_per_prompt",
+        "max_new_tokens",
+        "temperature",
+        "top_p",
+        "seed",
+        "split_fractions",
+    ]
+    for other in configs[1:]:
+        for field_name in comparable_fields:
+            assert getattr(other, field_name) == getattr(configs[0], field_name), field_name
+    assert len({config.model_name for config in configs}) == 3
 
 
 def test_source_missing_required_key_raises():

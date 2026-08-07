@@ -14,8 +14,9 @@ Hydra composes three independent groups from `configs/main.yaml`:
 - `configs/dataset/degeneration-dataset-apertus-8b-instruct.yaml`: materialized
   build path, splits, tokenization and sampling.
 
-The separate generation recipe is in
-`configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml`.
+The generation recipes for all `degeneration-dataset-*` builds are kept
+separately under `configs/dataset/builds/`. Training still defaults to the
+materialized Apertus-8B-Instruct build.
 
 ## Training
 
