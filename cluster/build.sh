@@ -28,7 +28,12 @@ podman build \
 
 echo "Saving image to ${CE_IMAGE_DIR}/${TAG_FILE_NAME}..."
 
-enroot import -o ${CE_IMAGE_DIR}/${TAG_FILE_NAME} podman://${TAG} || true
+# enroot refuses to write over an existing image, so the old one goes first.
+# Without that, a failed import leaves the previous image in place and every
+# check below still passes, which reports a build that never happened.
+rm -f ${CE_IMAGE_DIR}/${TAG_FILE_NAME}
+
+enroot import -o ${CE_IMAGE_DIR}/${TAG_FILE_NAME} podman://${TAG}
 
 # Verify the file actually exists and is non-empty
 [[ -s ${CE_IMAGE_DIR}/${TAG_FILE_NAME} ]] \
