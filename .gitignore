@@ -29,3 +29,6 @@ outputs/
 
 # notebook-generated figures (rendered prompt/rollout images, not source)
 notebooks/figures/
+
+# marimo's own session/autosave cache
+__marimo__/

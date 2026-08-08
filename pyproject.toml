@@ -29,6 +29,7 @@ dependencies = [
   "hydra-core>=1.3",
   "omegaconf>=2.3",   # Hydra depends on this, good to pin explicitly
   "ipywidgets>=8.1.8",
+  "marimo>=0.9.0",
   # LLM judge (degeneration_probe/dataset_gen/llm_judge.py)
   "anthropic>=0.75.0",
   "openai>=2.6.0",
