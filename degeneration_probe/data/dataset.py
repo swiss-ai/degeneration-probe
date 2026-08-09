@@ -30,6 +30,10 @@ class DegenerationRecord:
     prompt_text: str
     generated_token_ids: Sequence[int]
     targets: Sequence[float]
+    # Carried so a selection rule can anchor on the frontier without
+    # re-deriving it from the targets, which a soft label makes ambiguous.
+    is_positive: bool = False
+    onset_position: Optional[int] = None
 
 
 def derive_bce_targets(
@@ -279,6 +283,10 @@ def load_degeneration_records(
                 prompt_text=str(row.prompt_text),
                 generated_token_ids=token_ids,
                 targets=targets,
+                is_positive=bool(row.stop_reason != "eos" and pd.notna(row.onset_position)),
+                onset_position=int(row.onset_position)
+                if pd.notna(row.onset_position)
+                else None,
             )
         )
     return records
