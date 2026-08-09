@@ -43,11 +43,13 @@ def test_evaluation_keys_for_each_final_split(split):
     assert set(
         [
             f"{split}/loss",
-            f"{split}/bce_loss",
             f"{split}/valid_tokens",
             f"{split}/target_mean",
             f"{split}/prediction_mean",
+            f"{split}/prediction_std",
             f"{split}/pos_weight",
         ]
     ).issubset(metrics)
     assert metrics[f"{split}/valid_tokens"] == 2
+    # The loss is reported once, under a name that does not change with the loss.
+    assert f"{split}/bce_loss" not in metrics

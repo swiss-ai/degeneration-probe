@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, Optional
 
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from transformers import Trainer
 
@@ -15,6 +15,16 @@ from degeneration_probe.training.loss import compute_degeneration_loss
 
 
 class ProbeTrainer(Trainer):
+    """Trains the probe head and, when enabled, the adapters underneath it.
+
+    Checkpointing is overridden throughout: the trained parameters are a linear
+    head plus optional adapters, a few megabytes in total, while the frozen
+    language model they sit on is fully described by the configuration. Saving
+    only the trained part keeps checkpoints cheap enough to write on the
+    validation cadence, which is what makes a run both resumable and able to
+    keep its best step rather than only its last one.
+    """
+
     def __init__(
         self,
         *,
@@ -25,15 +35,28 @@ class ProbeTrainer(Trainer):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        if self.args.n_gpu > 1:
+            # The probe reads its layer through a forward hook on the language
+            # model. Replicating the module across devices leaves the capture on
+            # a different device from the head that consumes it, so the failure
+            # is a device mismatch deep in a forward pass rather than anything
+            # readable. One visible device keeps that impossible.
+            raise ValueError(
+                f"{self.args.n_gpu} visible GPUs: the degeneration probe runs on a single "
+                "device. Restrict the job with CUDA_VISIBLE_DEVICES."
+            )
         self.cfg = cfg
         self.loss_name = cfg.loss.name
         self.validation_dataset = validation_dataset
         self.final_evaluation_datasets = final_evaluation_datasets
         self.pos_weight = pos_weight
-        self._last_diagnostic_step = -1
+        self._diagnostics: Dict[str, float] = {}
+        self._diagnostic_batches = 0
+
+    # ---- training ----
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        device = model.module.device if isinstance(model, nn.DataParallel) else model.device
+        device = model.device
         targets = inputs["targets"].to(device)
         target_mask = inputs["target_mask"].to(device)
         outputs = model(
@@ -48,28 +71,55 @@ class ProbeTrainer(Trainer):
             target_mask,
             pos_weight=self.pos_weight,
         )
-        if self.state.global_step != self._last_diagnostic_step:
-            valid = target_mask & torch.isfinite(targets)
-            predictions = torch.sigmoid(logits[valid].float())
-            diagnostics = {
-                f"train/{self.loss_name}_loss": float(loss.detach().item()),
-                "train/active_tokens": active_tokens,
-                "train/target_mean": float(targets[valid].float().mean().item()),
-                "train/prediction_mean": float(predictions.mean().item()),
-            }
-            if self.loss_name == "bce" and self.pos_weight is not None:
-                diagnostics["train/pos_weight"] = float(self.pos_weight)
-            self.log(diagnostics)
-            self._last_diagnostic_step = self.state.global_step
+        self._accumulate_diagnostics(logits, targets, target_mask, active_tokens)
         if return_outputs:
             outputs["loss"] = loss
             return loss, outputs
         return loss
 
+    @torch.no_grad()
+    def _accumulate_diagnostics(self, logits, targets, target_mask, active_tokens: int) -> None:
+        """Collect per-batch statistics, averaged into the next log record.
+
+        Emitting these on their own cadence would double the number of records
+        and leave the history with gaps in every column; folding them into the
+        regular training record keeps one row per logged step.
+        """
+        valid = target_mask.bool() & torch.isfinite(targets)
+        if not valid.any():
+            return
+        predictions = torch.sigmoid(logits[valid].float())
+        batch = {
+            "train/active_tokens": float(active_tokens),
+            "train/target_mean": float(targets[valid].float().mean()),
+            "train/prediction_mean": float(predictions.mean()),
+            "train/prediction_std": float(predictions.std(unbiased=False)),
+        }
+        for key, value in batch.items():
+            self._diagnostics[key] = self._diagnostics.get(key, 0.0) + value
+        self._diagnostic_batches += 1
+
+    def _drain_diagnostics(self) -> Dict[str, float]:
+        if not self._diagnostic_batches:
+            return {}
+        drained = {
+            key: value / self._diagnostic_batches for key, value in self._diagnostics.items()
+        }
+        if self.pos_weight is not None:
+            drained["train/pos_weight"] = float(self.pos_weight)
+        self._diagnostics.clear()
+        self._diagnostic_batches = 0
+        return drained
+
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
+        if "loss" in logs:
+            logs = {**logs, **self._drain_diagnostics()}
+        super().log(logs, start_time)
+
     def create_optimizer(self):
         if self.optimizer is not None:
             return self.optimizer
-        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        model = self.model
         probe_parameters = []
         lora_parameters = []
         unexpected = []
@@ -104,7 +154,31 @@ class ProbeTrainer(Trainer):
         self.optimizer = AdamW(groups)
         return self.optimizer
 
+    # ---- checkpointing ----
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None) -> None:
+        """Write the trained parameters only, never the frozen backbone."""
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        self.model.save(Path(output_dir))
+
+    def _load_from_checkpoint(self, resume_from_checkpoint: str, model=None) -> None:
+        (model or self.model).load_weights(Path(resume_from_checkpoint))
+
+    def _load_best_model(self) -> None:
+        if not self.state.best_model_checkpoint:
+            return
+        self._load_from_checkpoint(self.state.best_model_checkpoint)
+
+    # ---- evaluation ----
+
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", **kwargs):
+        """Score the monitoring split and expose the result under both names.
+
+        Metrics are namespaced (``val/...``) for readability in the tracker and
+        mirrored with an ``eval_`` prefix, which is the form best-checkpoint
+        selection and early stopping key off, so any monitored quantity can
+        drive selection without further plumbing.
+        """
         dataset = eval_dataset if eval_dataset is not None else self.validation_dataset
         dataloader = self.get_eval_dataloader(dataset)
         model = self._wrap_model(self.model, training=False, dataloader=dataloader).eval()
@@ -116,11 +190,20 @@ class ProbeTrainer(Trainer):
             pos_weight=self.pos_weight,
             metric_names=self.cfg.validation.metrics,
         )
-        metrics["eval_loss"] = metrics["val/loss"]
-        self.log(metrics)
+        self.log(dict(metrics))
+        for key, value in list(metrics.items()):
+            metrics[f"eval_{key.split('/', 1)[1].replace('/', '_')}"] = value
+        self.control = self.callback_handler.on_evaluate(
+            self.args, self.state, self.control, metrics
+        )
         return metrics
 
     def evaluate_final(self) -> Dict[str, float]:
+        """Score every evaluation split once, under its own namespace.
+
+        Kept separate from the monitoring namespace so the final full-split
+        numbers never overwrite the last point of the training-time curve.
+        """
         all_metrics: Dict[str, float] = {}
         for split, dataset in self.final_evaluation_datasets.items():
             dataloader = self.get_eval_dataloader(dataset)
@@ -129,7 +212,7 @@ class ProbeTrainer(Trainer):
                 model,
                 dataloader,
                 loss_name=self.loss_name,
-                prefix=split,
+                prefix=f"final/{split}",
                 pos_weight=self.pos_weight,
                 metric_names=self.cfg.validation.metrics,
             )

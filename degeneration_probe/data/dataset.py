@@ -16,6 +16,7 @@ import torch
 from torch.utils.data import Dataset
 
 from degeneration_probe.config import DatasetConfig, TokenizationConfig
+from degeneration_probe.data.labels import derive_targets, required_signal
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -194,12 +195,10 @@ def load_degeneration_records(
     config: DatasetConfig,
     *,
     split: str,
-    loss_name: str,
+    label_config,
     training: bool,
 ) -> List[DegenerationRecord]:
     """Join all local artifacts on ``(prompt_id, rollout_idx)``."""
-    if loss_name not in {"bce", "mse"}:
-        raise ValueError(f"Unknown loss {loss_name!r}")
     validate_build_artifacts(config)
     root = Path(config.build_root)
     onset = pd.read_parquet(root / "onset_labels" / "onset_labels.parquet")
@@ -231,20 +230,27 @@ def load_degeneration_records(
         selected,
         ["prompt_id", "rollout_idx", "generated_token_ids"],
     )
-    labels = _read_selected_domain_shards(
-        root,
-        "labels",
-        selected,
-        ["prompt_id", "rollout_idx", "repetition_score"],
+    # Only a family that reads a per-token signal needs the label shards at all.
+    signal_column = required_signal(label_config)
+    labels = (
+        _read_selected_domain_shards(
+            root, "labels", selected, ["prompt_id", "rollout_idx", signal_column]
+        )
+        if signal_column
+        else None
     )
     _assert_unique(prompts, ["prompt_id"], "prompt")
     _assert_unique(generations, keys, "generation")
-    _assert_unique(labels, keys, "label")
+    if labels is not None:
+        _assert_unique(labels, keys, "label")
 
     merged = selected.merge(prompts, on="prompt_id", how="left", validate="many_to_one")
     merged = merged.merge(generations, on=keys, how="left", validate="one_to_one")
-    merged = merged.merge(labels, on=keys, how="left", validate="one_to_one")
-    required_columns = ["prompt_text", "generated_token_ids", "repetition_score"]
+    if labels is not None:
+        merged = merged.merge(labels, on=keys, how="left", validate="one_to_one")
+    required_columns = ["prompt_text", "generated_token_ids"] + (
+        [signal_column] if signal_column else []
+    )
     if merged[required_columns].isna().any().any():
         bad = merged.loc[merged[required_columns].isna().any(axis=1), keys].head().to_dict("records")
         raise ValueError(f"Dataset join left missing artifacts for rollout keys: {bad}")
@@ -252,16 +258,17 @@ def load_degeneration_records(
     records: List[DegenerationRecord] = []
     for row in merged.itertuples(index=False):
         token_ids = np.asarray(row.generated_token_ids, dtype=np.int64)
-        if loss_name == "bce":
-            targets = derive_bce_targets(
-                len(token_ids), stop_reason=row.stop_reason, onset_position=row.onset_position
-            )
-            if targets is None:  # Defensive: select_rollouts already excludes these.
-                continue
-        else:
-            targets = derive_mse_targets(row.repetition_score, len(token_ids))
+        targets = derive_targets(
+            label_config,
+            num_tokens=len(token_ids),
+            stop_reason=row.stop_reason,
+            onset_position=row.onset_position,
+            signal=getattr(row, signal_column) if signal_column else None,
+        )
+        if targets is None:  # A rollout the family cannot label is dropped, not invented.
+            continue
         targets = np.asarray(targets, dtype=np.float32)
-        if loss_name == "mse" and not np.isfinite(targets).any():
+        if not np.isfinite(targets).any():
             continue
         records.append(
             DegenerationRecord(
@@ -336,6 +343,9 @@ class DegenerationTokenDataset(Dataset):
             "attention_mask": torch.ones_like(input_ids),
             "targets": targets,
             "target_mask": target_mask,
+            # Where the completion starts, so a scorer can slice out exactly the
+            # generated tokens without inferring it from which targets are defined.
+            "prompt_length": len(prompt_ids),
             "pad_token_id": self.tokenizer.pad_token_id
             if self.tokenizer.pad_token_id is not None
             else (self.tokenizer.eos_token_id or 0),
@@ -343,6 +353,41 @@ class DegenerationTokenDataset(Dataset):
             "rollout_idx": record.rollout_idx,
             "domain": record.domain,
             "split": record.split,
+        }
+
+    def summary(self) -> Dict[str, object]:
+        """Composition of the split as the probe will actually see it.
+
+        Recorded per run so that a later comparison can tell an effect of the
+        recipe from an effect of how much data the recipe was given, and so
+        that the realized positive rate stays visible next to any class weight
+        applied on top of it.
+        """
+        limit = self.tokenization.max_completion_length
+        domains: Dict[str, int] = {}
+        positive_rollouts = 0
+        valid_tokens = 0
+        positive_tokens = 0
+        total_tokens = 0
+        for record in self.records:
+            domains[record.domain] = domains.get(record.domain, 0) + 1
+            targets = np.asarray(record.targets[:limit], dtype=np.float32)
+            finite = np.isfinite(targets)
+            valid_tokens += int(finite.sum())
+            total_tokens += int(len(targets))
+            positives = int((targets[finite] > 0).sum())
+            positive_tokens += positives
+            positive_rollouts += int(positives > 0)
+        return {
+            "rollouts": len(self.records),
+            "positive_rollouts": positive_rollouts,
+            "negative_rollouts": len(self.records) - positive_rollouts,
+            "tokens": total_tokens,
+            "valid_tokens": valid_tokens,
+            "positive_tokens": positive_tokens,
+            "negative_tokens": valid_tokens - positive_tokens,
+            "positive_token_rate": positive_tokens / valid_tokens if valid_tokens else 0.0,
+            "rollouts_per_domain": dict(sorted(domains.items())),
         }
 
     def target_counts(self) -> Tuple[int, int]:
@@ -381,6 +426,7 @@ def degeneration_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]
         "attention_mask": attention_mask,
         "targets": targets,
         "target_mask": target_mask,
+        "prompt_length": [item["prompt_length"] for item in batch],
         "prompt_id": [item["prompt_id"] for item in batch],
         "rollout_idx": [item["rollout_idx"] for item in batch],
         "domain": [item["domain"] for item in batch],
@@ -393,11 +439,11 @@ def create_degeneration_dataset(
     tokenizer,
     *,
     split: str,
-    loss_name: str,
+    label_config,
     training: bool,
 ) -> DegenerationTokenDataset:
     records = load_degeneration_records(
-        config, split=split, loss_name=loss_name, training=training
+        config, split=split, label_config=label_config, training=training
     )
     return DegenerationTokenDataset(
         records,

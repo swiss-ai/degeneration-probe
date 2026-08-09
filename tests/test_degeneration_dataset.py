@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from degeneration_probe.config import DatasetConfig
+from degeneration_probe.config import LabelConfig, DatasetConfig
 from degeneration_probe.data.dataset import (
     DegenerationTokenDataset,
     compute_pos_weight,
@@ -111,7 +111,7 @@ def local_build(tmp_path):
 
 def test_local_join_uses_original_ids_and_excludes_undefined_truncation(local_build):
     records = load_degeneration_records(
-        local_build, split="train", loss_name="bce", training=True
+        local_build, split="train", label_config=LabelConfig(), training=True
     )
     assert [record.prompt_id for record in records] == ["negative", "positive"]
     by_id = {record.prompt_id: record for record in records}
@@ -123,9 +123,11 @@ def test_local_join_uses_original_ids_and_excludes_undefined_truncation(local_bu
     assert compute_pos_weight(dataset) == pytest.approx(3 / 2)
 
 
-def test_mse_uses_scores_exactly_and_masks_alignment_gap(local_build):
+def test_a_token_signal_uses_the_scores_exactly_and_masks_the_alignment_gap(local_build):
     records = load_degeneration_records(
-        local_build, split="train", loss_name="mse", training=True
+        local_build, split="train",
+        label_config=LabelConfig(family="token_signal", signal="repetition_score"),
+        training=True
     )
     positive = next(record for record in records if record.prompt_id == "positive")
     assert positive.targets[:2].tolist() == pytest.approx([0.1, 0.2])

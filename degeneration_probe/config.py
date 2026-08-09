@@ -65,6 +65,37 @@ class MseLossConfig:
 
 
 @dataclass
+class LabelConfig:
+    """Which signal supplies the training target, kept apart from the loss.
+
+    Bundling the two into one name makes combinations inexpressible, such as
+    training the frontier distance under a regression loss, so they are two
+    fields that vary independently.
+    """
+
+    family: str = "frontier_hard"
+    horizon: int = 0
+    decay: str = "exponential"
+    decay_length: float = 256.0
+    signal: str = "repetition_score"
+
+    def __post_init__(self) -> None:
+        from degeneration_probe.data.labels import DECAY_SHAPES, LABEL_FAMILIES, TOKEN_SIGNALS
+
+        self.decay_length = _as_float(self.decay_length)
+        if self.family not in LABEL_FAMILIES:
+            raise ValueError(f"training.label.family must be one of {sorted(LABEL_FAMILIES)}")
+        if self.horizon < 0:
+            raise ValueError("training.label.horizon must be non-negative")
+        if self.decay not in DECAY_SHAPES:
+            raise ValueError(f"training.label.decay must be one of {sorted(DECAY_SHAPES)}")
+        if self.decay_length <= 0:
+            raise ValueError("training.label.decay_length must be positive")
+        if self.signal not in TOKEN_SIGNALS:
+            raise ValueError(f"training.label.signal must be one of {sorted(TOKEN_SIGNALS)}")
+
+
+@dataclass
 class LossConfig:
     name: str = "bce"
     bce: BceLossConfig = field(default_factory=BceLossConfig)
@@ -124,21 +155,52 @@ class ValidationConfig:
 
 @dataclass
 class CheckpointConfig:
-    output_dir: str = "outputs/degeneration_probe"
-    save_each_epoch: bool = True
+    """Where a run writes, and how much of its state survives an interruption."""
 
-    @property
-    def path(self) -> Path:
-        return Path(self.output_dir)
+    root_dir: str = "outputs"
+    strategy: str = "epoch"
+    steps: Optional[int] = None
+    save_total_limit: int = 2
+    keep_best: bool = True
+    metric_for_best_model: str = "loss"
+    greater_is_better: bool = False
+    resume: str = "auto"
+
+    def __post_init__(self) -> None:
+        if self.strategy not in {"no", "steps", "epoch"}:
+            raise ValueError("training.checkpoint.strategy must be no, steps, or epoch")
+        if self.strategy == "steps" and not self.steps:
+            raise ValueError("training.checkpoint.steps is required when strategy='steps'")
+        if self.keep_best and self.strategy == "no":
+            raise ValueError(
+                "training.checkpoint.keep_best requires a save strategy: with strategy='no' "
+                "there is no checkpoint to select from"
+            )
+        if self.resume not in {"auto", "never"} and not Path(self.resume).is_absolute():
+            raise ValueError(
+                "training.checkpoint.resume must be 'auto', 'never', or an absolute checkpoint path"
+            )
 
 
 @dataclass
 class WandbConfig:
+    """Tracking destination and the labels a run is filtered by.
+
+    ``name`` and ``group`` default to values derived from the run's axes, so a
+    sweep produces readable, non-colliding runs without hand-written names.
+    ``tags`` are extra labels appended to the derived axis tags.
+    """
+
     enabled: bool = True
+    mode: str = "online"
+    entity: Optional[str] = None
     project: str = "degeneration-probes"
     name: Optional[str] = None
+    group: Optional[str] = None
+    job_type: str = "train"
     tags: List[str] = field(default_factory=list)
-    mode: str = "online"
+    notes: Optional[str] = None
+    resume: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in {"online", "offline", "disabled"}:
@@ -151,6 +213,7 @@ class TrainingConfig:
     short_name: str
     probe: ProbeConfig
     lora: LoraConfig = field(default_factory=LoraConfig)
+    label: LabelConfig = field(default_factory=LabelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -162,6 +225,7 @@ class TrainingConfig:
         nested = {
             "probe": ProbeConfig,
             "lora": LoraConfig,
+            "label": LabelConfig,
             "loss": LossConfig,
             "optimizer": OptimizerConfig,
             "runtime": RuntimeConfig,
@@ -175,6 +239,25 @@ class TrainingConfig:
                 setattr(self, name, cls(**value))
         if self.task != "degeneration":
             raise ValueError("The only supported task is 'degeneration'")
+        from degeneration_probe.data.labels import produces_binary_targets
+
+        if self.loss.name == "bce" and self.loss.bce.use_pos_weight and not produces_binary_targets(
+            self.label
+        ):
+            raise ValueError(
+                f"training.loss.bce.use_pos_weight has no meaning for label family "
+                f"{self.label.family!r}: a positive rate is only defined when every target is 0 or 1"
+            )
+        if self.checkpoint.keep_best:
+            # Selecting the best checkpoint means saving exactly when validating.
+            if self.validation.strategy != self.checkpoint.strategy or (
+                self.validation.strategy == "steps"
+                and self.validation.steps != self.checkpoint.steps
+            ):
+                raise ValueError(
+                    "training.checkpoint.keep_best requires the checkpoint and validation "
+                    "cadences to match, so that every saved checkpoint has a score"
+                )
 
 
 @dataclass
@@ -209,7 +292,9 @@ class SamplingConfig:
     train_negative_rollouts_per_positive: Optional[float] = 4.0
     evaluation_negative_rollouts_per_positive: Optional[float] = None
     domain_stratified: bool = True
-    seed: int = 42
+    # Left unset so that one seed drives weight init, batch order and sampling
+    # alike; a seed repeat is then a single override.
+    seed: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name in ("train_negative_rollouts_per_positive", "evaluation_negative_rollouts_per_positive"):
@@ -256,6 +341,8 @@ class ExperimentConfig:
             value = getattr(self, name)
             if isinstance(value, dict):
                 setattr(self, name, cls(**value))
+        if self.dataset.sampling.seed is None:
+            self.dataset.sampling.seed = self.training.runtime.seed
 
     @classmethod
     def from_dict(cls, config: Dict[str, Any]) -> "ExperimentConfig":

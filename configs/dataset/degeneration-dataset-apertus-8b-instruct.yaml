@@ -19,4 +19,6 @@ sampling:
   # Final evaluation keeps every usable rollout.
   evaluation_negative_rollouts_per_positive: null
   domain_stratified: true
-  seed: 42
+  # Unset so the run's single seed drives sampling as well; set it only to pin
+  # the sampled population while varying the training seed.
+  seed: null

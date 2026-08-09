@@ -77,7 +77,6 @@ def evaluate_probe(
     loss = total_loss / total_tokens
     metrics = {
         f"{prefix}/loss": loss,
-        f"{prefix}/{loss_name}_loss": loss,
         f"{prefix}/valid_tokens": total_tokens,
         f"{prefix}/target_mean": target_mean,
         f"{prefix}/target_std": math.sqrt(target_variance),

@@ -25,8 +25,8 @@ def compute_bce_loss(
     if not active_tokens:
         return logits.sum() * 0.0, 0
     selected_targets = targets[valid].float()
-    if not torch.all((selected_targets == 0) | (selected_targets == 1)):
-        raise ValueError("BCE targets must be exactly 0 or 1")
+    if not torch.all((selected_targets >= 0) & (selected_targets <= 1)):
+        raise ValueError("BCE targets must lie in [0, 1]")
     weight = None
     if pos_weight is not None:
         weight = torch.tensor(float(pos_weight), device=logits.device, dtype=torch.float32)

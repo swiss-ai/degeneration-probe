@@ -144,6 +144,25 @@ class DegenerationProbe(nn.Module):
     def device(self) -> torch.device:
         return getattr(self.model, "device", next(self.model.parameters()).device)
 
+    def load_weights(self, path: Union[str, Path]) -> None:
+        """Restore head and adapter weights in place, for resuming a run."""
+        path = Path(path)
+        self.linear.load_state_dict(
+            torch.load(path / "probe.bin", map_location=self.device, weights_only=True)
+        )
+        norm_path = path / "normalization.bin"
+        if norm_path.is_file() and self.pre_head_norm.state_dict():
+            self.pre_head_norm.load_state_dict(
+                torch.load(norm_path, map_location=self.device, weights_only=True)
+            )
+        if isinstance(self.model, PeftModel):
+            from peft import set_peft_model_state_dict
+            from safetensors.torch import load_file
+
+            adapter = path / "adapter_model.safetensors"
+            if adapter.is_file():
+                set_peft_model_state_dict(self.model, load_file(str(adapter)))
+
     def save(self, path: Union[str, Path]) -> None:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)

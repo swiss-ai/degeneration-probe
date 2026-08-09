@@ -1,0 +1,56 @@
+"""Translation from the experiment configuration to trainer arguments.
+
+Kept apart from the training entry point so the combination of cadences,
+checkpoint rotation and best-model selection can be checked without allocating
+a language model.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import List
+
+from transformers import TrainingArguments
+
+from degeneration_probe.config import ExperimentConfig
+
+
+def build_training_arguments(
+    config: ExperimentConfig,
+    *,
+    run_dir: Path,
+    run_name: str,
+    report_to: List[str],
+    use_cpu: bool = False,
+) -> TrainingArguments:
+    runtime = config.training.runtime
+    validation = config.training.validation
+    checkpoint = config.training.checkpoint
+    return TrainingArguments(
+        output_dir=str(run_dir),
+        per_device_train_batch_size=runtime.per_device_train_batch_size,
+        per_device_eval_batch_size=runtime.per_device_eval_batch_size,
+        gradient_accumulation_steps=runtime.gradient_accumulation_steps,
+        num_train_epochs=runtime.num_train_epochs,
+        max_steps=runtime.max_steps,
+        max_grad_norm=runtime.max_grad_norm,
+        logging_steps=runtime.logging_steps,
+        dataloader_num_workers=runtime.dataloader_num_workers,
+        eval_strategy=validation.strategy,
+        eval_steps=validation.steps,
+        save_strategy=checkpoint.strategy,
+        save_steps=checkpoint.steps or 500,
+        save_total_limit=checkpoint.save_total_limit,
+        load_best_model_at_end=checkpoint.keep_best,
+        metric_for_best_model=checkpoint.metric_for_best_model,
+        greater_is_better=checkpoint.greater_is_better,
+        remove_unused_columns=False,
+        label_names=["targets"],
+        report_to=report_to,
+        run_name=run_name,
+        learning_rate=config.training.optimizer.probe_learning_rate,
+        weight_decay=config.training.optimizer.weight_decay,
+        seed=runtime.seed,
+        logging_first_step=True,
+        use_cpu=use_cpu,
+    )

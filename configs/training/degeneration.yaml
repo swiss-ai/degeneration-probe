@@ -15,6 +15,17 @@ lora:
   alpha: 32
   dropout: 0.05
 
+label:
+  # frontier_hard | frontier_soft | token_signal
+  family: frontier_hard
+  # frontier_hard: y(t)=1 iff f_r - t <= horizon
+  horizon: 0
+  # frontier_soft: how the run-up decays back from the frontier
+  decay: exponential
+  decay_length: 256
+  # token_signal: repetition_score | entropy
+  signal: repetition_score
+
 loss:
   name: bce
   bce:
@@ -46,12 +57,31 @@ validation:
   metrics: []
 
 checkpoint:
-  output_dir: ${oc.env:PROBE_OUTPUT_DIR,outputs}/${training.probe.id}
-  save_each_epoch: true
+  # Each run gets its own directory under this root, named after its axes.
+  root_dir: ${oc.env:PROBE_OUTPUT_DIR,outputs}
+  # Checkpoints hold the probe head and the adapters only, so saving on the
+  # validation cadence is cheap and every run stays resumable.
+  strategy: epoch
+  steps: null
+  save_total_limit: 2
+  keep_best: true
+  # Any monitored quantity can drive selection; the protocol metrics replace
+  # loss here once they are available.
+  metric_for_best_model: loss
+  greater_is_better: false
+  resume: auto
 
 wandb:
   enabled: true
-  project: degeneration-probes
-  name: ${model.short_name}_degeneration_${dataset.short_name}_layer${training.probe.layer}
-  tags: [degeneration, apertus, lora]
   mode: online
+  # Personal workspace: no shared team entity yet.
+  entity: null
+  project: degeneration-probes
+  # Name, group and axis tags are derived from the run's own settings.
+  name: null
+  group: null
+  job_type: train
+  # Extra labels for one sweep or ablation, for example [sweep:layer].
+  tags: []
+  notes: null
+  resume: true
