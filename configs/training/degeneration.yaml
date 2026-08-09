@@ -8,6 +8,10 @@ probe:
   normalization: layernorm
   context_window_size: 1
 
+features:
+  # adapted (run the model) | cached (read stored activations, no adapters)
+  regime: adapted
+
 lora:
   enabled: true
   layers: all

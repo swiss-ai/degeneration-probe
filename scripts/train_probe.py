@@ -17,13 +17,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from degeneration_probe.config import ExperimentConfig
+from degeneration_probe.data.cached_dataset import cached_collate_fn, create_cached_dataset
 from degeneration_probe.data.dataset import (
     compute_pos_weight,
     create_degeneration_dataset,
     degeneration_collate_fn,
 )
 from degeneration_probe.evaluation.metrics import build_validation_metrics
-from degeneration_probe.probes.linear_probe import setup_probe
+from degeneration_probe.probes.linear_probe import setup_cached_probe, setup_probe
 from degeneration_probe.training.arguments import build_training_arguments
 from degeneration_probe.training.recording import (
     DATASET_SUMMARY_FILE,
@@ -47,6 +48,17 @@ from degeneration_probe.utils.model_utils import (
     print_trainable_parameters,
     resolve_torch_dtype,
 )
+
+
+def activation_hidden_size(config: ExperimentConfig) -> int:
+    """Read the width of the cached states from the cache itself."""
+    import pandas as pd
+
+    manifest = pd.read_parquet(
+        Path(config.dataset.build_root) / "activations" / "manifest.parquet",
+        columns=["shape"],
+    )
+    return int(list(manifest["shape"].iloc[0])[-1])
 
 
 def _trainable_parameter_counts(probe) -> dict:
@@ -164,37 +176,64 @@ def _train(
     resume_from,
     wandb_run,
 ) -> dict:
-    model, tokenizer = load_model_and_tokenizer(
-        config.model.name,
-        tokenizer_name=config.model.tokenizer_name,
-        torch_dtype=resolve_torch_dtype(config.model.dtype),
-    )
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-    if config.training.runtime.gradient_checkpointing and hasattr(
-        model, "gradient_checkpointing_enable"
-    ):
-        model.gradient_checkpointing_enable()
+    # The cached regime never allocates the language model: that is the point of
+    # it, and it is what makes a sweep over recipes affordable.
+    cached = config.training.features.regime == "cached"
+    if cached:
+        import torch
 
-    _, probe = setup_probe(
-        model,
-        config.training.probe,
-        config.training.lora,
-        seed=config.training.runtime.seed,
-    )
+        probe = setup_cached_probe(
+            config.training.probe,
+            hidden_size=activation_hidden_size(config),
+            seed=config.training.runtime.seed,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        )
+        collate = cached_collate_fn
+
+        def build(split, training):
+            return create_cached_dataset(
+                config.dataset,
+                split=split,
+                label_config=config.training.label,
+                probe_layer=config.training.probe.layer,
+                training=training,
+            )
+    else:
+        model, tokenizer = load_model_and_tokenizer(
+            config.model.name,
+            tokenizer_name=config.model.tokenizer_name,
+            torch_dtype=resolve_torch_dtype(config.model.dtype),
+        )
+        if hasattr(model, "config"):
+            model.config.use_cache = False
+        if config.training.runtime.gradient_checkpointing and hasattr(
+            model, "gradient_checkpointing_enable"
+        ):
+            model.gradient_checkpointing_enable()
+        _, probe = setup_probe(
+            model,
+            config.training.probe,
+            config.training.lora,
+            seed=config.training.runtime.seed,
+        )
+        collate = degeneration_collate_fn
+
+        def build(split, training):
+            return create_degeneration_dataset(
+                config.dataset,
+                tokenizer,
+                split=split,
+                label_config=config.training.label,
+                training=training,
+            )
+
     print_trainable_parameters(probe)
 
     loss_name = config.training.loss.name
     splits = config.dataset.splits
-    datasets = {
-        splits.train: create_degeneration_dataset(
-            config.dataset, tokenizer, split=splits.train, label_config=config.training.label, training=True
-        )
-    }
+    datasets = {splits.train: build(splits.train, True)}
     for split in splits.final_evaluation:
-        datasets[split] = create_degeneration_dataset(
-            config.dataset, tokenizer, split=split, label_config=config.training.label, training=False
-        )
+        datasets[split] = build(split, False)
 
     dataset_summary = {split: dataset.summary() for split, dataset in datasets.items()}
     pos_weight = None
@@ -247,7 +286,7 @@ def _train(
             split: datasets[split] for split in splits.final_evaluation
         },
         pos_weight=pos_weight,
-        data_collator=degeneration_collate_fn,
+        data_collator=collate,
         callbacks=[recorder],
     )
 

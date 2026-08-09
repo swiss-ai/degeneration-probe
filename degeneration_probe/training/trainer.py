@@ -59,10 +59,7 @@ class ProbeTrainer(Trainer):
         device = model.device
         targets = inputs["targets"].to(device)
         target_mask = inputs["target_mask"].to(device)
-        outputs = model(
-            input_ids=inputs["input_ids"].to(device),
-            attention_mask=inputs["attention_mask"].to(device),
-        )
+        outputs = model(**self._model_inputs(inputs, device))
         logits = outputs["probe_logits"]
         loss, active_tokens = compute_degeneration_loss(
             self.loss_name,
@@ -76,6 +73,16 @@ class ProbeTrainer(Trainer):
             outputs["loss"] = loss
             return loss, outputs
         return loss
+
+    @staticmethod
+    def _model_inputs(inputs, device):
+        """Whichever features the configured regime produced."""
+        if "features" in inputs:
+            return {"features": inputs["features"].to(device)}
+        return {
+            "input_ids": inputs["input_ids"].to(device),
+            "attention_mask": inputs["attention_mask"].to(device),
+        }
 
     @torch.no_grad()
     def _accumulate_diagnostics(self, logits, targets, target_mask, active_tokens: int) -> None:

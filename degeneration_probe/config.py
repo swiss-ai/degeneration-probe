@@ -65,6 +65,23 @@ class MseLossConfig:
 
 
 @dataclass
+class FeaturesConfig:
+    """Where the probe's hidden states come from.
+
+    ``adapted`` runs the language model, which adapters require since they
+    change the representation at every step. ``cached`` reads states computed
+    once with the model frozen, which removes the model from training entirely
+    and is what makes a large sweep affordable.
+    """
+
+    regime: str = "adapted"
+
+    def __post_init__(self) -> None:
+        if self.regime not in {"adapted", "cached"}:
+            raise ValueError("training.features.regime must be adapted or cached")
+
+
+@dataclass
 class LabelConfig:
     """Which signal supplies the training target, kept apart from the loss.
 
@@ -212,6 +229,7 @@ class TrainingConfig:
     task: str
     short_name: str
     probe: ProbeConfig
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
     lora: LoraConfig = field(default_factory=LoraConfig)
     label: LabelConfig = field(default_factory=LabelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -224,6 +242,7 @@ class TrainingConfig:
     def __post_init__(self) -> None:
         nested = {
             "probe": ProbeConfig,
+            "features": FeaturesConfig,
             "lora": LoraConfig,
             "label": LabelConfig,
             "loss": LossConfig,
@@ -239,6 +258,12 @@ class TrainingConfig:
                 setattr(self, name, cls(**value))
         if self.task != "degeneration":
             raise ValueError("The only supported task is 'degeneration'")
+        if self.features.regime == "cached" and self.lora.enabled and self.lora.layers != "none":
+            raise ValueError(
+                "training.features.regime='cached' cannot train adapters: the cached states "
+                "describe the unadapted model, so training against them would fit a "
+                "representation that no longer exists. Set training.lora.enabled=false."
+            )
         from degeneration_probe.data.labels import produces_binary_targets
 
         if self.loss.name == "bce" and self.loss.bce.use_pos_weight and not produces_binary_targets(

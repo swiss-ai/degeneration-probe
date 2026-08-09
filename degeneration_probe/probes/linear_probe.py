@@ -1,4 +1,18 @@
-"""A scalar linear per-token probe attached to one transformer layer."""
+"""A scalar linear per-token probe, over live or cached hidden states.
+
+The trained part is the same in both feature regimes: a normalization and one
+linear layer mapping a token's hidden state to a single logit. What differs is
+where the hidden state comes from. With the language model in the loop it is
+captured by a hook during a forward pass, which is what adapters require since
+they change the representation at every step. With the model frozen the same
+vectors are constants and can be read from the activation cache, which removes
+the language model from training entirely.
+
+The two share their head logic and their checkpoint layout, so a probe trained
+on cached activations loads unchanged into a live model and the reverse. That
+equivalence is worth a test rather than an assumption: divergence here would be
+invisible, since both would keep producing plausible numbers.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +34,10 @@ from degeneration_probe.utils.model_utils import (
     setup_lora_for_layers,
 )
 
+PROBE_WEIGHTS = "probe.bin"
+NORM_WEIGHTS = "normalization.bin"
+PROBE_CONFIG = "probe_config.json"
+
 
 class L2Norm(nn.Module):
     def __init__(self, eps: float = 1e-6) -> None:
@@ -30,8 +48,107 @@ class L2Norm(nn.Module):
         return inputs / inputs.norm(p=2, dim=-1, keepdim=True).clamp_min(self.eps)
 
 
+def build_normalization(
+    kind: str, hidden_size: int, *, device: torch.device, dtype: torch.dtype
+) -> nn.Module:
+    if kind == "none":
+        return nn.Identity()
+    if kind == "layernorm":
+        return nn.LayerNorm(hidden_size, device=device, dtype=dtype)
+    if kind == "rmsnorm":
+        return nn.RMSNorm(hidden_size, device=device, dtype=dtype)
+    if kind == "l2":
+        return L2Norm()
+    raise ValueError(f"Unknown normalization {kind!r}")
+
+
+def context_window_features(states: torch.Tensor, context_window_size: int) -> torch.Tensor:
+    """Concatenate each token's state with the states just before it."""
+    if context_window_size == 1:
+        return states
+    shifted = [states]
+    for offset in range(1, context_window_size):
+        previous = states.roll(offset, dims=1)
+        previous = previous.clone()
+        previous[:, :offset, :] = 0
+        shifted.append(previous)
+    return torch.cat(shifted, dim=-1)
+
+
+def apply_head(
+    states: torch.Tensor,
+    *,
+    pre_head_norm: nn.Module,
+    linear: nn.Module,
+    context_window_size: int,
+) -> torch.Tensor:
+    """Map ``[batch, tokens, hidden]`` to one logit per token."""
+    features = context_window_features(states, context_window_size)
+    norm_parameter = next(pre_head_norm.parameters(), None)
+    if norm_parameter is not None:
+        features = features.to(norm_parameter.dtype)
+    features = pre_head_norm(features).to(linear.weight.dtype)
+    return linear(features).squeeze(-1)
+
+
+def _init_head(
+    owner: nn.Module,
+    *,
+    hidden_size: int,
+    context_window_size: int,
+    probe_dtype: str,
+    normalization: str,
+    seed: int,
+    device: torch.device,
+    default_dtype: torch.dtype,
+) -> None:
+    input_size = hidden_size * context_window_size
+    head_dtype = resolve_torch_dtype(probe_dtype, default=default_dtype)
+    owner.pre_head_norm = build_normalization(
+        normalization, input_size, device=device, dtype=head_dtype
+    )
+    torch.manual_seed(seed)
+    owner.linear = nn.Linear(input_size, 1, device=device, dtype=head_dtype)
+    nn.init.normal_(owner.linear.weight, mean=0.0, std=0.01)
+    nn.init.zeros_(owner.linear.bias)
+
+
+def _save_head(owner: nn.Module, path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save(owner.linear.state_dict(), path / PROBE_WEIGHTS)
+    if owner.pre_head_norm.state_dict():
+        torch.save(owner.pre_head_norm.state_dict(), path / NORM_WEIGHTS)
+    config = {
+        "architecture": "scalar_linear",
+        "layer_idx": owner.layer_idx,
+        "context_window_size": owner.context_window_size,
+        "probe_dtype": owner.probe_dtype,
+        "normalization": owner.normalization,
+        "input_size": owner.linear.in_features,
+        "output_size": owner.linear.out_features,
+    }
+    with (path / PROBE_CONFIG).open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+
+
+def _load_head(owner: nn.Module, path: Path) -> None:
+    owner.linear.load_state_dict(
+        torch.load(path / PROBE_WEIGHTS, map_location=owner.device, weights_only=True)
+    )
+    norm_path = path / NORM_WEIGHTS
+    if norm_path.is_file() and owner.pre_head_norm.state_dict():
+        owner.pre_head_norm.load_state_dict(
+            torch.load(norm_path, map_location=owner.device, weights_only=True)
+        )
+
+
+def read_probe_config(path: Union[str, Path]) -> Dict[str, object]:
+    with (Path(path) / PROBE_CONFIG).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 class DegenerationProbe(nn.Module):
-    """Capture token states and map each context vector to exactly one logit."""
+    """Capture token states from a live model and map each to one logit."""
 
     def __init__(
         self,
@@ -48,11 +165,9 @@ class DegenerationProbe(nn.Module):
         if layer_idx is None and path is None:
             raise ValueError("Either layer_idx or path is required")
 
-        checkpoint_config = None
         if path is not None:
             path = Path(path)
-            with (path / "probe_config.json").open("r", encoding="utf-8") as handle:
-                checkpoint_config = json.load(handle)
+            checkpoint_config = read_probe_config(path)
             saved_layer = int(checkpoint_config["layer_idx"])
             if layer_idx is not None and layer_idx != saved_layer:
                 raise ValueError(f"Configured layer {layer_idx} differs from checkpoint layer {saved_layer}")
@@ -67,43 +182,20 @@ class DegenerationProbe(nn.Module):
         self.probe_dtype = probe_dtype
         self.normalization = normalization
         self.target_module = get_model_layers(model)[self.layer_idx]
-        hidden_size = get_model_hidden_size(model)
-        input_size = hidden_size * self.context_window_size
-        model_dtype = getattr(model, "dtype", next(model.parameters()).dtype)
-        head_dtype = resolve_torch_dtype(probe_dtype, default=model_dtype)
-        self.pre_head_norm = self._build_norm(
-            normalization, input_size, device=self.device, dtype=head_dtype
+        _init_head(
+            self,
+            hidden_size=get_model_hidden_size(model),
+            context_window_size=self.context_window_size,
+            probe_dtype=probe_dtype,
+            normalization=normalization,
+            seed=seed,
+            device=self.device,
+            default_dtype=getattr(model, "dtype", next(model.parameters()).dtype),
         )
-        torch.manual_seed(seed)
-        self.linear = nn.Linear(input_size, 1, device=self.device, dtype=head_dtype)
-        nn.init.normal_(self.linear.weight, mean=0.0, std=0.01)
-        nn.init.zeros_(self.linear.bias)
-
         if path is not None:
-            self.linear.load_state_dict(
-                torch.load(path / "probe.bin", map_location=self.device, weights_only=True)
-            )
-            norm_path = path / "normalization.bin"
-            if norm_path.is_file() and self.pre_head_norm.state_dict():
-                self.pre_head_norm.load_state_dict(
-                    torch.load(norm_path, map_location=self.device, weights_only=True)
-                )
+            _load_head(self, path)
 
         self._captured: Optional[torch.Tensor] = None
-
-    @staticmethod
-    def _build_norm(
-        kind: str, hidden_size: int, *, device: torch.device, dtype: torch.dtype
-    ) -> nn.Module:
-        if kind == "none":
-            return nn.Identity()
-        if kind == "layernorm":
-            return nn.LayerNorm(hidden_size, device=device, dtype=dtype)
-        if kind == "rmsnorm":
-            return nn.RMSNorm(hidden_size, device=device, dtype=dtype)
-        if kind == "l2":
-            return L2Norm()
-        raise ValueError(f"Unknown normalization {kind!r}")
 
     def _capture(self, _module, _inputs, output) -> None:
         self._captured = output[0] if isinstance(output, tuple) else output
@@ -127,18 +219,13 @@ class DegenerationProbe(nn.Module):
             )
         if self._captured is None:
             raise RuntimeError("The configured transformer layer did not emit hidden states")
-
-        shifted = [self._captured]
-        for offset in range(1, self.context_window_size):
-            previous = self._captured.roll(offset, dims=1)
-            previous[:, :offset, :] = 0
-            shifted.append(previous)
-        features = torch.cat(shifted, dim=-1)
-        norm_parameter = next(self.pre_head_norm.parameters(), None)
-        if norm_parameter is not None:
-            features = features.to(norm_parameter.dtype)
-        features = self.pre_head_norm(features).to(self.linear.weight.dtype)
-        return {"probe_logits": self.linear(features).squeeze(-1)}
+        logits = apply_head(
+            self._captured,
+            pre_head_norm=self.pre_head_norm,
+            linear=self.linear,
+            context_window_size=self.context_window_size,
+        )
+        return {"probe_logits": logits}
 
     @property
     def device(self) -> torch.device:
@@ -147,14 +234,7 @@ class DegenerationProbe(nn.Module):
     def load_weights(self, path: Union[str, Path]) -> None:
         """Restore head and adapter weights in place, for resuming a run."""
         path = Path(path)
-        self.linear.load_state_dict(
-            torch.load(path / "probe.bin", map_location=self.device, weights_only=True)
-        )
-        norm_path = path / "normalization.bin"
-        if norm_path.is_file() and self.pre_head_norm.state_dict():
-            self.pre_head_norm.load_state_dict(
-                torch.load(norm_path, map_location=self.device, weights_only=True)
-            )
+        _load_head(self, path)
         if isinstance(self.model, PeftModel):
             from peft import set_peft_model_state_dict
             from safetensors.torch import load_file
@@ -168,20 +248,79 @@ class DegenerationProbe(nn.Module):
         path.mkdir(parents=True, exist_ok=True)
         if isinstance(self.model, PeftModel):
             self.model.save_pretrained(path)
-        torch.save(self.linear.state_dict(), path / "probe.bin")
-        if self.pre_head_norm.state_dict():
-            torch.save(self.pre_head_norm.state_dict(), path / "normalization.bin")
-        config = {
-            "architecture": "scalar_linear",
-            "layer_idx": self.layer_idx,
-            "context_window_size": self.context_window_size,
-            "probe_dtype": self.probe_dtype,
-            "normalization": self.normalization,
-            "input_size": self.linear.in_features,
-            "output_size": self.linear.out_features,
-        }
-        with (path / "probe_config.json").open("w", encoding="utf-8") as handle:
-            json.dump(config, handle, indent=2)
+        _save_head(self, path)
+
+
+class CachedFeatureProbe(nn.Module):
+    """The same head, reading hidden states that were computed once already.
+
+    With the language model frozen its hidden states are constants, so training
+    need not run it at all. The head is identical to the live one and writes the
+    same checkpoint, so which regime produced a probe is not visible downstream.
+    """
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        layer_idx: Optional[int] = None,
+        path: Optional[Union[str, Path]] = None,
+        context_window_size: int = 1,
+        probe_dtype: str = "float32",
+        normalization: str = "layernorm",
+        seed: int = 42,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super().__init__()
+        if layer_idx is None and path is None:
+            raise ValueError("Either layer_idx or path is required")
+        if path is not None:
+            path = Path(path)
+            checkpoint_config = read_probe_config(path)
+            saved_layer = int(checkpoint_config["layer_idx"])
+            if layer_idx is not None and layer_idx != saved_layer:
+                raise ValueError(f"Configured layer {layer_idx} differs from checkpoint layer {saved_layer}")
+            layer_idx = saved_layer
+            context_window_size = int(checkpoint_config["context_window_size"])
+            probe_dtype = checkpoint_config["probe_dtype"]
+            normalization = checkpoint_config["normalization"]
+
+        self.layer_idx = int(layer_idx)
+        self.context_window_size = int(context_window_size)
+        self.probe_dtype = probe_dtype
+        self.normalization = normalization
+        self._device = torch.device(device) if device is not None else torch.device("cpu")
+        _init_head(
+            self,
+            hidden_size=hidden_size,
+            context_window_size=self.context_window_size,
+            probe_dtype=probe_dtype,
+            normalization=normalization,
+            seed=seed,
+            device=self._device,
+            default_dtype=torch.float32,
+        )
+        if path is not None:
+            _load_head(self, path)
+
+    def forward(self, features: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
+        logits = apply_head(
+            features.to(self.linear.weight.dtype),
+            pre_head_norm=self.pre_head_norm,
+            linear=self.linear,
+            context_window_size=self.context_window_size,
+        )
+        return {"probe_logits": logits}
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    def load_weights(self, path: Union[str, Path]) -> None:
+        _load_head(self, Path(path))
+
+    def save(self, path: Union[str, Path]) -> None:
+        _save_head(self, Path(path))
 
 
 def _lora_layers(config: LoraConfig, probe_layer: int) -> list[int]:
@@ -227,3 +366,24 @@ def setup_probe(
         seed=seed,
     )
     return model, probe
+
+
+def setup_cached_probe(
+    probe_config: ProbeConfig,
+    *,
+    hidden_size: int,
+    checkpoint_path: Optional[Union[str, Path]] = None,
+    seed: int = 42,
+    device: Optional[torch.device] = None,
+) -> CachedFeatureProbe:
+    """Build the head alone, for training against the activation cache."""
+    return CachedFeatureProbe(
+        hidden_size=hidden_size,
+        layer_idx=probe_config.layer,
+        path=Path(checkpoint_path) if checkpoint_path is not None else None,
+        context_window_size=probe_config.context_window_size,
+        probe_dtype=probe_config.dtype,
+        normalization=probe_config.normalization,
+        seed=seed,
+        device=device,
+    )

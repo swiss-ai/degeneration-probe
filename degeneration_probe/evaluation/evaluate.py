@@ -32,11 +32,17 @@ def evaluate_probe(
     predicted_positive = 0
 
     for batch in dataloader:
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
         targets = batch["targets"].to(device)
         target_mask = batch["target_mask"].to(device)
-        logits = probe(input_ids=input_ids, attention_mask=attention_mask)["probe_logits"]
+        model_inputs = (
+            {"features": batch["features"].to(device)}
+            if "features" in batch
+            else {
+                "input_ids": batch["input_ids"].to(device),
+                "attention_mask": batch["attention_mask"].to(device),
+            }
+        )
+        logits = probe(**model_inputs)["probe_logits"]
         loss, active_tokens = compute_degeneration_loss(
             loss_name,
             logits,

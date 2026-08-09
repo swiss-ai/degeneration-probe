@@ -62,6 +62,7 @@ def run_axes(config: ExperimentConfig) -> Dict[str, Any]:
         "layer": training.probe.layer,
         "context_window": training.probe.context_window_size,
         "normalization": training.probe.normalization,
+        "features": training.features.regime,
         "label": training.label.family,
         "horizon": training.label.horizon if training.label.family == "frontier_hard" else None,
         "decay": f"{training.label.decay}{training.label.decay_length:g}"
