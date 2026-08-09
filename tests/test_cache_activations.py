@@ -85,7 +85,7 @@ def _manifest_row(prompt_id, rollout_idx, domain="deepmath_103k", status="ok", s
         "prompt_id": prompt_id,
         "rollout_idx": rollout_idx,
         "domain": domain,
-        "path": f"/fake/{prompt_id}/rollout_{rollout_idx}.safetensors",
+        "relative_path": f"activations/d/{prompt_id}/rollout_{rollout_idx}.safetensors",
         "shape": shape or [33, 10, 4096],
         "dtype": "float16" if status == "ok" else None,
         "status": status,

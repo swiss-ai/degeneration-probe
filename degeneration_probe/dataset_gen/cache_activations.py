@@ -97,7 +97,7 @@ ACTIVATIONS_MANIFEST_COLUMNS = [
     "prompt_id",
     "rollout_idx",
     "domain",
-    "path",
+    "relative_path",
     "shape",
     "dtype",
     "status",
@@ -234,6 +234,9 @@ def process_task(
     failures are captured so one bad rollout doesn't abort the whole run).
     """
     out_path = paths.rollout_activation_path(config, domain, prompt_id, rollout_idx)
+    # Recorded relative to the dataset root: an absolute path stops being true
+    # the moment the build directory is renamed or moved.
+    relative_path = str(out_path.relative_to(paths.dataset_root(config)))
     try:
         input_ids, prompt_len = build_completion_input_ids(tokenizer, prompt_text, generated_token_ids)
         completion_len = len(generated_token_ids)
@@ -246,7 +249,7 @@ def process_task(
             "prompt_id": prompt_id,
             "rollout_idx": rollout_idx,
             "domain": domain,
-            "path": str(out_path),
+            "relative_path": relative_path,
             "shape": list(hidden_states.shape),
             "dtype": "float16",
             "status": "ok",
@@ -257,7 +260,7 @@ def process_task(
             "prompt_id": prompt_id,
             "rollout_idx": rollout_idx,
             "domain": domain,
-            "path": str(out_path),
+            "relative_path": relative_path,
             "shape": None,
             "dtype": None,
             "status": "failed",
