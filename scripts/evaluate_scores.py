@@ -192,6 +192,7 @@ def main() -> None:
 
     if args.compare_persistence:
         comparison = compare_persistence(run_dir, args.budgets, args.compare_persistence)
+        (run_dir / EVALUATION_DIR).mkdir(parents=True, exist_ok=True)
         comparison.to_csv(run_dir / EVALUATION_DIR / "persistence_comparison.csv", index=False)
         print("Persistence trade-off, on validation only:")
         print(comparison.round(4).to_string(index=False))
