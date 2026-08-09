@@ -1,529 +1,711 @@
-# A unified evaluation protocol and a pluggable training framework for degeneration probes
+# Degeneration probes: design, training and evaluation protocol
 
-## 0. Purpose of this note
+## 1. What this system is
 
-This note defines, for the onset/degeneration probes:
+A degeneration probe is a small classifier that reads one transformer layer's
+hidden state at every generated token and emits a probability in $[0, 1]$ that
+the generation has entered, or is about to enter, a degenerate repetition loop.
+The intended use is early stopping: a live generation is scored token by token,
+and once the probe is confident the rollout is looping, generation can be cut
+short instead of running to the token limit.
 
-1. A single **evaluation protocol** for deciding whether one trained probe is
-   better than another, and in what specific respect — independent of how
-   the probe was trained.
-2. A small, config-driven **training framework** so that different training
-   recipes can be compared under that same protocol, instead of each recipe
-   inventing its own notion of "it works."
+The system has two halves, kept deliberately separate:
 
-This is written for reuse as source material for the paper's evaluation
-section — it assumes the reader already knows the labeling story in
-`docs/analysis/lrs_and_llm_judge.md` (entropy → TTR → LRS → LLM judge) and the
-resulting notion of a **degeneration frontier**: the token position at which a
-truncated (`stop_reason == "length"`) rollout starts degenerating, resolved by
-`resolve_onset_position()` in `degeneration_probe/dataset_gen/onset_labels.py`.
-Everything below calls this position $f_r$ for rollout $r$, and only ever
-reads it through that one function, never through a raw LRS/judge field
-directly — same discipline the onset-labeling code already enforces.
+- A **training framework** in which several recipes (which tokens are trained
+  on, what value each token is trained toward, which loss, whether the
+  underlying model adapts) can be expressed as configuration rather than as
+  separate code paths.
+- An **evaluation protocol** that judges any per-token scorer without knowing
+  how it was produced. The same protocol scores a trained probe, a probe
+  trained with a completely different recipe, and a non-learned baseline such
+  as a repetition heuristic.
 
-## 1. The evaluation protocol
+The separation is the central design choice. A recipe is only interesting if it
+wins under a protocol that was not designed around it, and the protocol changes
+far more often than the training code does, so the two are never allowed to
+share state beyond a single, well specified file of scores.
 
-### 1.1 The first-alarm position
+## 2. The corpus
 
-Every evaluation below is built on one quantity, computed once per test
-rollout $r$, per decision threshold $\tau$, and per persistence window $m$
-(a positive integer, default $m = 1$):
+### 2.1 Rollouts, labels and the degeneration frontier
+
+The corpus is a set of prompts drawn from several source datasets, each
+completed several times by the target model under sampling. Every completion
+(a *rollout*) is stored with its exact sampled token ids, never with re-encoded
+text, so that everything computed downstream stays aligned to the same token
+indices.
+
+A rollout is **negative** when generation ended naturally at an end-of-sequence
+token. A rollout is **positive** when generation was cut off by the token limit
+*and* a degeneration onset can be resolved for it. Truncated rollouts for which
+no onset can be resolved are excluded from training and evaluation entirely,
+rather than being given an invented onset or quietly treated as negative.
+
+For each positive rollout $r$ there is one **degeneration frontier** $f_r$: the
+token position at which the rollout starts repeating. A single component owns
+the definition of $f_r$ and every other part of the system reads the frontier
+only through it. The frontier is currently derived from a normalized,
+growing longest-repeated-substring match, and the design treats the underlying
+signal as swappable: adopting a better onset signal later (for instance a
+verified quote from an LLM judge) changes one setting and nothing else. The
+rest of the pipeline never reads a repetition heuristic directly to decide
+where degeneration starts.
+
+Two asymmetries of the corpus shape almost every decision that follows:
+
+- **Positive rollouts are long and mostly degenerate.** Because a positive
+  rollout is by definition one that hit the token limit, each one contributes a
+  short pre-frontier region and a much longer in-pattern tail. Negative
+  rollouts are far shorter on average, since they stopped when the model was
+  done.
+- **Imbalance points in opposite directions at the two levels.** Counted as
+  rollouts, negatives outnumber positives by more than an order of magnitude.
+  Counted as tokens, the in-pattern tails of the positives are large enough
+  that the two classes come close to parity once negative rollouts are
+  subsampled at all. Any design that treats "the positive class is rare" as a
+  single fact will over-correct.
+
+### 2.2 Splits
+
+Splits are assigned at the **prompt** level, so all rollouts of a prompt share
+one split. This is enforced, not assumed: rollouts of the same prompt are near
+duplicates of one another, and a prompt straddling two splits would inflate
+every in-domain number.
+
+There are four splits:
+
+- `train`, `val` and `test_indomain` are drawn from the same set of source
+  domains and are stratified so that each domain contributes about the same
+  share of each of the three.
+- `test_heldout_domains` consists of domains that appear nowhere else. It exists
+  for zero-shot, cross-domain measurement, so its absence from training is by
+  design and not a stratification gap.
+
+Held-out domains differ sharply in how often they degenerate at all, and at
+least one of them yields only a handful of positive rollouts in total. Held-out
+results are therefore always reported per domain, never pooled, and the
+reporting code marks any per-domain cell with too few positives as anecdotal
+rather than printing a precision or a recall that a single example would
+dominate.
+
+## 3. Features
+
+### 3.1 Where the probe reads
+
+The probe reads the residual stream at one configured layer, at every
+completion token, and maps that vector to a single logit through an optional
+normalization step and one linear layer. Prompt tokens are given no target and
+never contribute to a loss or a metric; only completion tokens are scored.
+
+Activations are produced by replaying a stored rollout through the model with
+teacher forcing: the prompt is rebuilt through the identical chat-template path
+used at generation time, the stored completion token ids are appended
+unchanged, and the whole sequence goes through one forward pass. The completion
+never gets re-encoded from text, because encode-then-decode is not guaranteed
+to round-trip and a silent one-token shift would misalign every activation
+against its label.
+
+The probe can optionally read a short context window of consecutive hidden
+states rather than a single one, concatenated before the linear layer. The
+default is a single position, so the probe's decision at token $t$ depends on
+the model's state at $t$ alone.
+
+### 3.2 Frozen features versus an adapted model
+
+Two regimes exist, and which one is in use is a configuration field:
+
+- **Frozen.** The language model is fixed, so the hidden state at every token
+  of every rollout is a constant. Those hidden states are extracted once for
+  the whole corpus and stored, and training then reads vectors from disk
+  instead of running the model. Training a linear head on precomputed vectors
+  is bounded by input/output rather than by compute, which makes large sweeps
+  over recipes, window sizes and seeds cheap enough to run exhaustively.
+- **Adapted.** Low-rank adapters are attached to the layers up to and including
+  the probed layer and are trained jointly with the probe head. The hidden
+  states now change at every optimizer step, so the cached activations cannot
+  be used and each step pays a full forward and backward pass of the language
+  model.
+
+One consequence is worth stating plainly, because it is easy to get wrong when
+reasoning about cost. In the frozen regime, selecting a subset of a rollout's
+tokens for training genuinely reduces work, since only the selected vectors are
+read. In the adapted regime it does not: attention is causal, so producing the
+hidden state at a token requires running the whole prefix before it, and
+selecting a subset only changes which positions contribute to the loss. Token
+selection strategies are therefore a statement about *what the probe learns
+from*, and only incidentally about cost.
+
+The comparison of recipes runs in the frozen regime, where every combination
+can be run at several seeds. The adapted regime is reserved for a small final
+comparison, since its cost per configuration is orders of magnitude higher and
+it answers a different question (does adapting the representation help) than the
+recipe comparison does (which selection rule and which target help).
+
+## 4. Targets
+
+### 4.1 The label contract
+
+Every labeling scheme produces the same two things for a rollout: a per-token
+target value, and a per-token mask marking positions with no defined target.
+Masked positions contribute to nothing, neither loss nor metric. This uniform
+shape is what lets the token selection logic stay completely unaware of which
+labeling scheme is active: selection decides *which* tokens enter a batch,
+labeling decides *what value* each of them is trained toward, and neither needs
+to know about the other.
+
+Three families of labels are supported.
+
+### 4.2 Frontier labels, hard
+
+$$y_N(t) = 1 \iff f_r - t \leq N$$
+
+for a horizon $N \geq 0$, with every token of a negative rollout labeled $0$.
+
+At $N = 0$ this is the plain statement "degenerate from the frontier onward":
+tokens before $f_r$ are negative, tokens from $f_r$ to the end of the rollout
+are positive. Larger $N$ shifts the positive region earlier, asking the probe to
+fire $N$ tokens before degeneration is confirmed. The formula needs no special
+case past the frontier, since the distance $f_r - t$ simply goes negative there
+and the condition stays satisfied for every horizon.
+
+The horizon is a genuine axis rather than a relabeling trick, because it is
+visible in the evaluation. A probe trained at a large $N$ should fire earlier
+relative to the frontier, which shows up directly in the lead-time view while
+leaving rollout-level detection roughly unchanged. That view is what gives $N$
+an interpretation.
+
+### 4.3 Frontier labels, soft
+
+The same frontier, with the step function replaced by a decay. Tokens from
+$f_r$ onward are labeled $1$; before the frontier the target decays with
+distance, either linearly to zero over a configured length or exponentially
+with a configured rate. Negative rollouts are labeled $0$ throughout.
+
+The motivation is that the hard label claims a token one position before the
+frontier is as innocent as one a thousand positions before, which is not what
+anyone believes. The decay expresses "closer to the frontier is more
+degenerate" without committing to a hard cut. The decay length is the knob that
+says how far back the run-up is considered to reach.
+
+### 4.4 Token-level signals
+
+The target can also come from a per-token quantity computed independently of
+the frontier, such as a repetition score over a sliding window or the model's
+own predictive entropy. These are stored for every rollout at every token, so
+they plug into the same contract directly.
+
+They differ from the frontier families in an important way: they define a
+target everywhere, including on negative rollouts, where a nonzero repetition
+score describes text that is genuinely repetitive but legitimate. Training
+toward them therefore teaches a somewhat different concept from "this rollout
+has broken", which is exactly why the choice of target is an experimental axis
+and not a foregone conclusion.
+
+### 4.5 Losses, and the rule about correcting imbalance twice
+
+The loss is configured independently of the label. Binary cross entropy is the
+natural pairing for the hard frontier labels and also accepts the soft frontier
+targets directly, since a target anywhere in $[0, 1]$ is well defined for it.
+Regression losses (squared error, absolute error, smoothed absolute error)
+pair with the continuous token-level signals. Keeping label and loss as two
+fields rather than one bundled name is what makes combinations such as "frontier
+distance trained as a regression" expressible without inventing a new name for
+every pair.
+
+Class weighting follows one rule: **imbalance is corrected once**. The positive
+weight applied inside the loss is computed from the population the probe
+actually sees after token selection, not from the raw corpus. Rebalancing the
+sampled population and then applying a corpus-derived weight on top of it
+corrects the same skew twice and pushes the probe toward firing indiscriminately.
+Every run logs the realized positive rate of its own training stream alongside
+the weight in force, so the product of the two stays visible and close to one.
+
+## 5. Training examples and batches
+
+### 5.1 The unit is a window
+
+A training example is a contiguous **window** of $W$ tokens from one rollout,
+not a whole rollout. Every selection strategy, including the one that trains on
+everything, emits the same descriptor: a rollout plus a start and end position.
+This gives one code path, one batch shape and a fixed cost per example, and it
+keeps gradient statistics stable. With whole rollouts as the unit, a batch
+holds one or two examples of wildly different lengths and its gradient is
+dominated by whichever long rollout happened to land in it.
+
+Rollouts shorter than $W$ contribute every token they have, without padding and
+without exclusion. Falling short of $W$ is a property of the rollout, not a
+reason to distort or drop it.
+
+### 5.2 The selection ladder
+
+Five selection strategies are available. They are ordered so that each one
+changes exactly one decision relative to the previous one, which is what makes
+the difference between two adjacent strategies attributable to a single cause.
+Every one of them draws from the same pool: the **entire** rollout, including
+the region past the frontier, so that only the selection rule differs between
+rungs and never the pool itself.
+
+1. **`all_tokens`.** Every token of every rollout, tiled into consecutive
+   windows, with no subsampling anywhere. Class balance is handled purely
+   through the loss weight. This is the reference point: the whole population
+   exactly as generated, with no assumption about which examples are useful. It
+   is also the most expensive and the slowest to converge, since most tokens of
+   most rollouts say nothing about the frontier.
+
+2. **`rollout_balanced`.** Negative rollouts are subsampled to a fixed multiple
+   of the positive count, and each surviving rollout contributes a fixed budget
+   of $W$ tokens regardless of its true length, drawn uniformly at random over
+   its whole length. Fixing the budget here means that from this rung onward
+   the token count per rollout is constant and can never again be a confound.
+   The question this rung isolates is whether correcting the rollout-level
+   class ratio helps on its own.
+
+3. **`random_window`.** The same budget of $W$ tokens per rollout, but now they
+   must be contiguous: one window placed uniformly at random anywhere in the
+   rollout. The question isolated is whether contiguity matters, holding both
+   the budget and the randomness of placement fixed.
+
+4. **`frontier_window`.** The same contiguous window, but for positive rollouts
+   its position is anchored on the frontier rather than random. $W$ is chosen
+   at least as large as the longest horizon of interest, so both classes stay
+   representable inside a single window. Negative rollouts keep random
+   placement, since they have no frontier to anchor to. The question isolated
+   is whether looking specifically near the frontier beats looking anywhere.
+
+   The anchor has two styles, itself a separate comparison. A **trailing**
+   window ends at the frontier and therefore contains only run-up tokens, which
+   matches the deployment situation exactly: nothing after "now" is available to
+   a live decision. A **centered** window spans both sides of the frontier and
+   mixes run-up tokens with confirmed in-pattern ones, which may stabilize the
+   positive class at the cost of spending part of a fixed budget on the easy,
+   already-degenerate region.
+
+5. **`frontier_window_hard_negative`.** Identical for positive rollouts. For
+   negative rollouts the window is no longer placed uniformly: placement is
+   biased toward spans that look structurally repetitive under the repetition
+   and longest-repeated-substring signals, yet belong to a rollout that ended
+   naturally. Those spans are exactly the confusable cases, such as genuine
+   incremental work or repetition the prompt asked for. A configurable fraction
+   of negative windows comes from this biased pool and the rest stay uniform,
+   so coverage and calibration are not lost. The question isolated is whether
+   deliberate exposure to repetitive-but-legitimate text reduces false alarms on
+   the text those heuristics are known to misfire on.
+
+### 5.3 Choosing the window size
+
+$W$ is not fixed a priori. A small set of candidate sizes is piloted on the two
+cheapest rungs, and the winner is then locked for the remaining rungs. Running
+the full ladder at every candidate size would multiply its cost to answer a
+question (how much context a window needs) that is orthogonal to what the
+ladder measures (which selection rule helps).
+
+### 5.4 Batch composition
+
+Batches are assembled by an explicit composition rule, not by shuffling a flat
+list of windows. Shuffling gives batches that are almost entirely negative, so
+many steps carry no positive gradient at all and the per-step loss swings
+violently under a positive weight. The rules are:
+
+- A fixed ratio of positive to negative windows in every batch.
+- Within the negative quota, domains are drawn in proportion to their share of
+  the negative pool rather than uniformly over all negatives pooled together.
+  This matters most for the hard-negative rung, because the confusable cases
+  are themselves domain specific: brute-force enumeration concentrates in the
+  mathematical and code domains, instructed repetition in the
+  instruction-following one. Domain-proportional drawing and hard-negative
+  biasing are one combined selection rule there, not two filters applied in
+  sequence.
+- A cap on how many rollouts of the same prompt may be used per epoch. Without
+  it, a prompt whose rollouts all degenerate floods training with near
+  duplicate windows.
+- Window placements are redrawn every epoch rather than materialized once. This
+  is free augmentation, and it makes the comparison between random and anchored
+  placement a comparison over the pool rather than over one arbitrary draw.
+
+### 5.5 Seeds
+
+One seed per run drives probe initialization, adapter initialization, batch
+order and every sampling decision. Each configuration is run at a small fixed
+set of seeds and every reported metric is a mean and a standard deviation over
+those repeats, so that the difference between two adjacent rungs is read against
+its own noise floor instead of against a single point estimate. This deliberately
+merges optimization noise and sampling noise into one number; separating them
+would need per-source seed plumbing and would answer a question nobody has asked
+yet.
+
+## 6. The training loop
+
+### 6.1 An equal budget for every recipe
+
+The training budget is expressed in optimizer steps and tokens per step, and
+both are held identical across every recipe in a comparison. This is what makes
+the comparison mean anything. An epoch is not a fixed amount of learning here:
+under the exhaustive strategy an epoch is the entire corpus, while under an
+anchored-window strategy it is one window per rollout. Training each recipe for
+"one epoch" would hand them budgets that differ by an order of magnitude, and
+the measured difference would be mostly a difference in training length.
+
+### 6.2 Optimization
+
+Parameters are split into two groups with independent learning rates: the probe
+head (its linear layer and its normalization) and, when the adapted regime is
+in use, the low-rank adapters. Everything else in the language model is frozen,
+and the trainer refuses to start if any parameter outside those two groups turns
+out to require gradients, so a silent full fine-tune is impossible. Gradients are
+clipped by global norm, and gradient accumulation is used to reach the
+configured tokens per step.
+
+Which layers the adapters cover is its own axis: none (a strictly frozen model),
+every layer up to the probed one, or an explicit list.
+
+### 6.3 Monitoring, selection and stopping
+
+Validation during training runs on a fixed subset of `val`, evaluated every $N$
+steps. The subset is derived from the split alone and not from the run seed, so
+every run in a comparison is monitored on identical rows. Its numbers exist to
+steer the run and are never reported.
+
+The metric used to stop and to select a checkpoint is computed in **evaluation
+space**, from the probe's scores through the protocol of Section 7, and never
+from the training loss. The reason is that losses are not comparable across
+recipes: cross entropy against hard frontier labels and squared error against a
+decayed target are different currencies, and stopping each recipe when its own
+loss plateaus stops each one at a different point of the same trade-off curve.
+Every recipe, whatever it was trained against, produces a per-token score in
+$[0, 1]$, so all of them can be judged on the same score-space quantity.
+
+The default is the threshold-free, rollout-level area under the ROC curve. It
+assumes no threshold and no calibration, and it is invariant to any monotone
+rescaling of the score, which is what makes it equally fair to a probe trained
+on hard labels and one trained on a decayed target whose outputs live in a
+compressed range. The metric is a configuration field and may be something else
+(area under the precision-recall curve, true positive rate at a fixed false
+alarm budget, median lead time at a fixed budget) when a different question is
+being asked. The rule is that it may differ between comparison tables and never
+within one.
+
+Stopping works as follows: the best checkpoint by the selection metric is kept,
+training halts after a configured number of evaluations without improvement, and
+there is a hard cap on steps. Early stopping chooses *which step's checkpoint is
+kept* and never shortens one recipe's budget relative to another's. Each run
+records the step it selected, and if runs routinely stop at the cap then the
+budget is too small and the comparison is not yet valid.
+
+Two guards run alongside:
+
+- **Collapse guard.** A probe can minimize its loss by ignoring its input and
+  emitting one constant value for every token, which under a strong positive
+  weight is a real attractor. Such a probe has a respectable loss and is
+  worthless, and rank-based metrics computed on constant scores are undefined
+  or arbitrary. Every validation pass therefore records the standard deviation
+  of the probe's scores over the monitored tokens, and a run whose score spread
+  falls to approximately zero is flagged and treated as invalid rather than
+  entering a results table with a plausible-looking loss.
+- **Positive-rate check.** The realized positive rate of the training stream and
+  the positive weight in force are logged together, which surfaces a double
+  correction of class imbalance immediately.
+
+### 6.4 What a run writes
+
+Every run writes: the fully resolved configuration, the composition of each
+split as the probe actually saw it, the selected checkpoint (the probe head,
+plus the adapter weights when adapters are in use), the last checkpoint, the
+training and monitoring history, and, once training is over, the decision
+thresholds derived from the full validation split as described below.
+Checkpoints are small, since only the head and the adapters are ever saved and
+never the base model, which is what makes it affordable to save on the
+validation cadence and therefore to resume an interrupted run rather than
+repeat it.
+
+A run is named after its own axes, with a fingerprint of the full configuration
+attached, so two runs that differ in any setting that changes what they learn
+can never be confused for one another. Repeats of one configuration share a
+parent and differ by a timestamp, so running the same thing twice adds an
+attempt instead of overwriting the first, and seed repeats of one recipe carry a
+shared group label that aggregates them into a single line with a spread.
+
+The metric history is mirrored locally in the same shape it is sent to the
+experiment tracker, and written from the same hook, so the two cannot drift
+apart. Every plot the tracker shows during a sweep can therefore be rebuilt
+afterwards from the run directory alone, along with comparisons across runs that
+the tracker was never asked for.
+
+## 7. The evaluation protocol
+
+### 7.1 Scores as the interface
+
+Evaluation never receives a model. It receives a file of **per-token scores**:
+one row per rollout, carrying the rollout's identity, its domain, its split, how
+it stopped, its length, its frontier if it has one, and the sequence of
+probabilities the scorer assigned to its tokens.
+
+Everything else follows from that. The protocol is blind to how a score was
+produced, so it applies unchanged to any probe recipe and to non-learned
+baselines such as a repetition heuristic mapped into $[0, 1]$, which puts probes
+and baselines in the same table by construction. Producing scores costs a pass
+over the data on a GPU; computing metrics from them is a small job on a CPU, so
+the protocol can be extended or re-run whenever a question changes without ever
+recomputing a score. And because scores are stored rather than recomputed, two
+metrics reported for the same run are guaranteed to describe the same numbers.
+
+Scoring is exhaustive. Every token of every rollout in an evaluation split is
+scored, with no subsampling of negative rollouts and no cap on tokens per
+rollout. A cap can only underestimate a false alarm rate, and the false alarm
+rate is the number the deployment decision turns on. The evaluation splits are
+never resampled or rebalanced either, because a rebalanced split's rates would
+no longer estimate what happens on real, naturally imbalanced generations. Only
+the training split is ever resampled.
+
+The correctness of the protocol is checked against synthetic scorers with known
+answers: a perfect oracle that steps from zero to one exactly at the frontier,
+an oracle delayed by a fixed number of tokens, an oracle that fires early, a
+constant scorer, pure noise, and a noisy oracle that spikes for single tokens on
+negative rollouts. Each has a hand-computable value for every view, which is
+what makes a surprising number on a real probe trustworthy as a result rather
+than suspect as an off-by-one.
+
+### 7.2 The first-alarm position
+
+One quantity underlies every view. For a rollout $r$, a decision threshold
+$\tau$ and a persistence window $m \geq 1$:
 
 $$
-a_r(\tau, m) = \min\{\, t : p_r(t') \geq \tau \text{ for all } t' \in [t, t+m) \,\}, \quad \text{or } \infty \text{ if no such } t \text{ exists.}
+a_r(\tau, m) = \min\{\, t : p_r(t') \geq \tau \text{ for all } t' \in [t, t+m) \,\},
+\quad \text{or } \infty \text{ if no such } t \text{ exists}
 $$
 
-where $p_r(t)$ is the probe's output probability at token $t$ of rollout
-$r$. This is the **first-alarm position**: the first token at which the
-probe would have fired, at a given threshold, requiring $m$ consecutive
-tokens at or above $\tau$ before firing. $m = 1$ recovers plain first-crossing
-(fires on a single token above threshold); $m > 1$ trades away some lead time
-for robustness against a single noisy spike in $p_r(t)$ — which matters
-because a spurious one-token spike is exactly what produces a false
-early-stop (§1.4) on an otherwise-negative rollout. $m$ is a property of the
-evaluation, not of the probe, and is chosen alongside $\tau$ in §1.5; for
-brevity it is written $a_r(\tau)$ everywhere below, with $m$ implicitly fixed
-to whatever value §1.5 settles on. It plays the same role here that "first
-threshold crossing" plays for TTR and "first match position" plays for LRS
-elsewhere in the paper (§ttr-labeling, §lrs-labeling), so probe results slot
-into the same table shape already used for those two metrics.
+where $p_r(t)$ is the score at token $t$. This is the first token at which the
+probe would have fired, requiring $m$ consecutive tokens at or above the
+threshold before it commits. At $m = 1$ this is plain first crossing. Larger $m$
+trades a little lead time for immunity to a single noisy spike, which is exactly
+what produces a spurious early stop on an otherwise healthy generation. Both
+$\tau$ and $m$ are properties of the evaluation and not of the probe, and both
+are chosen on validation data as described in Section 7.7.
 
-Once $a_r(\tau)$ is computed for every rollout in a split (a single pass over
-the probe's per-token predictions), three complementary views are reported
-from it, described next.
+The first alarm plays the same role for probes that first threshold crossing
+plays for a repetition score and first match position plays for a
+longest-repeated-substring signal, so probe results slot into the same table
+shape as those baselines.
 
-### 1.2 View A — rollout-level detection
+### 7.3 View A: rollout-level detection
 
-For a fixed $\tau$ (see §1.5 for how $\tau$ is chosen), over all rollouts in
-a test split:
+At a fixed threshold, over all rollouts of a split: a rollout counts as
+predicted positive when its first alarm is finite. That gives a confusion matrix
+against the true rollout label, and from it precision, recall and accuracy.
+Sweeping the threshold gives a rollout-level ROC curve, a precision-recall curve
+and their areas, reported alongside the fixed operating point as a
+threshold-free summary and as a check that no single operating point was
+cherry-picked.
 
-- Completion-level confusion matrix: predicted-positive $=[a_r(\tau)<\infty]$
-  vs. true `is_positive`. Report precision / recall / accuracy, exactly the
-  shape of Tables `ttr-confusion` and `lrs-confusion` in the paper.
-- Sweeping $\tau$ gives a rollout-level ROC/PR curve and its AUC, as a
-  threshold-free summary alongside the fixed operating point.
+### 7.4 View B: token-level coverage
 
-### 1.3 View B — full token-level coverage
+Rates are reported per population, with population sizes always shown next to
+them, and never blended into one accuracy number.
 
-- **Negative rollouts** (`stop_reason == "eos"`): every single token is
-  scored, with no subsampling. The metric is the token-level false-positive
-  rate, plus how many rollouts have at least one false positive at all.
-- **Positive rollouts**, split at the frontier:
-  - $t \geq f_r$ (inside the repeating pattern): recall
-    ($1 - $ false-negative rate) is the metric that matters — once inside the
-    loop, the probe should catch essentially every token of it. Report
-    pooled recall and, per rollout, the count of missed in-pattern tokens
-    (not just a rate), since a single missed token deep inside a long loop
-    is a very different failure from missing its last 50 tokens.
-  - $t < f_r$ (before the frontier): not scored against a positive label —
-    these tokens are not degenerate yet — this population feeds View C
-    instead.
-- Report population sizes alongside every rate (n tokens, n rollouts), so
-  the token-level class imbalance between domains/rollouts stays visible
-  rather than being collapsed into one blended accuracy number.
+- **Negative rollouts.** Every token is scored. The metrics are the token-level
+  false positive rate and the fraction of rollouts with at least one false
+  positive anywhere.
+- **Positive rollouts, from the frontier onward.** Recall is what matters here:
+  once inside the loop the probe should catch essentially every token of it.
+  Both the pooled recall and, per rollout, the *count* of missed in-pattern
+  tokens are reported, because one missed token deep inside a long loop is a
+  very different failure from missing the last fifty.
+- **Positive rollouts, before the frontier.** Not scored against a positive
+  label, since these tokens are not degenerate yet. This population is what
+  View C is about.
 
-### 1.4 View C — early-stopping lead time
+The reason this view is split rather than pooled is that the in-pattern tails
+dominate the positive token population and are trivially separable. A single
+blended token accuracy would read close to perfect for almost any probe and
+would say nothing about the part of the problem that is hard.
 
-- For true positives with $a_r(\tau) < \infty$: distribution of
-  $a_r(\tau) - f_r$ (negative = the probe fired before the frontier — lead
-  time gained; positive = it fired late). Report median and mean, signed
-  and absolute, in the same form as the TTR-vs-judge and LRS-vs-judge onset
-  offsets already in the paper (§ttr-labeling, §lrs-labeling).
-- For true positives with $a_r(\tau) = \infty$ (missed entirely): report
-  separately as "never fired" rather than folding into the offset average.
-- For true negatives: any finite $a_r(\tau)$ is a false early-stop — report
-  its rate, since it is the direct cost of deploying the probe as an
+### 7.5 View C: lead time
+
+- For detected positives, the distribution of $a_r(\tau, m) - f_r$: negative
+  values mean the probe fired before the frontier and bought lead time, positive
+  values mean it fired late. Median and mean are reported, signed and absolute,
+  in the same form as the onset offsets used for the heuristic baselines.
+- Positives that were never detected are reported separately as such, never
+  folded into an average offset, where they would silently distort it.
+- For negatives, any finite first alarm is a false early stop. Its rate is
+  reported directly, since it is the concrete cost of deploying the probe as an
   early-stopping trigger.
 
-### 1.5 Choosing and freezing $\tau$
+### 7.6 View D: alarm persistence
 
-$\tau$ is picked once on `val` and frozen before touching `test_indomain` /
-`test_heldout_domains`. A reasonable default: pick $\tau$ to hit a target
-false-positive rate on `val`'s negative rollouts (a "budget" framing that
-matches the early-stopping use case — how much false-alarm cost is
-acceptable). "How much false-alarm cost is acceptable" is itself a downstream
-deployment decision this note can't settle, so rather than freezing a single
-$\tau$, freeze a small family of operating points on `val` (e.g. the
-thresholds hitting a 1%, 5%, and 10% negative-rollout false-positive rate)
-and report all three views at each, plus the threshold-free rollout-level AUC
-from §1.2 as a sanity check that none of them was cherry-picked. The
-persistence window $m$ (§1.1) is fixed at $m = 1$ by default across all
-operating points — only revisited (swept alongside $\tau$ on `val`) if the
-false-early-stop rate at $m = 1$ turns out high enough to matter, rather than
-introduced pre-emptively.
+Detection and lead time say nothing about whether the probe stays convinced. A
+probe that fires once and immediately retracts is noise, even when its first
+alarm happens to land in the right place; a probe that fires and then holds is
+making a decision. For a fixed threshold, per rollout and from the first alarm
+onward:
 
-### 1.6 Test-split construction
+- the length of the first firing run,
+- the duty cycle after the first alarm (the fraction of subsequent tokens at or
+  above the threshold), which is more robust than the run length because one
+  dip should not erase the story,
+- the number of separate firing episodes across the rollout, where one episode
+  is the clean "decides once" behaviour,
+- the retraction rate: how often the probe fires and then falls silent for the
+  whole remainder,
+- the gap between the first alarm and permanent commitment, meaning the first
+  position after which the score never drops below the threshold again. This is
+  the width of the region in which the probe is dithering.
 
-- **Prompt-level composition** (which domains, how many prompts per domain)
-  is already stratified — `notebooks/inspect_dataset.ipynb` (Section 5) shows
-  each in-domain source (`aime_2025`, `deepmath_103k`, `if_sft_data_verified`,
-  `llama_nemotron`, `numinamath_1_5`) contributes essentially the same share
-  of `train`, `val`, and `test_indomain` (e.g. `deepmath_103k`/`if_sft`/
-  `llama_nemotron`/`numinamath_1_5` are each ~24.7% of every one of the three
-  splits; the smaller `aime_2025` domain is ~1.1–1.4% of each). The two
-  held-out sources (`codeforces`, `medical_o1`) are 100% in
-  `test_heldout_domains` and 0% elsewhere by design, not a stratification gap
-  — they exist specifically for zero-shot, cross-domain evaluation.
-- **Positive-rollout scarcity in `test_heldout_domains`.** The two held-out
-  domains are far from equally positive: in the current
-  `apertus-8b-instruct` build, `codeforces` has 24 positive rollouts out of
-  6000 (0.4%), while `medical_o1` has exactly **1** positive rollout out of
-  6000. Views A and C, reported per held-out domain, are essentially
-  undefined for `medical_o1` at this rate — a single positive example carries
-  no statistical weight — so `test_heldout_domains` numbers should be read
-  per-domain, not pooled, and `medical_o1`'s View A/C numbers specifically
-  should be treated as anecdotal rather than a generalization estimate until
-  more positive rollouts exist for that domain.
-- **Token-level imbalance** (some rollouts contribute thousands of tokens,
-  most of them negative) is inherent to the problem. §1.3's rule (report
-  rates + population sizes per population, never one blended number) is the
-  handling for it — the test and validation splits themselves are never
-  resampled or rebalanced, since doing so would mean the reported
-  false-positive/recall rates no longer estimate what happens on real,
-  naturally-imbalanced generations. **Only the training split is ever
-  resampled** (Section 2).
+The compact summary is a two-state view of the alarm: the probability that a
+firing token is followed by another firing token, and the probability that a
+quiet token is followed by a firing one. Mean run length is one over one minus
+the first of those. Two numbers per threshold per population make statements
+like "once firing, it keeps firing with probability 0.99, and while quiet it
+fires spuriously once in ten thousand tokens" directly readable.
 
-## 2. A pluggable training framework, decoupled from evaluation
+Three rules keep this view honest:
 
-### 2.1 Four independent axes
+- It is read in opposite directions for the two populations. On positives, a
+  high duty cycle and a sticky alarm are good. On negatives every alarm is an
+  error, and the run-length distribution separates a jittery probe (spikes of a
+  few tokens) from a confidently wrong one (long sustained runs). Those two
+  failures call for completely different fixes.
+- It is never reported alone. A probe that outputs one everywhere has perfect
+  persistence and is useless, so persistence is always reported in the same row
+  as the false alarm rate and the lead time at the same threshold.
+- Run lengths are reported both raw and normalized by the number of tokens
+  remaining after the first alarm, otherwise a probe that fires late looks
+  artificially incoherent.
 
-Every training run is a point in a small grid of independent choices, each
-its own config field:
+This view also decides $m$. If false alarms on negative rollouts are runs of a
+few tokens while true alarms on positives run for hundreds, then a small
+persistence window removes most spurious early stops at a cost of a few tokens
+of lead time, and that trade-off is read directly off the two run-length
+distributions instead of being guessed at. $m$ is therefore chosen from
+persistence measured on validation data, alongside the thresholds, rather than
+being fixed in advance.
 
-1. **`sampling_strategy`** — how (X, Y) examples are drawn from the fixed
-   `train` split for one training run (Section 2.2).
-2. **`label_source`** — which signal supplies the training target for a
-   token (Section 2.3).
-3. **`loss_function`** — which loss is optimized against that target
-   (Section 2.4).
-4. **`lora_scope`** — whether/where LoRA adapts the underlying LM
-   (Section 2.6).
+### 7.7 What is tuned where
 
-Any combination of the four is evaluated with the exact same protocol from
-Section 1, so a comparison table (rows = combinations of these axes, columns
-= View A/B/C metrics) is the natural output of "which training technique is
-better, and why." `label_source` and `loss_function` are related — a
-discrete/binary target pairs naturally with a classification loss, a
-continuous score with a regression loss — but they are still kept as two
-separate fields rather than one combined choice, since a continuous score
-can also be thresholded into a binary target and trained with a
-classification loss (already effectively what the frontier-derived
-multi-horizon labels do internally, turning a distance into a per-horizon
-0/1 target). Keeping them separate lets that kind of combination stay
-expressible without adding a new named option every time.
+The boundary between tuning and reporting is enforced by the tooling rather than
+by discipline.
 
-### 2.2 `sampling_strategy`: an ablation ladder, not a flat menu
+- **Validation decides everything.** The checkpoint, the persistence window, the
+  thresholds, the window size, and which recipe wins are all chosen on
+  validation data. Choosing among several recipes and several seeds by their
+  test numbers would be threshold shopping against a small positive population.
+- **Thresholds are frozen before test data is touched.** Rather than committing
+  to one threshold, a small family of operating points is fixed by targeting
+  several false alarm budgets on the validation split's negative rollouts, for
+  example the thresholds that hit one, five and ten percent. A budget framing
+  matches the deployment question, which is how much false-alarm cost is
+  acceptable, and that question cannot be settled here, so all views are
+  reported at all three points together with the threshold-free areas.
+- **Frozen values are written to a file** by the validation pass and read back
+  by every test report. The reporting tool computes a threshold only from the
+  validation split and refuses to produce a test report for a scorer that has no
+  frozen thresholds, so the leak is structurally impossible rather than merely
+  discouraged.
 
-The five `sampling_strategy` options are ordered as a ladder: each rung
-changes exactly one design decision relative to the previous one, so that
-comparing adjacent rungs under the Section 1 protocol isolates the effect of
-that one decision rather than conflating several at once. `label_source`
-(`frontier_onset`) and `loss_function` (`bce`) are held fixed across all five
-rungs — only `sampling_strategy` varies.
+For held-out domains the frozen in-domain threshold is applied unchanged,
+because that is the honest zero-shot number, but the threshold-free area is
+reported per domain next to it. Score scales can shift across domains, and the
+two numbers together separate a calibration shift (ranking still works, the
+threshold no longer fits) from a representation failure (the ranking itself does
+not transfer). They call for different fixes, and one number alone cannot tell
+them apart.
 
-Every rung draws from the same pool: **the entire rollout**, not just the
-prefix up to the frontier. A positive rollout's per-token target is the
-horizon formula $y_N(t) = 1 \text{ iff } f_r - t \leq N$, applied at every
-position $t$ from $0$ to the rollout's last token — for $t > f_r$ this
-already evaluates to $1$ for every horizon $N \geq 0$ (the token is inside
-the confirmed pattern, so it counts as positive regardless of how far past
-the frontier it is), so no separate label rule is needed for the
-in-pattern region. Keeping the pool identical across all five rungs is what
-makes the adjacent-rung deltas attributable to a single cause: only the
-*selection rule* over that pool changes from rung to rung, never the pool
-itself.
+### 7.8 Reporting rules
 
-1. **`full_classification`**: every token of every train rollout, no
-   subsampling at all. Class imbalance is handled purely through the loss
-   (`pos_weight` in `BCEWithLogitsLoss`, using the corpus-true inverse
-   positive rate computed by `onset_dataset.pos_weight_for_horizons`) rather
-   than by touching which examples are seen. This is the reference point:
-   the whole training population, exactly as generated, with no assumptions
-   about what makes an example useful. Also the most expensive and the
-   slowest to converge, since most tokens in most rollouts carry no
-   information about the frontier.
+- Held-out domains are reported per domain and never pooled.
+- Every rate is printed with its population sizes, in tokens and in rollouts.
+- Any per-domain cell backed by fewer than a small minimum of positive rollouts
+  is reported and marked anecdotal, never silently hidden and never quoted as an
+  estimate of generalization.
+- Every metric of a recipe is a mean and a standard deviation over its seed
+  repeats.
 
-2. **`rollout_balanced`**: negative rollouts are subsampled to a fixed
-   multiple of the positive count (`ImbalancedRolloutSampler`), and, within
-   a rollout, a *fixed budget of $W$ tokens* is kept regardless of the
-   rollout's true length — $W$ chosen equal to the window size used by every
-   later rung, so token budget per rollout is held constant from here on and
-   is never again a confound between rungs. The $W$ kept tokens are a
-   uniform random sample over the rollout's *entire* length (positive or
-   negative alike — a positive rollout can contribute post-frontier,
-   deep-in-pattern tokens here just as freely as pre-frontier ones). This
-   isolates one question relative to rung 1: *does correcting the
-   rollout-level class ratio, on its own, help — independent of which
-   specific tokens end up in the fixed budget?*
+## 8. Comparing recipes
 
-3. **`random_window`**: same fixed budget as rung 2 ($W$ tokens per
-   rollout), but the $W$ tokens must now be *contiguous* — one randomly
-   placed window of length $W$ anywhere in the rollout (again, the full
-   length, not restricted to the pre-frontier region), instead of $W$ tokens
-   sampled independently. This isolates: *does replacing an
-   independently-sampled token budget with one contiguous window change
-   anything*, holding the window's position unconstrained (still random)?
+A training run is a point in a grid of independent axes: the token selection
+strategy, the label family and its parameters, the loss, and the adapter scope.
+Any combination is evaluated by the identical protocol of Section 7, so a table
+whose rows are combinations and whose columns are the four views is the natural
+output of the question "which recipe is better, and in what respect".
 
-4. **`frontier_window`**: same contiguous window of length $W$, drawn from
-   the same full-rollout pool as rung 3, but for positive rollouts the
-   window's position is no longer random — it is anchored on the frontier
-   $f_r$, with $W$ chosen $\geq$ the longest horizon of interest so every
-   horizon's positive and negative tokens stay representable inside one
-   window. This is a deliberate narrowing relative to rung 3 — the window
-   can no longer land just anywhere, only near the frontier — which is
-   exactly the comparison of interest: *does anchoring the window
-   specifically on the frontier, rather than placing it anywhere in the
-   rollout, help?* Negative-rollout windows stay randomly placed, unchanged
-   from rung 3 (there is no frontier to anchor to in a negative rollout).
-   `frontier_window` is also the rung with the best cost/generalization
-   property independent of the ablation logic: every rollout, old or new,
-   contributes exactly one window of fixed size, so adding a new domain or a
-   much longer rollout never changes per-example cost or the effective
-   class balance.
+Two conventions keep such a table meaningful. Within one table, only the axis
+under study varies and everything else, including the training budget, the
+monitoring subset, the selection metric and the seed set, is held fixed. And
+differences between adjacent rungs of the selection ladder are reported as
+deltas with their spread across seeds, since each such delta is attributable to
+exactly one design decision only if the ladder was built so that exactly one
+thing changed.
 
-   *Anchor style* is itself a second, open experimental choice within this
-   rung, independent of the rung-3-vs-4 comparison above: a `trailing`
-   window (the $W$ tokens ending at $f_r$, entirely pre-frontier/lead-up)
-   vs. a `centered` window (roughly $W/2$ tokens on each side of $f_r$,
-   mixing lead-up tokens with confirmed in-pattern ones). `trailing` matches
-   the early-stopping deployment framing directly — it's exactly the
-   context a live decision would have, nothing past "now" — and keeps every
-   token in the window close to the ambiguous boundary. `centered` also
-   exposes training to clearly-positive, already-in-pattern tokens in the
-   same window, which could stabilize the positive class's representation
-   but spends part of the fixed budget $W$ on the easier, already-degenerate
-   region rather than the harder boundary one. Neither is obviously better a
-   priori — this is deliberately left as a value to sweep (`trailing` as the
-   default to compare `random_window` against, `centered` as a second point
-   once that comparison is in), not a decision made here.
+## 9. The configuration surface
 
-5. **`frontier_window` + hard-negative mining**: identical to rung 4 for
-   positive rollouts; for negative rollouts, the window is no longer placed
-   uniformly at random. It is instead biased toward spans with an elevated
-   TTR-based repetition score or an LRS match (§ttr-labeling,
-   §lrs-labeling) — i.e. spans that look structurally repetitive by the same
-   heuristics used earlier in the labeling pipeline, yet belong to a
-   confirmed-negative rollout, which is exactly the shape of the confusable
-   cases the LLM judge exists to rule out (§llm-judge-labeling: genuine
-   incremental work, instructed repetition). A configurable mix ratio
-   (e.g. a fraction of windows drawn from the hard-negative pool, the rest
-   uniformly at random as in rung 4, for coverage/calibration) is a
-   parameter of this rung, not a separate one. Isolated question: *does
-   deliberately exposing the probe to structurally-repetitive-but-legitimate
-   negatives, instead of drawing negatives uniformly at random, reduce
-   false positives specifically on the kind of text those metrics are known
-   to misfire on?*
+A run is fully specified by one configuration. The fields below are the ones
+that change what is learned or what is measured; the rest (paths, logging,
+tracking) are incidental.
 
-All five rungs share one call signature — given the fixed `rollout_index`
-DataFrame (already carrying `domain`, `prompt_id`, `is_positive`,
-`onset_position` from `onset_labels.py`) plus a layer, produce `(X, Y)` or a
-batch sampler — so `TrainingConfig` gains a
-`sampling_strategy: Literal["full_classification", "rollout_balanced", "random_window", "frontier_window", "frontier_window_hard_negative"]`
-field that dispatches to one of five functions in (e.g.) a new
-`degeneration_probe/data/sampling_strategies.py`, mirroring the dispatch
-`ProbeTrainer.compute_loss` already does on `task`. Rungs 2–5 all keep
-reusing the existing `OnsetActivationDataset`/`materialize_features`
-machinery — only the *index* (and, for rung 5, the window-selection weights)
-each rung hands to it differs.
+```yaml
+features:
+  regime: frozen            # frozen | adapted
+  layer: 30                 # which residual stream the probe reads
+  context_window_size: 1    # consecutive hidden states concatenated per decision
+  normalization: layernorm  # none | layernorm | rmsnorm | l2
 
-#### 2.2.1 Choosing $W$
+label:
+  family: frontier_hard     # frontier_hard | frontier_soft | token_signal
+  horizon: 0                # frontier_hard: y=1 iff f_r - t <= horizon
+  decay: exponential        # frontier_soft: linear | exponential
+  decay_length: 256         # frontier_soft: how far back the run-up reaches
+  signal: repetition_score  # token_signal: repetition_score | entropy
 
-$W$ is not fixed a priori. Three candidate values — $64$, $128$, $256$ — are
-piloted on rungs 1–2 only (the cheapest pair in the ladder) before committing
-to a single $W$ for rungs 3–5; running the full five-rung ladder at all three
-values would triple the ladder's cost to answer a question (window size)
-that is orthogonal to what the ladder itself is measuring (which selection
-rule helps). Whichever $W$ wins the pilot is then locked for the remaining
-rungs, consistent with §2.5's preference for evidence-driven parameter
-choices over pre-emptive sweeps. Rollouts shorter than $W$ contribute every
-eligible token they have — no padding, no exclusion — since falling short of
-$W$ is a property of the rollout, not a reason to distort or drop it.
+loss:
+  name: bce                 # bce | mse | l1 | smooth_l1
+  pos_weight: sampled       # sampled | none | <float>
 
-#### 2.2.2 Run-to-run variance across seeds
+sampling:
+  strategy: frontier_window # all_tokens | rollout_balanced | random_window |
+                            # frontier_window | frontier_window_hard_negative
+  window_size: 128
+  anchor: trailing          # frontier_window: trailing | centered
+  negative_rollouts_per_positive: 4.0
+  positive_windows_per_batch_fraction: 0.2
+  domain_stratified: true
+  max_rollouts_per_prompt: 4
+  hard_negative_fraction: 0.5
+  resample_each_epoch: true
 
-Every rung (and, during the $W$ pilot, every candidate $W$) is run at a small
-fixed set of seeds — reusing the single `TrainingConfig.seed` field
-(`config.py:140`) that already drives probe/LoRA weight init (`setup_probe`),
-`torch.manual_seed`, and the sampling randomness itself
-(`ImbalancedRolloutSampler`, negative-token subsampling in
-`OnsetActivationDataset`), rather than introducing a separate seed per
-randomness source. Report mean $\pm$ std of every View A/B/C metric across
-those seed repeats, so an adjacent-rung delta (§4) is judged against its
-noise floor rather than a single point estimate. This conflates
-training-dynamics noise with sampling-strategy noise into one combined
-variance; that is an acceptable simplification for the ladder itself, since
-decomposing the two would require new seed plumbing with no evidence yet that
-it's needed.
+adapters:
+  layers: all               # none | all | [list of layer indices]
+  rank: 16
+  alpha: 32
+  dropout: 0.05
 
-### 2.3 `label_source`: which signal defines the training target
+budget:
+  max_steps: 2000
+  tokens_per_step: 8192
+  eval_every_steps: 50
+  patience: 6
+  selection_metric: rollout_auc
+  probe_learning_rate: 1e-4
+  adapter_learning_rate: 1e-4
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  seed: 42
 
-A token's training target can come from more than one signal, and the choice
-is independent of `sampling_strategy`:
+evaluation:
+  monitor_negatives_per_positive: 4.0   # in-loop monitoring only
+  false_alarm_budgets: [0.01, 0.05, 0.10]
+  persistence_candidates: [1, 3, 5]
+  per_domain: true
+  min_positives_for_reporting: 10
+```
 
-- **`frontier_onset`** (current default): the discrete, per-horizon 0/1
-  target derived from the degeneration frontier $f_r$ via
-  `resolve_onset_position()` and the horizon encoding in
-  `onset_dataset.OnsetActivationDataset._labels_for` — `y_N(t) = 1` iff
-  $f_r - t \leq N$. This is the target the onset probes (`probe_N` /
-  multi-horizon) train against today.
-- **`repetition_score`**: the continuous TTR-based repetition score
-  (§ttr-labeling) at each token, already used as a regression target by the
-  existing `task="repetition_score"` path (`training/trainer.py`,
-  `compute_probe_regression_loss`).
-- any future signal (e.g. the LLM judge's `onset_quote`, once populated at
-  scale) — `resolve_onset_position()` already treats this as a swappable
-  `onset_metric`, so a new frontier-defining signal is a one-line addition
-  there and does not require a new `label_source`; a new `label_source` is
-  only needed for a signal that isn't a frontier position at all (e.g. a
-  continuous per-token score with no single onset point).
+## 10. Reproducibility
 
-Every `label_source` exposes the same shape of output — a per-token target
-(plus an ignore-mask for positions with no defined label) — so
-`sampling_strategy` (Section 2.2) stays agnostic to which one is in use: it
-selects *which tokens* go into a batch, `label_source` decides *what value*
-each selected token is trained toward.
-
-### 2.4 `loss_function`: which loss is optimized
-
-- **`bce`** (binary cross-entropy, optionally per-horizon and weighted):
-  `compute_probe_bce_loss` / `compute_multi_horizon_bce_loss` in
-  `training/loss.py`. The natural pairing for `frontier_onset`'s discrete
-  horizon targets.
-- **`mse` / `smooth_l1` / `l1`**: `compute_probe_regression_loss`, already
-  implemented and selected via `TrainingConfig.regression_loss`. The natural
-  pairing for a continuous `label_source` like `repetition_score`.
-
-`loss_function` is what today is implicitly fixed by the `task` literal
-(`"repetition_score"` → a regression loss, `"onset_multi_horizon"` →
-multi-horizon BCE). Exposing it as its own field alongside `label_source`
-means, for instance, the frontier-derived horizon targets could be trained
-with a regression loss against the raw distance-to-onset value instead of a
-thresholded 0/1 — a combination the current `task` enum cannot express
-because it bundles label and loss into one name.
-
-### 2.5 Cross-cutting stratification (domain / prompt)
-
-Stratification by domain and prompt is orthogonal to which rung of the
-ladder above is chosen, and is an additional, optional parameter of
-whichever sampler underlies that rung, since `rollout_index` already
-carries the needed columns:
-
-- `stratify_by_domain: bool` — when subsampling negatives (rung 2) or
-  drawing negative windows (rungs 3–5), draw proportionally to each domain's
-  share of the pool rather than uniformly at random over all negative
-  rollouts pooled together. This also interacts directly with rung 5's
-  hard-negative pool, since the confusable, structurally-repetitive-but-legitimate
-  cases are themselves domain-specific (brute-force enumeration concentrates
-  in the math/code domains, instructed repetition in `if_sft_data_verified`)
-  — domain-proportional sampling and hard-negative mining should be thought
-  of as one combined selection rule for rung 5, not two independent filters
-  applied in sequence.
-- `max_windows_per_prompt: Optional[int]` — a cap on how many of a batch's
-  positive examples may come from the same `prompt_id` (relevant mainly to
-  `frontier_window`, where a prompt with many sampled rollouts could
-  otherwise flood a batch with near-duplicate windows).
-
-Recommendation: implement domain-proportional sampling now (it's nearly
-free, the column already exists), but treat the prompt-level cap as a
-stretch goal, added only if cross-prompt overfitting is actually observed
-empirically (e.g. a gap between `test_indomain` and `test_heldout_domains`
-in Section 1's metrics that domain-proportional sampling alone doesn't
-close) — see [[project_direction]] for the same preference expressed for
-window-score parameter selection: prioritize interpretability and evidence
-over adding knobs pre-emptively.
-
-### 2.6 `lora_scope`
-
-`ProbeConfig.lora_layers` accepts `"all"` (resolves to every layer from 0 up
-to the probed layer, `config.py:75-84`), `"none"` (frozen model), or an
-explicit list of layer indices. Subtasks G–K of the onset-probes project
-already validated this end-to-end (LoRA vs. no-LoRA comparison at layer 16).
-The remaining work is to treat `lora_scope` as an explicit axis in the same
-results table as the other three — comparisons so far have only varied it at
-one fixed, implicit sampling/label/loss regime.
-
-## 3. Implementation status
-
-### 3.1 Already implemented (reuse, don't rebuild)
-- Degeneration frontier / onset position: `resolve_onset_position()`,
-  `degeneration_probe/dataset_gen/onset_labels.py`.
-- The rollout-population-ratio half of rung 2: `ImbalancedRolloutSampler`
-  (negative rollouts subsampled to a configurable multiple of the positive
-  count) in `degeneration_probe/data/onset_dataset.py`, plus a per-rollout
-  negative-token cap (`max_negative_tokens_per_rollout`) in the same module —
-  reusable as-is for rung 2's negative side. The positive side still needs
-  the fixed-budget change described in §3.2.
-- Corpus-true `pos_weight` for loss-based rebalancing (used across every
-  rung, not just rung 1): `onset_dataset.pos_weight_for_horizons`.
-- `lora_scope` axis: `ProbeConfig.lora_layers`, validated in subtasks G–K.
-- Every `loss_function` option (`bce`, `mse`/`smooth_l1`/`l1`):
-  `training/loss.py`
-  (`compute_probe_bce_loss`/`compute_multi_horizon_bce_loss`,
-  `compute_probe_regression_loss`).
-- Both `label_source` options (`frontier_onset`, `repetition_score`): the
-  former via `resolve_onset_position()` + the horizon encoding in
-  `onset_dataset.py`, the latter via the existing `task="repetition_score"`
-  path.
-- Prompt-level domain-stratified train/val/test splits (see
-  `notebooks/inspect_dataset.ipynb`, Section 5) — no change needed here.
-
-### 3.2 Not yet implemented
-- **Reading past the frontier at all.** `OnsetActivationDataset` currently
-  caps a positive rollout's read at `onset_position + 1` — every position
-  after the frontier is never loaded, for training or evaluation. Both the
-  full-rollout pool every rung in §2.2 now relies on, and View B's
-  in-pattern recall check ($t \geq f_r$, §1.3), need those positions
-  available. This is a change to the underlying activation read, not just
-  to which positions get selected afterward — concretely, the fix is
-  localized to the `eligible_end` computation in
-  `OnsetActivationDataset.__getitem__` (`onset_dataset.py:132`), which today
-  reads `onset_position + 1` for positive rows and should read
-  `num_tokens` instead, matching the negative-row branch. No change is
-  needed to the label formula itself: `_labels_for`'s
-  `distance = onset - t` already goes negative for $t > f_r$, and
-  `distance <= horizon` still correctly evaluates to `True` there, so
-  positions past the frontier are already labeled correctly once they're
-  read at all.
-- **Full, unsampled negative-token coverage at eval time.**
-  `scripts/evaluate_onset_probes.py` currently caps negative-token reads per
-  rollout (`EVAL_NEGATIVE_TOKENS_PER_ROLLOUT = 32`) for `val`,
-  `test_indomain`, and `test_heldout_domains` alike. View B (§1.3) requires
-  every token of every negative rollout, since any cap can only
-  underestimate the false-positive rate. Checked against the current
-  `apertus-8b-instruct` build: negative rollouts across the three eval splits
-  total ~8.6M tokens uncapped vs. ~0.6M at the current 32-token cap (~14x
-  more reads), which at `HIDDEN_SIZE = 4096` (one layer,
-  `onset_dataset.py:56`) is roughly 130GB of additional activation reads
-  across a full eval pass. That's a real increase in eval I/O and wall-clock
-  time, but not prohibitive — no fallback partial cap is needed.
-- **A thresholded operating point.** The current pipeline only reports AUC /
-  AP / Brier (rank- and calibration-based, threshold-free). Views A and C,
-  and the confusion matrix/precision/recall/F1 they produce, all require
-  picking and freezing a $\tau$ (§1.5), which nothing currently does.
-- **Rung 2's fixed token budget.** Today a positive rollout always
-  contributes its *entire* eligible range (currently truncated at $f_r$, see
-  the read-past-the-frontier item above), not a capped $W$-token sample —
-  rung 2 as defined in §2.2 needs this capped, both so its token budget
-  matches rungs 3–5's window size and so it actually isolates
-  "population-level rebalancing" without also changing "how much of each
-  rollout is seen."
-- **Rungs 3, 4, 5 (`random_window`, `frontier_window`,
-  `frontier_window` + hard-negative mining)**: none built yet.
-- **`sampling_strategy` as an explicit, named config field**: doesn't exist
-  yet; today there is exactly one (implicit) strategy, closest to an
-  unbudgeted version of rung 2.
-- **Domain-proportional negative sampling**: not implemented; today
-  `ImbalancedRolloutSampler` draws negatives uniformly over the whole pool
-  regardless of domain.
-- **Hard-negative selection signal for rung 5**: not implemented; would read
-  the existing per-token repetition score and LRS match fields already
-  computed by the labeling pipeline (`degeneration_probe/dataset_gen/label.py`)
-  for negative (`stop_reason == "eos"`) rollouts, to bias window placement
-  toward locally repetitive-but-legitimate spans.
-- **`label_source` and `loss_function` as explicit, independent config
-  fields**: each option they'd select between already exists, but bundled
-  implicitly inside the `task` literal (`"hallucination"`,
-  `"repetition_score"`, `"onset_multi_horizon"`) rather than exposed
-  separately — so today `label_source` and `loss_function` cannot be
-  varied independently of one another.
-
-## 4. Suggested next steps
-
-The first training runs target the current single-horizon setup (`task =
-"hallucination"`, i.e. `probe_N`) as the baseline — `onset_multi_horizon` and
-how §1's views generalize to a per-horizon probe output are deferred and do
-not block anything below.
-
-1. Fix `OnsetActivationDataset` to read past the frontier (§3.2) — change
-   `eligible_end` for positive rows from `onset_position + 1` to
-   `num_tokens`. This is a prerequisite for every step below: View B's
-   in-pattern recall and every rung's full-rollout pool both depend on it.
-2. Extend the eval harness to score every token of every negative rollout
-   (§3.2) — this determines whether any false-positive-rate number reported
-   so far can be trusted.
-3. Pick and freeze a small family of $\tau$ operating points on `val` (§1.5),
-   plus the persistence window $m$ (§1.1, default $m = 1$), then implement
-   views A/B/C as one shared reporting function so every future probe
-   (regardless of training recipe) is scored the same way.
-4. Add `sampling_strategy` as an explicit config field. Pilot
-   $W \in \{64, 128, 256\}$ on rungs 1–2 only and lock the winner (§2.2.1),
-   then implement the rest of the ladder in order — each rung is a small
-   diff on the previous one, so building them in sequence (rung 1 → 2 → 3 →
-   4 → 5) doubles as the ablation itself: cap rung 2's positive-side budget
-   to the locked $W$ first (§3.2), then rung 3 (contiguous window, random
-   placement), then rung 4 (frontier-anchored placement), then rung 5
-   (hard-negative window selection for the negative side).
-5. Run all five rungs, at a fixed `lora_scope`, through the Section 1
-   protocol, each rung at $\geq 3$ seeds (§2.2.2), and report the
-   adjacent-rung deltas (1→2, 2→3, 3→4, 4→5) as mean $\pm$ std — each delta
-   attributable to exactly one design decision. Within rung 4 (and by
-   inheritance rung 5), also sweep `trailing` vs. `centered` anchor style
-   (§2.2) as a second, independent comparison once the main ladder result is
-   in.
-6. Split `label_source` and `loss_function` out of the `task` literal into
-   their own config fields, so existing combinations (`frontier_onset`+`bce`,
-   `repetition_score`+regression) keep working unchanged while new
-   combinations become expressible.
-7. Cross the winning `sampling_strategy` rung with `label_source`,
-   `loss_function`, and `lora_scope` to fill in the full comparison table
-   from §2.1.
+A run is reproducible from its resolved configuration and its seed. The
+configuration is stored next to the checkpoint and mirrored to the experiment
+tracker, so a checkpoint always carries the exact settings that produced it.
+Seeds cover initialization, batch order and every sampling decision, so two runs
+of the same configuration and seed see the same windows in the same order.
+Evaluation is reproducible independently of any of that, because it consumes
+stored scores: a metric can be recomputed, corrected or extended long after the
+GPU that produced the scores is gone, and every metric reported for a run is
+guaranteed to be derived from the same numbers.
