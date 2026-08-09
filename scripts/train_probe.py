@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from degeneration_probe.config import ExperimentConfig
 from degeneration_probe.data.cached_dataset import cached_collate_fn, create_cached_dataset
+from degeneration_probe.data.windowed_dataset import WindowedActivationDataset
 from degeneration_probe.data.dataset import (
     compute_pos_weight,
     create_degeneration_dataset,
@@ -31,6 +32,8 @@ from degeneration_probe.training.recording import (
     FINAL_EVALUATION_FILE,
     FINAL_WEIGHTS_DIR,
     RESOLVED_CONFIG_FILE,
+    CollapseGuard,
+    ResampleWindows,
     RunInfo,
     RunRecorder,
     prepare_run_location,
@@ -191,12 +194,24 @@ def _train(
         collate = cached_collate_fn
 
         def build(split, training):
-            return create_cached_dataset(
+            dataset = create_cached_dataset(
                 config.dataset,
                 split=split,
                 label_config=config.training.label,
                 probe_layer=config.training.probe.layer,
                 training=training,
+            )
+            if not training:
+                # Evaluation reads whole rollouts: a selection rule describes
+                # what a run learns from, never what it is measured on.
+                return dataset
+            return WindowedActivationDataset(
+                dataset.records,
+                build_root=config.dataset.build_root,
+                probe_layer=config.training.probe.layer,
+                selection=config.training.selection,
+                batch_size=config.training.runtime.per_device_train_batch_size,
+                seed=config.training.runtime.seed,
             )
     else:
         model, tokenizer = load_model_and_tokenizer(
@@ -266,6 +281,20 @@ def _train(
             allow_val_change=True,
         )
 
+    tokens_per_step = config.training.budget.tokens_per_step
+    if tokens_per_step is not None:
+        window = getattr(config.training.selection, "window_size", 1)
+        per_batch = config.training.runtime.per_device_train_batch_size * window
+        accumulation = max(1, round(tokens_per_step / per_batch))
+        config.training.runtime.gradient_accumulation_steps = accumulation
+        realized = accumulation * per_batch
+        run_info.training["budget"] = {
+            "tokens_per_step_requested": tokens_per_step,
+            "tokens_per_step_realized": realized,
+            "gradient_accumulation_steps": accumulation,
+        }
+        print(f"Budget: {realized} tokens per step over {accumulation} accumulated batches")
+
     checkpoint = config.training.checkpoint
     training_args = build_training_arguments(
         config,
@@ -275,6 +304,17 @@ def _train(
     )
 
     recorder = RunRecorder(run_dir)
+    callbacks = [recorder, CollapseGuard(config.training.budget.collapse_threshold)]
+    if config.training.selection.resample_each_epoch and hasattr(
+        datasets[splits.train], "resample"
+    ):
+        callbacks.append(ResampleWindows(datasets[splits.train]))
+    if config.training.budget.patience:
+        from transformers import EarlyStoppingCallback
+
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=config.training.budget.patience)
+        )
     trainer = ProbeTrainer(
         model=probe,
         cfg=config.training,
@@ -287,7 +327,7 @@ def _train(
         },
         pos_weight=pos_weight,
         data_collator=collate,
-        callbacks=[recorder],
+        callbacks=callbacks,
     )
 
     train_result = trainer.train(resume_from_checkpoint=resume_from)

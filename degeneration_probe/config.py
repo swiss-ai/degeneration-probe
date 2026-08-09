@@ -82,6 +82,67 @@ class FeaturesConfig:
 
 
 @dataclass
+class SelectionConfig:
+    """Which tokens of a rollout a run learns from.
+
+    Distinct from ``dataset.sampling``, which decides which rollouts enter the
+    pool at all: this decides what is taken from each of them. The rules form a
+    ladder in which each rung changes exactly one decision, so a difference
+    between adjacent rungs is attributable to that decision.
+    """
+
+    strategy: str = "all_tokens"
+    window_size: int = 128
+    anchor: str = "trailing"
+    positive_fraction: float = 0.25
+    max_rollouts_per_prompt: Optional[int] = None
+    hard_negative_fraction: float = 0.5
+    resample_each_epoch: bool = True
+
+    def __post_init__(self) -> None:
+        from degeneration_probe.data.sampling import ANCHORS, STRATEGIES
+
+        self.positive_fraction = _as_float(self.positive_fraction)
+        self.hard_negative_fraction = _as_float(self.hard_negative_fraction)
+        if self.strategy not in STRATEGIES:
+            raise ValueError(f"training.selection.strategy must be one of {sorted(STRATEGIES)}")
+        if self.anchor not in ANCHORS:
+            raise ValueError(f"training.selection.anchor must be one of {sorted(ANCHORS)}")
+        if self.window_size < 1:
+            raise ValueError("training.selection.window_size must be at least 1")
+        if not 0.0 < self.positive_fraction < 1.0:
+            raise ValueError("training.selection.positive_fraction must lie strictly in (0, 1)")
+        if not 0.0 <= self.hard_negative_fraction <= 1.0:
+            raise ValueError("training.selection.hard_negative_fraction must lie in [0, 1]")
+
+
+@dataclass
+class BudgetConfig:
+    """The training budget, in the units that make recipes comparable.
+
+    An epoch is not a fixed amount of learning here: under the exhaustive rule
+    it is the whole corpus, under an anchored-window rule it is one window per
+    rollout. Training each recipe for "one epoch" would hand them budgets that
+    differ by an order of magnitude, and the measured difference would be mostly
+    a difference in training length. Fixing steps and tokens per step instead is
+    what makes a comparison between rules mean anything.
+    """
+
+    tokens_per_step: Optional[int] = None
+    patience: Optional[int] = None
+    collapse_threshold: float = 0.01
+
+    def __post_init__(self) -> None:
+        self.collapse_threshold = _as_float(self.collapse_threshold)
+        if self.tokens_per_step is not None and self.tokens_per_step < 1:
+            raise ValueError("training.budget.tokens_per_step must be positive")
+        if self.patience is not None and self.patience < 1:
+            raise ValueError("training.budget.patience must be at least 1")
+        if self.collapse_threshold < 0:
+            raise ValueError("training.budget.collapse_threshold must be non-negative")
+
+
+@dataclass
 class LabelConfig:
     """Which signal supplies the training target, kept apart from the loss.
 
@@ -230,6 +291,8 @@ class TrainingConfig:
     short_name: str
     probe: ProbeConfig
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
     lora: LoraConfig = field(default_factory=LoraConfig)
     label: LabelConfig = field(default_factory=LabelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -243,6 +306,8 @@ class TrainingConfig:
         nested = {
             "probe": ProbeConfig,
             "features": FeaturesConfig,
+            "selection": SelectionConfig,
+            "budget": BudgetConfig,
             "lora": LoraConfig,
             "label": LabelConfig,
             "loss": LossConfig,

@@ -208,6 +208,48 @@ class RunInfo:
         self.write(run_dir)
 
 
+class ResampleWindows(TrainerCallback):
+    """Redraw the training windows at the start of each epoch.
+
+    Free augmentation, and it makes a comparison between placement rules a
+    comparison over the pool rather than over one arbitrary draw.
+    """
+
+    def __init__(self, dataset) -> None:
+        self.dataset = dataset
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        epoch = int(state.epoch or 0)
+        if epoch:
+            self.dataset.resample(epoch)
+
+
+class CollapseGuard(TrainerCallback):
+    """Stop a run whose probe has stopped distinguishing anything.
+
+    A probe can minimize its loss by ignoring its input and emitting one
+    constant value, which under a strong class weight is a real attractor. Such
+    a run posts a plausible loss, and rank metrics over constant scores are
+    undefined or arbitrary tie-breaking, so it would enter a comparison table
+    reading as a weak recipe rather than as a broken one.
+    """
+
+    def __init__(self, threshold: float = 0.01, key: str = "val/prediction_std") -> None:
+        self.threshold = float(threshold)
+        self.key = key
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if not metrics or self.key not in metrics:
+            return
+        spread = float(metrics[self.key])
+        if spread < self.threshold:
+            raise RuntimeError(
+                f"the probe collapsed: {self.key}={spread:.6g} is below {self.threshold:g} at "
+                f"step {state.global_step}. It is emitting one value for every token, which "
+                "converges and scores plausibly while distinguishing nothing."
+            )
+
+
 class RunRecorder(TrainerCallback):
     """Mirror every logged record into the run directory as it is produced.
 

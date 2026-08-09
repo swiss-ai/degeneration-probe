@@ -19,6 +19,28 @@ lora:
   alpha: 32
   dropout: 0.05
 
+selection:
+  # all_tokens | rollout_balanced | random_window | frontier_window |
+  # frontier_window_hard_negative
+  strategy: all_tokens
+  window_size: 128
+  # frontier_window: trailing (run-up only) | centered (straddles the frontier)
+  anchor: trailing
+  positive_fraction: 0.25
+  max_rollouts_per_prompt: null
+  hard_negative_fraction: 0.5
+  resample_each_epoch: true
+
+budget:
+  # Tokens each optimizer step sees. Held equal across rules, this is what makes
+  # them comparable; left unset, the accumulation from runtime is used as is.
+  tokens_per_step: null
+  # Evaluations without improvement before stopping; null disables it.
+  patience: null
+  # Minimum spread of the probe's scores on the monitor. Below this it has
+  # collapsed to a constant, which converges and scores plausibly.
+  collapse_threshold: 0.01
+
 label:
   # frontier_hard | frontier_soft | token_signal
   family: frontier_hard
@@ -71,8 +93,8 @@ checkpoint:
   keep_best: true
   # Any monitored quantity can drive selection; the protocol metrics replace
   # loss here once they are available.
-  metric_for_best_model: loss
-  greater_is_better: false
+  metric_for_best_model: rollout_auc
+  greater_is_better: true
   resume: auto
 
 wandb:

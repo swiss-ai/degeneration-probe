@@ -20,6 +20,11 @@ from degeneration_probe.data.labels import derive_targets, required_signal
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Evaluation populations are drawn from the split alone, never from the run
+# seed: a seed repeat must be judged on identical rows, or its spread measures
+# the sample rather than the run.
+EVALUATION_SEED = 0
+
 
 @dataclass(frozen=True)
 class DegenerationRecord:
@@ -216,7 +221,7 @@ def load_degeneration_records(
         split=split,
         negative_rollouts_per_positive=ratio,
         domain_stratified=config.sampling.domain_stratified,
-        seed=config.sampling.seed,
+        seed=config.sampling.seed if training else EVALUATION_SEED,
     )
     if selected.empty:
         raise ValueError(f"No usable rollouts found for split {split!r}")
@@ -361,6 +366,7 @@ class DegenerationTokenDataset(Dataset):
             "rollout_idx": record.rollout_idx,
             "domain": record.domain,
             "split": record.split,
+            "is_positive": record.is_positive,
         }
 
     def summary(self) -> Dict[str, object]:
@@ -439,6 +445,7 @@ def degeneration_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]
         "rollout_idx": [item["rollout_idx"] for item in batch],
         "domain": [item["domain"] for item in batch],
         "split": [item["split"] for item in batch],
+        "is_positive": [item.get("is_positive", False) for item in batch],
     }
 
 

@@ -75,6 +75,7 @@ class CachedActivationDataset(Dataset):
             "rollout_idx": record.rollout_idx,
             "domain": record.domain,
             "split": record.split,
+            "is_positive": record.is_positive,
             # No prompt is prepended here: the cache holds completion tokens only.
             "prompt_length": 0,
         }
@@ -139,6 +140,7 @@ def cached_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]:
         "rollout_idx": [item["rollout_idx"] for item in batch],
         "domain": [item["domain"] for item in batch],
         "split": [item["split"] for item in batch],
+        "is_positive": [item.get("is_positive", False) for item in batch],
     }
 
 

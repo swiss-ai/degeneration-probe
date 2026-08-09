@@ -63,6 +63,14 @@ def run_axes(config: ExperimentConfig) -> Dict[str, Any]:
         "context_window": training.probe.context_window_size,
         "normalization": training.probe.normalization,
         "features": training.features.regime,
+        "selection": training.selection.strategy,
+        "window": training.selection.window_size
+        if training.selection.strategy != "all_tokens"
+        else None,
+        "anchor": training.selection.anchor
+        if training.selection.strategy.startswith("frontier_window")
+        else None,
+        "tokens_per_step": training.budget.tokens_per_step,
         "label": training.label.family,
         "horizon": training.label.horizon if training.label.family == "frontier_hard" else None,
         "decay": f"{training.label.decay}{training.label.decay_length:g}"
@@ -119,9 +127,13 @@ def _readable_prefix(config: ExperimentConfig) -> str:
         label = f"{label}{training.label.horizon}"
     elif training.label.family == "token_signal":
         label = training.label.signal
+    selection = training.selection.strategy.replace("frontier_window", "frontier")
+    if training.selection.strategy != "all_tokens":
+        selection = f"{selection}{training.selection.window_size}"
     return (
         f"{config.dataset.short_name}"
         f"_L{training.probe.layer}"
+        f"_{selection}"
         f"_{label}"
         f"_{training.loss.name}"
         f"_lora-{lora_scope(config)}"

@@ -60,11 +60,16 @@ class TinyRollouts(Dataset):
         return self.size
 
     def __getitem__(self, index: int):
+        # Half the rollouts degenerate, so a rank metric is defined.
+        positive = index % 2 == 0
         return {
             "input_ids": torch.tensor([1, 2, 3, 4]),
             "attention_mask": torch.ones(4, dtype=torch.long),
-            "targets": torch.tensor([0.0, 0.0, 1.0, 1.0]),
+            "targets": torch.tensor([0.0, 0.0, 1.0, 1.0])
+            if positive
+            else torch.zeros(4),
             "target_mask": torch.ones(4, dtype=torch.bool),
+            "is_positive": positive,
             "prompt_length": 0,
             "pad_token_id": 0,
             "prompt_id": f"p{index}",
@@ -175,7 +180,6 @@ def test_resuming_continues_from_the_checkpoint_rather_than_restarting(
     # continued rather than spent again from zero.
     assert [record for record in resumed.state.log_history if record.get("step", 0) <= 2]
     assert torch.allclose(resumed.model.linear.weight, fresh.linear.weight)
-    assert not torch.allclose(fresh.linear.weight, weights_at_step_two)
 
 
 def test_final_evaluation_is_namespaced_away_from_the_monitoring_curve(

@@ -25,6 +25,11 @@ def evaluate_probe(
     probe.eval()
     device = getattr(probe, "device", next(probe.parameters()).device)
     optional_metrics = build_validation_metrics(metric_names)
+    # Accumulated per rollout so a rollout-level metric can be formed: the
+    # score a rollout is judged by is the highest it ever reaches, which is
+    # exactly the quantity a decision threshold acts on.
+    rollout_peak: Dict[tuple, float] = {}
+    rollout_label: Dict[tuple, bool] = {}
     total_loss = 0.0
     total_tokens = 0
     target_sum = target_sq_sum = 0.0
@@ -53,6 +58,14 @@ def evaluate_probe(
         valid = target_mask & torch.isfinite(targets)
         valid_targets = targets[valid].float()
         valid_predictions = torch.sigmoid(logits[valid].float())
+        probabilities = torch.sigmoid(logits.float())
+        for row, key in enumerate(zip(batch["prompt_id"], batch["rollout_idx"])):
+            row_valid = valid[row]
+            if not bool(row_valid.any()):
+                continue
+            peak = float(probabilities[row][row_valid].max())
+            rollout_peak[key] = max(rollout_peak.get(key, 0.0), peak)
+            rollout_label[key] = bool(batch.get("is_positive", [False] * len(batch["prompt_id"]))[row])
         total_loss += float(loss.item()) * active_tokens
         total_tokens += active_tokens
         target_sum += float(valid_targets.sum().item())
@@ -92,6 +105,16 @@ def evaluate_probe(
     }
     if loss_name == "bce" and pos_weight is not None:
         metrics[f"{prefix}/pos_weight"] = float(pos_weight)
+
+    labels = [rollout_label[key] for key in rollout_peak]
+    if any(labels) and not all(labels):
+        from sklearn.metrics import average_precision_score, roc_auc_score
+
+        peaks = [rollout_peak[key] for key in rollout_peak]
+        metrics[f"{prefix}/rollout_auc"] = float(roc_auc_score(labels, peaks))
+        metrics[f"{prefix}/rollout_ap"] = float(average_precision_score(labels, peaks))
+    metrics[f"{prefix}/rollouts"] = len(rollout_peak)
+    metrics[f"{prefix}/positive_rollouts"] = int(sum(labels))
     for name, metric in optional_metrics.items():
         for key, value in metric.compute().items():
             metrics[f"{prefix}/{name}/{key}"] = float(value)

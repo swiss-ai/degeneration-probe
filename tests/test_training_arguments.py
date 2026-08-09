@@ -28,8 +28,10 @@ def test_defaults_produce_resumable_checkpoints_and_keep_the_best(tmp_path):
     assert args.eval_strategy.value == "epoch"
     assert args.load_best_model_at_end is True
     assert args.save_total_limit == 2
-    assert args.metric_for_best_model == "loss"
-    assert args.greater_is_better is False
+    # Selection keys off a protocol metric, not the loss: a token loss is
+    # dominated by the trivially separable in-pattern tokens.
+    assert args.metric_for_best_model == "rollout_auc"
+    assert args.greater_is_better is True
 
 
 def test_a_step_cadence_is_applied_to_both_validation_and_saving(tmp_path):

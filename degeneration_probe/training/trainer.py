@@ -161,6 +161,19 @@ class ProbeTrainer(Trainer):
         self.optimizer = AdamW(groups)
         return self.optimizer
 
+    def _get_train_sampler(self, *args, **kwargs):
+        """Read a composed dataset in order, so its batches survive intact.
+
+        The composition rule already fixed each batch's class mix and domain
+        spread by the order it produced; shuffling on top would undo exactly
+        that.
+        """
+        if getattr(self.train_dataset, "compose", False):
+            from torch.utils.data import SequentialSampler
+
+            return SequentialSampler(self.train_dataset)
+        return super()._get_train_sampler(*args, **kwargs)
+
     # ---- checkpointing ----
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None) -> None:
@@ -200,6 +213,15 @@ class ProbeTrainer(Trainer):
         self.log(dict(metrics))
         for key, value in list(metrics.items()):
             metrics[f"eval_{key.split('/', 1)[1].replace('/', '_')}"] = value
+
+        selection = self.cfg.checkpoint.metric_for_best_model
+        wanted = selection if selection.startswith("eval_") else f"eval_{selection}"
+        if self.cfg.checkpoint.keep_best and wanted not in metrics:
+            raise ValueError(
+                f"selection metric {selection!r} was not produced by validation. A rank metric "
+                "needs both classes present on the monitor, so check that the monitoring split "
+                f"holds positive and negative rollouts. Available: {sorted(metrics)}"
+            )
         self.control = self.callback_handler.on_evaluate(
             self.args, self.state, self.control, metrics
         )
