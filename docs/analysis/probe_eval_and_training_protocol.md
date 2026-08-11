@@ -44,11 +44,25 @@ rather than being given an invented onset or quietly treated as negative.
 For each positive rollout $r$ there is one **degeneration frontier** $f_r$: the
 token position at which the rollout starts repeating. A single component owns
 the definition of $f_r$ and every other part of the system reads the frontier
-only through it. The frontier is currently derived from a normalized,
-growing longest-repeated-substring match, and the design treats the underlying
-signal as swappable: adopting a better onset signal later (for instance a
-verified quote from an LLM judge) changes one setting and nothing else. The
-rest of the pipeline never reads a repetition heuristic directly to decide
+only through it, so the underlying signal stays swappable.
+
+The frontier comes from an LLM judge, which reads a rollout and names where it
+begins to degenerate by quoting the text. A quote is the form a person can
+check, but not the form training needs, so a separate step locates that quote in
+the rollout's own token stream and records the index of its first token. That
+resolution is cached, because it is the one expensive part of the chain and it
+changes only when the judge is re-run. Quotes are verified against the
+completion they came from, and a quote that cannot be located leaves its
+rollout excluded, with the reason recorded rather than the rollout silently
+dropped.
+
+Structural repetition measures are deliberately not used for this. A longest
+repeated substring is guaranteed to find something in almost any long text, so
+on rollouts that ended naturally it fires most of the time on coincidence
+alone; and where it does mark a real loop it points at the *first* occurrence
+of the repeated chunk, a position at which nothing has yet repeated and no
+observer could know a loop had begun. Those measures remain in the corpus, and
+remain useful as baselines to score the probe against, but they never define
 where degeneration starts.
 
 Two asymmetries of the corpus shape almost every decision that follows:
