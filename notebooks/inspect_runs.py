@@ -18,24 +18,22 @@ def _():
     OUTPUTS = REPO / "outputs"
     FIGURES = REPO / "notebooks" / "figures" / "runs"
     FIGURES.mkdir(parents=True, exist_ok=True)
-    return FIGURES, OUTPUTS, Path, json, mo, np, pd, plt
+    return FIGURES, OUTPUTS, Path, json, mo, pd, plt
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # Runs and what they detect
+    mo.md("""
+    # Runs and what they detect
 
-        Two halves. The first reads what training left behind: every attempt of
-        every recipe, its axes, and its curves. The second reads the evaluation
-        protocol's output for whichever scorers have been through it, probes and
-        heuristic baselines alike, since both are judged the same way.
+    Two halves. The first reads what training left behind: every attempt of
+    every recipe, its axes, and its curves. The second reads the evaluation
+    protocol's output for whichever scorers have been through it, probes and
+    heuristic baselines alike, since both are judged the same way.
 
-        Nothing here recomputes anything. It reads the run directories, which is
-        why they were made self-describing.
-        """
-    )
+    Nothing here recomputes anything. It reads the run directories, which is
+    why they were made self-describing.
+    """)
     return
 
 
@@ -72,7 +70,7 @@ def _(OUTPUTS, json, pd):
 
     runs = load_runs(OUTPUTS)
     runs
-    return load_runs, runs
+    return (runs,)
 
 
 @app.cell
@@ -84,7 +82,7 @@ def _(mo, runs):
         label="Runs to compare",
     )
     run_picker
-    return finished, run_picker
+    return (run_picker,)
 
 
 @app.cell
@@ -103,20 +101,18 @@ def _(Path, pd, run_picker):
 
     history = load_history(run_picker.value)
     history
-    return history, load_history
+    return (history,)
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## Training curves
+    mo.md("""
+    ## Training curves
 
-        The monitoring curve and the diagnostics that ride with it. The score
-        spread is the one to watch alongside the loss: a probe that collapses to
-        a constant keeps a plausible loss while distinguishing nothing.
-        """
-    )
+    The monitoring curve and the diagnostics that ride with it. The score
+    spread is the one to watch alongside the loss: a probe that collapses to
+    a constant keeps a plausible loss while distinguishing nothing.
+    """)
     return
 
 
@@ -157,21 +153,19 @@ def _(FIGURES, history, plt):
         else None
     )
     curves
-    return curves, plot_curves
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## What the probe sees
+    mo.md("""
+    ## What the probe sees
 
-        The composition of each split as the run actually saw it, and the class
-        weight beside it. The effective ratio lands on one when the weight
-        matches the sampled population, which is what says the imbalance was
-        corrected once rather than twice.
-        """
-    )
+    The composition of each split as the run actually saw it, and the class
+    weight beside it. The effective ratio lands on one when the weight
+    matches the sampled population, which is what says the imbalance was
+    corrected once rather than twice.
+    """)
     return
 
 
@@ -205,26 +199,24 @@ def _(Path, json, pd, run_picker):
 
     composition = load_composition(run_picker.value)
     composition
-    return composition, load_composition
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        """
-        ## The evaluation protocol
-
-        Any scorer that has been through `evaluate_scores` appears here, probe
-        or baseline. The four views are reported together because none is
-        interpretable alone: a scorer that fires on every token has perfect
-        recall and perfect persistence, and only its false-alarm rate says so.
-        """
-    )
     return
 
 
 @app.cell
-def _(OUTPUTS, Path, mo):
+def _(mo):
+    mo.md("""
+    ## The evaluation protocol
+
+    Any scorer that has been through `evaluate_scores` appears here, probe
+    or baseline. The four views are reported together because none is
+    interpretable alone: a scorer that fires on every token has perfect
+    recall and perfect persistence, and only its false-alarm rate says so.
+    """)
+    return
+
+
+@app.cell
+def _(OUTPUTS, mo):
     scored = sorted(
         str(path.parent.parent.parent)
         for path in OUTPUTS.glob("**/evaluation/*/view_a_detection.csv")
@@ -240,7 +232,7 @@ def _(OUTPUTS, Path, mo):
         label="Split",
     )
     mo.hstack([scorer_picker, split_picker])
-    return scored, scorer_picker, split_picker
+    return scorer_picker, split_picker
 
 
 @app.cell
@@ -277,14 +269,12 @@ def _(load_view, scorer_picker, split_picker):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### Detection against its cost
+    mo.md("""
+    ### Detection against its cost
 
-        Recall on one axis, the false-alarm rate that bought it on the other.
-        A point is one scorer at one frozen operating point.
-        """
-    )
+    Recall on one axis, the false-alarm rate that bought it on the other.
+    A point is one scorer at one frozen operating point.
+    """)
     return
 
 
@@ -320,22 +310,20 @@ def _(FIGURES, detection, lead_time, plt):
         else None
     )
     operating_points
-    return operating_points, plot_operating_points
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### Lead time, and whether the alarm holds
+    mo.md("""
+    ### Lead time, and whether the alarm holds
 
-        Negative lead time means the scorer fired before the frontier. The
-        persistence panel is read in opposite directions for the two
-        populations: on positives a sticky alarm is the goal, while on negatives
-        every alarm is an error and the run length separates a jittery scorer
-        from a confidently wrong one.
-        """
-    )
+    Negative lead time means the scorer fired before the frontier. The
+    persistence panel is read in opposite directions for the two
+    populations: on positives a sticky alarm is the goal, while on negatives
+    every alarm is an error and the run length separates a jittery scorer
+    from a confidently wrong one.
+    """)
     return
 
 
@@ -391,20 +379,18 @@ def _(FIGURES, lead_time, persistence, plt):
         else None
     )
     lead_and_persistence
-    return lead_and_persistence, plot_lead_and_persistence
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### Per-domain, for held-out splits
+    mo.md("""
+    ### Per-domain, for held-out splits
 
-        Never pooled. The held-out domains differ sharply in how often they
-        degenerate, and cells marked anecdotal are backed by too few positives
-        to estimate anything.
-        """
-    )
+    Never pooled. The held-out domains differ sharply in how often they
+    degenerate, and cells marked anecdotal are backed by too few positives
+    to estimate anything.
+    """)
     return
 
 
@@ -412,7 +398,7 @@ def _(mo):
 def _(load_view, scorer_picker, split_picker):
     per_domain = load_view(scorer_picker.value, split_picker.value, "per_domain_detection")
     per_domain
-    return (per_domain,)
+    return
 
 
 if __name__ == "__main__":

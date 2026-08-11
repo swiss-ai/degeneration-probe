@@ -63,3 +63,38 @@ def test_checkpointing_can_be_switched_off_entirely(tmp_path):
 def test_selection_without_validation_is_rejected_before_a_run_starts():
     with pytest.raises(ValueError, match="cadences to match"):
         _experiment(["training.validation.strategy=no"])
+
+
+def test_the_token_budget_is_measured_not_assumed():
+    """Equal budget has to mean equal tokens, whatever an example holds.
+
+    A rule keeping whole rollouts and a rule emitting short windows differ by an
+    order of magnitude per example. Both must land on the same tokens per step,
+    which they only do if the size of an example is measured.
+    """
+    from degeneration_probe.training.arguments import resolve_token_budget
+
+    rollouts = resolve_token_budget(
+        20_000, valid_tokens=1_247_000, examples=1_000, per_device_batch_size=1
+    )
+    windows = resolve_token_budget(
+        20_000, valid_tokens=123_000, examples=1_000, per_device_batch_size=8
+    )
+    assert rollouts["tokens_per_example"] == pytest.approx(1247.0)
+    assert windows["tokens_per_example"] == pytest.approx(123.0)
+    # Different accumulation, because an example is a different size.
+    assert rollouts["gradient_accumulation_steps"] != windows["gradient_accumulation_steps"]
+    # Same budget, which is the whole point.
+    for resolved in (rollouts, windows):
+        assert resolved["tokens_per_step_realized"] == pytest.approx(20_000, rel=0.05)
+
+
+def test_a_budget_smaller_than_one_example_still_takes_a_step():
+    from degeneration_probe.training.arguments import resolve_token_budget
+
+    resolved = resolve_token_budget(
+        128, valid_tokens=400_000, examples=100, per_device_batch_size=1
+    )
+    assert resolved["gradient_accumulation_steps"] == 1
+    # Reported honestly as the overshoot it is, rather than as the request.
+    assert resolved["tokens_per_step_realized"] == 4000

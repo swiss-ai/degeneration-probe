@@ -224,3 +224,32 @@ def test_a_selection_rule_masks_the_loss_while_the_model_adapts(local_build):
         assert plain["input_ids"].tolist() == windowed["input_ids"].tolist()
         assert int(windowed["target_mask"].sum()) <= int(plain["target_mask"].sum())
         assert int(windowed["target_mask"].sum()) >= 1
+
+
+def test_composition_and_class_weight_follow_the_masked_population(local_build):
+    """A masked run is described by what it trains on, not by the pool.
+
+    The weight and the reported positive rate both have to come from the tokens
+    that reach the loss, or a run is described as a recipe it never ran.
+    """
+    from degeneration_probe.config import SelectionConfig
+    from degeneration_probe.data.dataset import DegenerationTokenDataset
+
+    records = load_degeneration_records(
+        local_build, split="train", label_config=LabelConfig(), training=True
+    )
+    unmasked = DegenerationTokenDataset(records, FakeTokenizer(), local_build.tokenization)
+    masked = DegenerationTokenDataset(
+        records,
+        FakeTokenizer(),
+        local_build.tokenization,
+        selection=SelectionConfig(strategy="random_window", window_size=2),
+    )
+
+    assert masked.summary()["valid_tokens"] < unmasked.summary()["valid_tokens"]
+    # The pool is unchanged, so only the used fraction moves.
+    assert masked.summary()["tokens"] == unmasked.summary()["tokens"]
+    # Counted over the same tokens the loss sees.
+    negative, positive = masked.target_counts()
+    assert negative + positive == masked.summary()["valid_tokens"]
+    assert sum(unmasked.target_counts()) == unmasked.summary()["valid_tokens"]

@@ -27,7 +27,10 @@ from degeneration_probe.data.dataset import (
 )
 from degeneration_probe.evaluation.metrics import build_validation_metrics
 from degeneration_probe.probes.linear_probe import setup_cached_probe, setup_probe
-from degeneration_probe.training.arguments import build_training_arguments
+from degeneration_probe.training.arguments import (
+    build_training_arguments,
+    resolve_token_budget,
+)
 from degeneration_probe.training.recording import (
     DATASET_SUMMARY_FILE,
     FINAL_EVALUATION_FILE,
@@ -306,17 +309,21 @@ def _train(
 
     tokens_per_step = config.training.budget.tokens_per_step
     if tokens_per_step is not None:
-        window = getattr(config.training.selection, "window_size", 1)
-        per_batch = config.training.runtime.per_device_train_batch_size * window
-        accumulation = max(1, round(tokens_per_step / per_batch))
-        config.training.runtime.gradient_accumulation_steps = accumulation
-        realized = accumulation * per_batch
-        run_info.training["budget"] = {
-            "tokens_per_step_requested": tokens_per_step,
-            "tokens_per_step_realized": realized,
-            "gradient_accumulation_steps": accumulation,
-        }
-        print(f"Budget: {realized} tokens per step over {accumulation} accumulated batches")
+        budget = resolve_token_budget(
+            tokens_per_step,
+            valid_tokens=dataset_summary[splits.train]["valid_tokens"],
+            examples=len(datasets[splits.train]),
+            per_device_batch_size=config.training.runtime.per_device_train_batch_size,
+        )
+        config.training.runtime.gradient_accumulation_steps = budget[
+            "gradient_accumulation_steps"
+        ]
+        run_info.training["budget"] = budget
+        print(
+            f"Budget: {budget['tokens_per_step_realized']} tokens per step over "
+            f"{budget['gradient_accumulation_steps']} accumulated batches "
+            f"({budget['tokens_per_example']:.1f} tokens per example)"
+        )
 
     checkpoint = config.training.checkpoint
     training_args = build_training_arguments(

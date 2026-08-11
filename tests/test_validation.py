@@ -53,3 +53,31 @@ def test_evaluation_keys_for_each_final_split(split):
     assert metrics[f"{split}/valid_tokens"] == 2
     # The loss is reported once, under a name that does not change with the loss.
     assert f"{split}/bce_loss" not in metrics
+
+
+def test_an_unweighted_loss_is_reported_beside_the_weighted_one():
+    """The class weight belongs to one recipe, so it cannot carry a comparison.
+
+    Every recipe weights its own training stream differently, which rescales the
+    monitoring loss without the model changing. The unweighted loss is measured
+    identically for all of them.
+    """
+    weighted = evaluate_probe(
+        FixedProbe(), [_batch("val")], loss_name="bce", prefix="val", pos_weight=8.0
+    )
+    lightly = evaluate_probe(
+        FixedProbe(), [_batch("val")], loss_name="bce", prefix="val", pos_weight=2.0
+    )
+    # Two weights, one model: the weighted losses disagree, the plain ones do not.
+    assert weighted["val/loss"] != pytest.approx(lightly["val/loss"])
+    assert weighted["val/loss_unweighted"] == pytest.approx(lightly["val/loss_unweighted"])
+    # Weighting a half-positive split upward can only raise the loss.
+    assert weighted["val/loss"] > weighted["val/loss_unweighted"]
+
+
+def test_the_unweighted_loss_matches_the_weighted_one_when_unweighted():
+    for weight in (None, 1.0):
+        metrics = evaluate_probe(
+            FixedProbe(), [_batch("val")], loss_name="bce", prefix="val", pos_weight=weight
+        )
+        assert metrics["val/loss"] == pytest.approx(metrics["val/loss_unweighted"])

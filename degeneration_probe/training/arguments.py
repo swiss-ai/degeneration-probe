@@ -8,11 +8,37 @@ a language model.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from transformers import TrainingArguments
 
 from degeneration_probe.config import ExperimentConfig
+
+
+def resolve_token_budget(
+    tokens_per_step: int,
+    *,
+    valid_tokens: int,
+    examples: int,
+    per_device_batch_size: int,
+) -> Dict[str, float]:
+    """Size the accumulation so each step sees the requested tokens.
+
+    Measured from the training stream rather than assumed from the window size.
+    A rule that emits windows and a rule that keeps whole rollouts leave very
+    different numbers of tokens behind per example, so a budget derived from the
+    configuration would give one rule several times the tokens of another, and
+    that difference would sit inside a comparison built to isolate the rule.
+    """
+    tokens_per_example = valid_tokens / max(1, examples)
+    per_batch = per_device_batch_size * tokens_per_example
+    accumulation = max(1, round(tokens_per_step / per_batch)) if per_batch > 0 else 1
+    return {
+        "tokens_per_step_requested": int(tokens_per_step),
+        "tokens_per_step_realized": round(accumulation * per_batch),
+        "tokens_per_example": tokens_per_example,
+        "gradient_accumulation_steps": accumulation,
+    }
 
 
 def build_training_arguments(

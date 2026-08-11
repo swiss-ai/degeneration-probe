@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -452,6 +451,27 @@ class DegenerationTokenDataset(Dataset):
             "is_positive": record.is_positive,
         }
 
+    def _effective_targets(self, index: int) -> np.ndarray:
+        """Targets as the loss will see them, with any selection rule applied.
+
+        A rule applied while the model adapts masks the loss rather than
+        shrinking the batch, so the population a run actually trains on is the
+        masked one, not the pool it was drawn from. Reading composition off the
+        pool would report a positive rate and a class weight belonging to a
+        recipe that was never run.
+        """
+        record = self.records[index]
+        limit = min(
+            self.tokenization.max_completion_length, len(record.generated_token_ids)
+        )
+        targets = np.asarray(record.targets[:limit], dtype=np.float32)
+        if self._selected is None:
+            return targets
+        keep = np.zeros(targets.shape, dtype=bool)
+        positions = self._selected.get(index, np.empty(0, dtype=np.int64))
+        keep[positions[positions < targets.size]] = True
+        return np.where(keep, targets, np.float32("nan"))
+
     def summary(self) -> Dict[str, object]:
         """Composition of the split as the probe will actually see it.
 
@@ -460,18 +480,17 @@ class DegenerationTokenDataset(Dataset):
         that the realized positive rate stays visible next to any class weight
         applied on top of it.
         """
-        limit = self.tokenization.max_completion_length
         domains: Dict[str, int] = {}
         positive_rollouts = 0
         valid_tokens = 0
         positive_tokens = 0
         total_tokens = 0
-        for record in self.records:
+        for index, record in enumerate(self.records):
             domains[record.domain] = domains.get(record.domain, 0) + 1
-            targets = np.asarray(record.targets[:limit], dtype=np.float32)
+            targets = self._effective_targets(index)
             finite = np.isfinite(targets)
             valid_tokens += int(finite.sum())
-            total_tokens += int(len(targets))
+            total_tokens += int(targets.size)
             positives = int((targets[finite] > 0).sum())
             positive_tokens += positives
             positive_rollouts += int(positives > 0)
@@ -488,19 +507,21 @@ class DegenerationTokenDataset(Dataset):
         }
 
     def target_counts(self) -> Tuple[int, int]:
-        """Return negative and positive valid-token counts for BCE weighting."""
+        """Return negative and positive valid-token counts for BCE weighting.
+
+        Counted over the masked population, so the weight corrects the skew the
+        run is actually exposed to.
+        """
         negative = positive = 0
-        limit = self.tokenization.max_completion_length
-        for record in self.records:
-            for target in record.targets[:limit]:
-                if not math.isfinite(target):
-                    continue
-                if target == 1.0:
-                    positive += 1
-                elif target == 0.0:
-                    negative += 1
-                else:
-                    raise ValueError("BCE targets must be exactly 0 or 1")
+        for index in range(len(self.records)):
+            targets = self._effective_targets(index)
+            finite = targets[np.isfinite(targets)]
+            positives = int((finite == 1.0).sum())
+            negatives = int((finite == 0.0).sum())
+            if positives + negatives != finite.size:
+                raise ValueError("BCE targets must be exactly 0 or 1")
+            positive += positives
+            negative += negatives
         return negative, positive
 
 

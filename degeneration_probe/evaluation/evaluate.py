@@ -31,7 +31,14 @@ def evaluate_probe(
     rollout_peak: Dict[tuple, float] = {}
     rollout_label: Dict[tuple, bool] = {}
     total_loss = 0.0
+    total_plain_loss = 0.0
     total_tokens = 0
+    # The weighted loss is the training objective, but its weight comes from the
+    # training stream, whose class balance every selection rule changes. Two
+    # recipes therefore score the same monitoring split on two different scales.
+    # An unweighted loss alongside it is measured the same way for every recipe,
+    # so it can be read across them.
+    plain_matches_weighted = loss_name != "bce" or pos_weight is None or float(pos_weight) == 1.0
     target_sum = target_sq_sum = 0.0
     prediction_sum = prediction_sq_sum = 0.0
     predicted_positive = 0
@@ -55,6 +62,12 @@ def evaluate_probe(
             target_mask,
             pos_weight=pos_weight,
         )
+        if plain_matches_weighted:
+            plain_loss = loss
+        else:
+            plain_loss, _ = compute_degeneration_loss(
+                loss_name, logits, targets, target_mask, pos_weight=None
+            )
         valid = target_mask & torch.isfinite(targets)
         valid_targets = targets[valid].float()
         valid_predictions = torch.sigmoid(logits[valid].float())
@@ -67,6 +80,7 @@ def evaluate_probe(
             rollout_peak[key] = max(rollout_peak.get(key, 0.0), peak)
             rollout_label[key] = bool(batch.get("is_positive", [False] * len(batch["prompt_id"]))[row])
         total_loss += float(loss.item()) * active_tokens
+        total_plain_loss += float(plain_loss.item()) * active_tokens
         total_tokens += active_tokens
         target_sum += float(valid_targets.sum().item())
         target_sq_sum += float(valid_targets.square().sum().item())
@@ -96,6 +110,7 @@ def evaluate_probe(
     loss = total_loss / total_tokens
     metrics = {
         f"{prefix}/loss": loss,
+        f"{prefix}/loss_unweighted": total_plain_loss / total_tokens,
         f"{prefix}/valid_tokens": total_tokens,
         f"{prefix}/target_mean": target_mean,
         f"{prefix}/target_std": math.sqrt(target_variance),
