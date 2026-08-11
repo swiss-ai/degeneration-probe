@@ -122,6 +122,23 @@ states rather than a single one, concatenated before the linear layer. The
 default is a single position, so the probe's decision at token $t$ depends on
 the model's state at $t$ alone.
 
+A run may also name several layers rather than one, in which case it trains an
+independent head per layer over a single pass of the data. This is worth doing
+because of how the stored activations are laid out rather than for any
+statistical reason: every layer of a rollout lives in one file, and opening that
+file costs far more than reading it, so asking for all of the layers costs about
+a fifth more than asking for one. Depth stops being an axis that multiplies the
+number of runs and becomes one that can be swept inside a run.
+
+The heads share no parameters and their losses are added. A sum of independent
+terms gives each head exactly the gradient it would have received on its own,
+so this is a rearrangement of training the depths separately rather than an
+approximation of it, and each head is written out as an ordinary single-layer
+probe. Two details are what make that equivalence hold rather than nearly hold,
+and both are covered where they arise: the gradient norm is clipped per head
+(Section 6.2), and each head keeps its own normalization, since activation scale
+varies with depth.
+
 ### 3.2 Frozen features versus an adapted model
 
 Two regimes exist, and which one is in use is a configuration field:
@@ -231,6 +248,20 @@ sampled population and then applying a corpus-derived weight on top of it
 corrects the same skew twice and pushes the probe toward firing indiscriminately.
 Every run logs the realized positive rate of its own training stream alongside
 the weight in force, so the product of the two stays visible and close to one.
+"The population the probe actually sees" is meant literally: where a selection
+rule masks the loss instead of shrinking the batch, the weight and the reported
+composition are both counted over the tokens that reach the loss, not over the
+pool they were drawn from.
+
+One consequence reaches into monitoring. Because the weight is fitted to each
+recipe's own training stream, and every selection rule changes that stream's
+balance, two recipes score the same monitoring split on two different scales:
+their weighted losses are not comparable, and a curve of weighted loss across
+recipes is largely a picture of the weight. An unweighted loss is therefore
+reported alongside it, measured identically for every recipe. Selection is
+unaffected either way, since it runs on a rank metric (Section 6.3), but the
+loss is the natural convergence signal and it should mean the same thing
+everywhere it is plotted.
 
 ## 5. Training examples and batches
 
@@ -291,6 +322,13 @@ rungs and never the pool itself.
    mixes run-up tokens with confirmed in-pattern ones, which may stabilize the
    positive class at the cost of spending part of a fixed budget on the easy,
    already-degenerate region.
+
+   The anchor and the label horizon are not independent. A trailing window holds
+   only tokens before the frontier, so under a horizon of zero it contains no
+   positive token at all and the recipe has nothing to learn from. That
+   combination is refused when the training set is built, rather than trained on
+   and reported, and the refusal names the three ways out: raise the horizon so
+   the run-up is marked, use soft frontier labels, or centre the window.
 
 5. **`frontier_window_hard_negative`.** Identical for positive rollouts. For
    negative rollouts the window is no longer placed uniformly: placement is
@@ -357,15 +395,45 @@ anchored-window strategy it is one window per rollout. Training each recipe for
 "one epoch" would hand them budgets that differ by an order of magnitude, and
 the measured difference would be mostly a difference in training length.
 
+The tokens a step sees are **measured from the training stream, not inferred
+from the configuration**. Gradient accumulation is sized from the mean number of
+tokens each example actually contributes to the loss, which differs sharply
+between rules: a rule emitting windows contributes a window, while a rule
+keeping whole rollouts contributes a whole rollout, and while the model adapts a
+selection rule masks the loss rather than shrinking the batch. Deriving the
+accumulation from the configured window size instead would quietly hand one rule
+several times the budget of another, inside the one setting held equal to make
+them comparable. Every run records the realized tokens per step beside the
+requested figure.
+
+Holding both quantities fixed has a consequence worth stating, because it is the
+first thing a reader asks. Since the rules produce very different amounts of
+data, a rule with a large pool never finishes a pass over it while a rule with a
+small pool goes round several times. What the large-pool rule trains on is then
+decided by the order the data is composed in: positives are shuffled across the
+whole split and negatives drawn per batch in proportion to each domain's share,
+and only afterwards does the step limit cut the sequence short. Because the
+shuffle precedes the cut, a run that gets through a tenth of its pool draws that
+tenth from everywhere rather than from the first rollouts in file order. A rule
+that completes several passes redraws its windows at each pass boundary, so it
+sees freshly placed windows rather than the same ones again; comparing rules on
+windows seen *per rollout* is therefore the fair reading, not on totals.
+
 ### 6.2 Optimization
 
 Parameters are split into two groups with independent learning rates: the probe
 head (its linear layer and its normalization) and, when the adapted regime is
 in use, the low-rank adapters. Everything else in the language model is frozen,
 and the trainer refuses to start if any parameter outside those two groups turns
-out to require gradients, so a silent full fine-tune is impossible. Gradients are
-clipped by global norm, and gradient accumulation is used to reach the
-configured tokens per step.
+out to require gradients, so a silent full fine-tune is impossible. Gradient
+accumulation is used to reach the configured tokens per step.
+
+Gradients are clipped by norm. With a head per layer the norm is taken **per
+head** rather than across all of them together, and the clip is applied to the
+accumulated gradient a step is about to be taken on rather than to any single
+micro-batch's. A norm spanning every head would rescale all of them whenever any
+one exceeded the limit, which would couple heads that otherwise share nothing
+and is the single place a joint run would stop matching separate ones.
 
 Which layers the adapters cover is its own axis: none (a strictly frozen model),
 every layer up to the probed one, or an explicit list.
@@ -374,8 +442,24 @@ every layer up to the probed one, or an explicit list.
 
 Validation during training runs on a fixed subset of `val`, evaluated every $N$
 steps. The subset is derived from the split alone and not from the run seed, so
-every run in a comparison is monitored on identical rows. Its numbers exist to
-steer the run and are never reported.
+every run in a comparison is monitored on identical rows; letting it move with
+the seed would add a difference in what was measured to the difference the seeds
+exist to measure. Every positive rollout is kept and only the negatives are
+thinned, since positives are the scarce class and the rank metric is built from
+them. Its numbers exist to steer the run and are never reported.
+
+How far the monitor is thinned matters more than it first appears, because
+training and evaluation read the corpus differently. Training reads one short
+window of a rollout; evaluation reads the whole rollout. A probe covering many
+depths therefore pays for every token of every layer each time it is monitored,
+and full-split monitoring at a frequent cadence can cost more than the training
+it is meant to observe. A convergence curve does not need the whole split. The
+final numbers do, and those are measured once, at the end, on the full split.
+
+For the same reason the end-of-run evaluation names which splits it covers. An
+exploratory run has no use for the test splits, which are several times larger
+than the monitor, and not reading them is the discipline Section 7.7 asks for
+anyway.
 
 The metric used to stop and to select a checkpoint is computed in **evaluation
 space**, from the probe's scores through the protocol of Section 7, and never
@@ -626,6 +710,13 @@ them apart.
 
 - Held-out domains are reported per domain and never pooled.
 - Every rate is printed with its population sizes, in tokens and in rollouts.
+- A budget smaller than the share of negative rollouts tied at a scorer's
+  highest score cannot be spent: the threshold is forced past the top of the
+  range and nothing fires anywhere, positives included. The resulting empty
+  columns are indistinguishable from a scorer that simply stayed quiet, when the
+  truth is the opposite, so the tie is measured and reported beside the
+  threshold it made unreachable. This is not a hypothetical: a per-token signal
+  that saturates, or a binary one, ties on most of the corpus.
 - Any per-domain cell backed by fewer than a small minimum of positive rollouts
   is reported and marked anecdotal, never silently hidden and never quoted as an
   estimate of generalization.
@@ -639,6 +730,14 @@ strategy, the label family and its parameters, the loss, and the adapter scope.
 Any combination is evaluated by the identical protocol of Section 7, so a table
 whose rows are combinations and whose columns are the four views is the natural
 output of the question "which recipe is better, and in what respect".
+
+Depth is the exception, and it is worth treating differently. Because a run can
+carry a head per layer at little extra cost (Section 3.1), depth need not be
+fixed before the other axes are studied and then hoped to transfer. Any recipe
+can be run across every depth at once and the layer chosen afterwards, per
+recipe, which also answers whether the best depth is the same for all of them.
+Reading a single depth's result as though it settled the question for the others
+is the mistake this makes avoidable.
 
 Two conventions keep such a table meaningful. Within one table, only the axis
 under study varies and everything else, including the training budget, the
@@ -658,6 +757,7 @@ tracking) are incidental.
 features:
   regime: frozen            # frozen | adapted
   layer: 30                 # which residual stream the probe reads
+  layers: null              # or several: a head per depth, trained in one pass
   context_window_size: 1    # consecutive hidden states concatenated per decision
   normalization: layernorm  # none | layernorm | rmsnorm | l2
 
@@ -704,6 +804,8 @@ budget:
 
 evaluation:
   monitor_negatives_per_positive: 4.0   # in-loop monitoring only
+  monitor_max_rollouts: null            # thin the monitor, keeping every positive
+  final_splits: null                    # which splits the end-of-run pass covers
   false_alarm_budgets: [0.01, 0.05, 0.10]
   persistence_candidates: [1, 3, 5]
   per_domain: true

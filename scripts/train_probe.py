@@ -68,13 +68,20 @@ def activation_hidden_size(config: ExperimentConfig) -> int:
     return int(list(manifest["shape"].iloc[0])[-1])
 
 
-def subsample_for_monitoring(dataset, max_rollouts, *, seed: int):
+MONITOR_SEED = 0
+
+
+def subsample_for_monitoring(dataset, max_rollouts, *, seed: int = MONITOR_SEED):
     """Cut the monitoring split down, keeping every positive rollout.
 
     Positives are the scarce class and the rank metric is built from them, so
     dropping any would make the curve noisier for no saving worth having. The
-    negatives are thinned instead, deterministically, so the monitor is the same
-    population at every evaluation and across runs that share a seed.
+    negatives are thinned instead.
+
+    The choice is fixed rather than drawn from the run's own seed, so that seed
+    repeats of one recipe are monitored on identical rows. Letting the monitor
+    move with the seed would add a difference in what was measured to the
+    difference the seeds exist to measure.
     """
     if max_rollouts is None or max_rollouts >= len(dataset.records):
         return dataset
@@ -371,9 +378,7 @@ def _train(
             EarlyStoppingCallback(early_stopping_patience=config.training.budget.patience)
         )
     monitor = subsample_for_monitoring(
-        datasets[splits.validation],
-        config.training.validation.max_rollouts,
-        seed=config.training.runtime.seed,
+        datasets[splits.validation], config.training.validation.max_rollouts
     )
     final_splits = config.training.validation.final_splits or splits.final_evaluation
     unknown = set(final_splits) - set(datasets)
