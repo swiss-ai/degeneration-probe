@@ -36,7 +36,8 @@ from degeneration_probe.data.dataset import (
     degeneration_collate_fn,
 )
 from degeneration_probe.evaluation.scores import build_scores, write_scores
-from degeneration_probe.probes.linear_probe import setup_probe
+from degeneration_probe.data.cached_dataset import cached_collate_fn, create_cached_dataset
+from degeneration_probe.probes.linear_probe import setup_cached_probe, setup_probe
 from degeneration_probe.training.recording import FINAL_WEIGHTS_DIR, RESOLVED_CONFIG_FILE
 from degeneration_probe.utils.file_utils import load_json
 from degeneration_probe.utils.model_utils import load_model_and_tokenizer, resolve_torch_dtype
@@ -69,18 +70,29 @@ def score_split(
     batch_size: int,
 ) -> pd.DataFrame:
     """Run the probe over one split and return its score table."""
-    dataset = create_degeneration_dataset(
-        config.dataset,
-        tokenizer,
-        split=split,
-        label_config=config.training.label,
-        training=False,
-    )
+    if tokenizer is None:
+        dataset = create_cached_dataset(
+            config.dataset,
+            split=split,
+            label_config=config.training.label,
+            probe_layer=config.training.probe.layer,
+            training=False,
+        )
+        collate = cached_collate_fn
+    else:
+        dataset = create_degeneration_dataset(
+            config.dataset,
+            tokenizer,
+            split=split,
+            label_config=config.training.label,
+            training=False,
+        )
+        collate = degeneration_collate_fn
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=degeneration_collate_fn,
+        collate_fn=collate,
         num_workers=config.training.runtime.dataloader_num_workers,
     )
     probe.eval()
@@ -89,14 +101,23 @@ def score_split(
 
     records = []
     for batch in loader:
-        logits = probe(
-            input_ids=batch["input_ids"].to(device),
-            attention_mask=batch["attention_mask"].to(device),
-        )["probe_logits"]
+        model_inputs = (
+            {"features": batch["features"].to(device)}
+            if "features" in batch
+            else {
+                "input_ids": batch["input_ids"].to(device),
+                "attention_mask": batch["attention_mask"].to(device),
+            }
+        )
+        logits = probe(**model_inputs)["probe_logits"]
         probabilities = torch.sigmoid(logits.float()).cpu().numpy()
         for row in range(probabilities.shape[0]):
             start = int(batch["prompt_length"][row])
-            length = int(batch["attention_mask"][row].sum()) - start
+            length = (
+                int(batch["target_mask"][row].sum())
+                if "features" in batch
+                else int(batch["attention_mask"][row].sum()) - start
+            )
             scores = probabilities[row, start : start + length]
             prompt_id = batch["prompt_id"][row]
             rollout_idx = int(batch["rollout_idx"][row])
@@ -136,21 +157,42 @@ def run(
     config.dataset.sampling.evaluation_negative_rollouts_per_positive = None
     splits = splits or config.dataset.splits.final_evaluation
 
-    model, tokenizer = load_model_and_tokenizer(
-        config.model.name,
-        tokenizer_name=config.model.tokenizer_name,
-        torch_dtype=resolve_torch_dtype(config.model.dtype),
-    )
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-    _, probe = setup_probe(
-        model,
-        config.training.probe,
-        config.training.lora,
-        checkpoint_path=checkpoint_dir,
-        seed=config.training.runtime.seed,
-    )
-    print(f"Scoring with {checkpoint_dir}")
+    cached = config.training.features.regime == "cached"
+    if cached:
+        import pandas as pd_manifest
+
+        hidden_size = int(
+            list(
+                pd_manifest.read_parquet(
+                    Path(config.dataset.build_root) / "activations" / "manifest.parquet",
+                    columns=["shape"],
+                )["shape"].iloc[0]
+            )[-1]
+        )
+        probe = setup_cached_probe(
+            config.training.probe,
+            hidden_size=hidden_size,
+            checkpoint_path=checkpoint_dir,
+            seed=config.training.runtime.seed,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        )
+        tokenizer = None
+    else:
+        model, tokenizer = load_model_and_tokenizer(
+            config.model.name,
+            tokenizer_name=config.model.tokenizer_name,
+            torch_dtype=resolve_torch_dtype(config.model.dtype),
+        )
+        if hasattr(model, "config"):
+            model.config.use_cache = False
+        _, probe = setup_probe(
+            model,
+            config.training.probe,
+            config.training.lora,
+            checkpoint_path=checkpoint_dir,
+            seed=config.training.runtime.seed,
+        )
+    print(f"Scoring with {checkpoint_dir} ({config.training.features.regime} features)")
 
     metadata = rollout_metadata(config)
     written = []

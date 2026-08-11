@@ -23,6 +23,7 @@ from degeneration_probe.data.dataset import (
     compute_pos_weight,
     create_degeneration_dataset,
     degeneration_collate_fn,
+    load_token_signal,
 )
 from degeneration_probe.evaluation.metrics import build_validation_metrics
 from degeneration_probe.probes.linear_probe import setup_cached_probe, setup_probe
@@ -205,6 +206,22 @@ def _train(
                 # Evaluation reads whole rollouts: a selection rule describes
                 # what a run learns from, never what it is measured on.
                 return dataset
+            hardness = None
+            if config.training.selection.strategy == "frontier_window_hard_negative":
+                # Hard-negative placement needs to know where a rollout looks
+                # repetitive, which only the negatives are placed by.
+                negatives = [
+                    (index, record)
+                    for index, record in enumerate(dataset.records)
+                    if not record.is_positive
+                ]
+                signal = load_token_signal(
+                    config.dataset, [record for _, record in negatives]
+                )
+                hardness = {
+                    negatives[position][0]: values
+                    for position, values in signal.items()
+                }
             return WindowedActivationDataset(
                 dataset.records,
                 build_root=config.dataset.build_root,
@@ -212,6 +229,7 @@ def _train(
                 selection=config.training.selection,
                 batch_size=config.training.runtime.per_device_train_batch_size,
                 seed=config.training.runtime.seed,
+                hardness=hardness,
             )
     else:
         model, tokenizer = load_model_and_tokenizer(
@@ -240,6 +258,11 @@ def _train(
                 split=split,
                 label_config=config.training.label,
                 training=training,
+                # A rule applied while the model adapts masks the loss rather
+                # than shrinking the batch, since the prefix must run anyway.
+                selection=config.training.selection
+                if training and config.training.selection.strategy != "all_tokens"
+                else None,
             )
 
     print_trainable_parameters(probe)

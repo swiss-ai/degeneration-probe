@@ -195,3 +195,32 @@ def test_sampling_is_deterministic_and_excludes_unusable_rows():
     assert len(first[first["is_positive"]]) == 2
     assert len(first[first["stop_reason"] == "eos"]) == 4
     assert "unusable" not in set(first["prompt_id"])
+
+
+def test_a_selection_rule_masks_the_loss_while_the_model_adapts(local_build):
+    """Attention is causal, so a window cannot shrink the forward pass here.
+
+    The rung is still expressible: it decides which positions contribute to the
+    loss, leaving the sequence itself untouched.
+    """
+    import numpy as np
+
+    from degeneration_probe.config import SelectionConfig
+    from degeneration_probe.data.dataset import DegenerationTokenDataset
+
+    records = load_degeneration_records(
+        local_build, split="train", label_config=LabelConfig(), training=True
+    )
+    unmasked = DegenerationTokenDataset(records, FakeTokenizer(), local_build.tokenization)
+    masked = DegenerationTokenDataset(
+        records,
+        FakeTokenizer(),
+        local_build.tokenization,
+        selection=SelectionConfig(strategy="random_window", window_size=1),
+    )
+    for index in range(len(records)):
+        plain, windowed = unmasked[index], masked[index]
+        # The sequence is identical; only which positions are scored changes.
+        assert plain["input_ids"].tolist() == windowed["input_ids"].tolist()
+        assert int(windowed["target_mask"].sum()) <= int(plain["target_mask"].sum())
+        assert int(windowed["target_mask"].sum()) >= 1

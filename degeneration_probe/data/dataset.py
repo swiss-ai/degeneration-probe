@@ -297,8 +297,59 @@ def load_degeneration_records(
     return records
 
 
+def load_token_signal(
+    config: DatasetConfig,
+    records: Sequence["DegenerationRecord"],
+    column: str = "repetition_score",
+) -> Dict[int, np.ndarray]:
+    """A per-token signal for the given rollouts, keyed by their index.
+
+    Hard-negative placement needs to know where a rollout looks repetitive,
+    which is a different question from what it is labelled with, so the signal
+    is loaded on its own rather than through the label family.
+    """
+    if not records:
+        return {}
+    root = Path(config.build_root)
+    keys = pd.DataFrame(
+        {
+            "prompt_id": [record.prompt_id for record in records],
+            "rollout_idx": [record.rollout_idx for record in records],
+            "domain": [record.domain for record in records],
+        }
+    )
+    frame = _read_selected_domain_shards(
+        root, "labels", keys, ["prompt_id", "rollout_idx", column]
+    )
+    lookup = {
+        (row.prompt_id, int(row.rollout_idx)): np.asarray(
+            getattr(row, column), dtype=np.float64
+        )
+        for row in frame.itertuples(index=False)
+    }
+    signal: Dict[int, np.ndarray] = {}
+    for index, record in enumerate(records):
+        values = lookup.get((record.prompt_id, record.rollout_idx))
+        if values is None:
+            continue
+        aligned = np.zeros(len(record.targets), dtype=np.float64)
+        usable = min(len(values), aligned.size)
+        aligned[:usable] = np.nan_to_num(values[:usable], nan=0.0)
+        signal[index] = aligned
+    return signal
+
+
 class DegenerationTokenDataset(Dataset):
-    """Prepend a tokenized prompt while preserving generated token IDs exactly."""
+    """Prepend a tokenized prompt while preserving generated token IDs exactly.
+
+    A selection rule can be applied here too, but it means something different
+    from the cached regime. Attention is causal, so producing the hidden state
+    at a token requires running the whole prefix before it: a window cannot
+    make the forward pass cheaper, only decide which positions contribute to
+    the loss. The rung is therefore expressible while the model adapts, but as
+    a mask rather than as a smaller batch, and per-batch class composition does
+    not carry over, since the unit here is a rollout rather than a window.
+    """
 
     def __init__(
         self,
@@ -308,13 +359,39 @@ class DegenerationTokenDataset(Dataset):
         *,
         shuffle: bool = False,
         seed: int = 42,
+        selection=None,
     ) -> None:
         self.records = list(records)
         self.tokenizer = tokenizer
         self.tokenization = tokenization
+        self.selection = selection
+        self.seed = int(seed)
+        self._selected: Optional[Dict[int, np.ndarray]] = None
         if shuffle:
             order = np.random.default_rng(seed).permutation(len(self.records))
             self.records = [self.records[index] for index in order]
+        if self.selection is not None:
+            self.resample(0)
+
+    def resample(self, epoch: int) -> None:
+        """Redraw which positions contribute to the loss."""
+        from degeneration_probe.data.sampling import build_windows
+
+        rng = np.random.default_rng([self.seed, epoch])
+        windows = build_windows(
+            self.records,
+            strategy=self.selection.strategy,
+            window_size=self.selection.window_size,
+            rng=rng,
+            anchor=self.selection.anchor,
+            hard_negative_fraction=self.selection.hard_negative_fraction,
+        )
+        selected: Dict[int, List[np.ndarray]] = {}
+        for window in windows:
+            selected.setdefault(window.record_index, []).append(window.positions)
+        self._selected = {
+            index: np.unique(np.concatenate(parts)) for index, parts in selected.items()
+        }
 
     def __len__(self) -> int:
         return len(self.records)
@@ -351,6 +428,12 @@ class DegenerationTokenDataset(Dataset):
         if len(completion_targets):
             targets[len(prompt_ids) :] = torch.tensor(completion_targets, dtype=torch.float32)
         target_mask = torch.isfinite(targets)
+        if self._selected is not None:
+            keep = torch.zeros_like(target_mask)
+            positions = self._selected.get(index, np.empty(0, dtype=np.int64))
+            positions = positions[positions < len(completion_targets)]
+            keep[len(prompt_ids) + torch.as_tensor(positions, dtype=torch.long)] = True
+            target_mask &= keep
         return {
             "input_ids": input_ids,
             "attention_mask": torch.ones_like(input_ids),
@@ -456,6 +539,7 @@ def create_degeneration_dataset(
     split: str,
     label_config,
     training: bool,
+    selection=None,
 ) -> DegenerationTokenDataset:
     records = load_degeneration_records(
         config, split=split, label_config=label_config, training=training
@@ -466,6 +550,7 @@ def create_degeneration_dataset(
         config.tokenization,
         shuffle=training,
         seed=config.sampling.seed,
+        selection=selection,
     )
 
 
