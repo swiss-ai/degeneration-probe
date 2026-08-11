@@ -1,29 +1,24 @@
 """Materialize the onset position used by degeneration training.
 
+The onset comes from the LLM judge, which reads a rollout and names where it
+begins to degenerate by quoting the text. `onset_quotes.py` locates that quote
+in the token stream, and this module reads the position it cached.
+
 For every rollout in the dataset, computes:
     - `is_positive`: `stop_reason == "length"` AND a defined onset position
-      under the active onset metric (see `resolve_onset_position`).
-    - `onset_position`: resolved through `resolve_onset_position`, a single
-      swappable seam over which onset-position signal to trust. Never read an
-      onset out of any other field anywhere in the training pipeline, so that
-      adopting a different signal stays a one-line change rather than a
-      pipeline rewrite.
+      (see `resolve_onset_position`).
+    - `onset_position`: resolved through `resolve_onset_position`, the single
+      seam that owns which onset signal to trust. Never read an onset out of
+      any other field anywhere in the training pipeline, so that adopting a
+      different signal stays a one-line change rather than a pipeline rewrite.
     - `split`: looked up from the existing `splits/*.jsonl` files (prompt-id
       -> split maps, all 10 rollouts of a prompt share one split).
     - `domain`: from `prompts.parquet`.
 
-The onset comes from the LLM judge, which names where a rollout starts
-degenerating by quoting the text; `onset_quotes.py` locates that quote in the
-token stream and caches the position. The structural repetition signals stay in
-the dataset for scoring and inspection, but none of them decides a frontier: a
-longest-repeated-substring match fires on most ordinary long text by
-coincidence, and where it does fire it points at the first occurrence of a
-chunk, which is a position at which nothing has yet repeated.
-
 Negative rollouts (`stop_reason == "eos"`) get `is_positive=False`,
-`onset_position=None`, regardless of any heuristic flag. A capped rollout with
-no resolved onset is excluded from training rather than treated as either
-class, and `onset_quotes.py` records why each one was lost.
+`onset_position=None`. A capped rollout with no resolved onset is excluded from
+training rather than treated as either class, and carries the reason it was
+excluded so a shrunken positive population can be accounted for.
 
 Output: `paths.onset_labels_path(config)`, one row per rollout, columns per
 `ONSET_LABEL_COLUMNS`. This is a standalone parquet -- it does not modify
@@ -75,8 +70,8 @@ def resolve_onset_position(
     """The one place in the codebase that decides "where does degeneration start"
     for a given rollout. Everything downstream, and by extension every
     probe-training script that reads the materialized table, must go through
-    this function rather than reading a judge or heuristic field directly, so
-    that changing the onset-position signal later is a one-line change.
+    this function rather than reading a raw field directly, so that changing the
+    onset-position signal later is a one-line change.
 
     `row` must carry either `onset_quote_position` (already located, the normal
     path) or an `onset_quote` alongside `generated_token_ids` and a `tokenizer`

@@ -138,5 +138,7 @@ def test_the_label_seam_invents_nothing_when_a_quote_did_not_resolve():
 
 
 def test_an_unknown_onset_metric_is_refused():
+    """A misspelled metric must fail rather than fall through to the default,
+    which would attach the wrong provenance to a whole corpus of labels."""
     with pytest.raises(ValueError, match="Unknown onset_metric"):
-        resolve_onset_position({"onset_quote_position": 1}, metric="lrs_normalized_growing")
+        resolve_onset_position({"onset_quote_position": 1}, metric="onset_qoute")

@@ -47,23 +47,21 @@ the definition of $f_r$ and every other part of the system reads the frontier
 only through it, so the underlying signal stays swappable.
 
 The frontier comes from an LLM judge, which reads a rollout and names where it
-begins to degenerate by quoting the text. A quote is the form a person can
-check, but not the form training needs, so a separate step locates that quote in
-the rollout's own token stream and records the index of its first token. That
-resolution is cached, because it is the one expensive part of the chain and it
-changes only when the judge is re-run. Quotes are verified against the
-completion they came from, and a quote that cannot be located leaves its
-rollout excluded, with the reason recorded rather than the rollout silently
-dropped.
+begins to degenerate by quoting the text. Asking for a quote rather than a
+number is what makes the label checkable: a quote can be verified against the
+completion it came from, and a person reading the rollout can see immediately
+whether the judge pointed at the right place. A quote is not the form training
+needs, so a separate step locates it in the rollout's own token stream and
+records the index of its first token. That resolution is cached, since it is
+the one expensive part of the chain and changes only when the judge is re-run.
+A quote that cannot be located leaves its rollout excluded, with the reason
+recorded rather than the rollout silently dropped.
 
-Structural repetition measures are deliberately not used for this. A longest
-repeated substring is guaranteed to find something in almost any long text, so
-on rollouts that ended naturally it fires most of the time on coincidence
-alone; and where it does mark a real loop it points at the *first* occurrence
-of the repeated chunk, a position at which nothing has yet repeated and no
-observer could know a loop had begun. Those measures remain in the corpus, and
-remain useful as baselines to score the probe against, but they never define
-where degeneration starts.
+The corpus also carries per-token repetition and entropy measures, and a
+whole-rollout longest-repeated-substring match. These are scored through the
+same evaluation protocol as the probe, as the baselines it has to beat, and
+they are what the judge's reliability is checked against. They play no part in
+deciding where a rollout starts degenerating.
 
 Two asymmetries of the corpus shape almost every decision that follows:
 
