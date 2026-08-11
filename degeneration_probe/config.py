@@ -242,12 +242,24 @@ class ValidationConfig:
     strategy: str = "epoch"
     steps: Optional[int] = None
     metrics: List[str] = field(default_factory=list)
+    # How many rollouts the monitoring split is cut down to, keeping every
+    # positive. Training reads a short window per rollout, but evaluation reads
+    # whole ones, so a probe covering many depths pays for every token of every
+    # layer each time it is monitored. A curve does not need the whole split;
+    # the final numbers do, and those are measured once at the end.
+    max_rollouts: Optional[int] = None
+    # Which splits the end-of-run evaluation covers. Left unset it scores all of
+    # them, which is rarely what an exploratory run wants: the test splits are
+    # far larger than the monitor and are not read until a recipe is chosen.
+    final_splits: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
         if self.strategy not in {"no", "steps", "epoch"}:
             raise ValueError("training.validation.strategy must be no, steps, or epoch")
         if self.strategy == "steps" and not self.steps:
             raise ValueError("training.validation.steps is required when strategy='steps'")
+        if self.max_rollouts is not None and self.max_rollouts < 1:
+            raise ValueError("training.validation.max_rollouts must be positive")
 
 
 @dataclass

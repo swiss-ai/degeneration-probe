@@ -68,6 +68,31 @@ def activation_hidden_size(config: ExperimentConfig) -> int:
     return int(list(manifest["shape"].iloc[0])[-1])
 
 
+def subsample_for_monitoring(dataset, max_rollouts, *, seed: int):
+    """Cut the monitoring split down, keeping every positive rollout.
+
+    Positives are the scarce class and the rank metric is built from them, so
+    dropping any would make the curve noisier for no saving worth having. The
+    negatives are thinned instead, deterministically, so the monitor is the same
+    population at every evaluation and across runs that share a seed.
+    """
+    if max_rollouts is None or max_rollouts >= len(dataset.records):
+        return dataset
+    import copy
+
+    import numpy as np
+
+    positives = [r for r in dataset.records if r.is_positive]
+    negatives = [r for r in dataset.records if not r.is_positive]
+    room = max(0, max_rollouts - len(positives))
+    if room and len(negatives) > room:
+        chosen = np.random.default_rng(seed).choice(len(negatives), size=room, replace=False)
+        negatives = [negatives[index] for index in sorted(chosen)]
+    reduced = copy.copy(dataset)
+    reduced.records = positives + negatives
+    return reduced
+
+
 def _trainable_parameter_counts(probe) -> dict:
     probe_parameters = sum(
         parameter.numel()
@@ -345,16 +370,31 @@ def _train(
         callbacks.append(
             EarlyStoppingCallback(early_stopping_patience=config.training.budget.patience)
         )
+    monitor = subsample_for_monitoring(
+        datasets[splits.validation],
+        config.training.validation.max_rollouts,
+        seed=config.training.runtime.seed,
+    )
+    final_splits = config.training.validation.final_splits or splits.final_evaluation
+    unknown = set(final_splits) - set(datasets)
+    if unknown:
+        raise ValueError(
+            f"training.validation.final_splits names {sorted(unknown)}, which the dataset "
+            f"does not define. Available: {sorted(datasets)}"
+        )
+    if monitor is not datasets[splits.validation]:
+        print(
+            f"Monitoring on {len(monitor)} of {len(datasets[splits.validation])} "
+            f"{splits.validation} rollouts, every positive kept"
+        )
     trainer = ProbeTrainer(
         model=probe,
         cfg=config.training,
         args=training_args,
         train_dataset=datasets[splits.train],
-        eval_dataset=datasets[splits.validation],
-        validation_dataset=datasets[splits.validation],
-        final_evaluation_datasets={
-            split: datasets[split] for split in splits.final_evaluation
-        },
+        eval_dataset=monitor,
+        validation_dataset=monitor,
+        final_evaluation_datasets={split: datasets[split] for split in final_splits},
         pos_weight=pos_weight,
         data_collator=collate,
         callbacks=callbacks,

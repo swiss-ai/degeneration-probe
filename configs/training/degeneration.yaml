@@ -85,6 +85,13 @@ runtime:
 validation:
   strategy: epoch
   steps: null
+  # Rollouts the monitoring split is cut to, keeping every positive. Evaluation
+  # reads whole rollouts while training reads a short window of one, so a probe
+  # covering many depths pays for every token of every layer each time it is
+  # monitored. Unset means the whole split.
+  max_rollouts: null
+  # Splits the end-of-run evaluation covers. Unset means all of them.
+  final_splits: null
   # Extension point for future onset_detection and early_detection metrics.
   metrics: []
 

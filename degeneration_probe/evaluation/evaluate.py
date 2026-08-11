@@ -6,6 +6,7 @@ import math
 from typing import Dict, Iterable, List, Optional
 
 import torch
+import torch.nn.functional as F
 
 from degeneration_probe.evaluation.metrics import build_validation_metrics
 from degeneration_probe.training.loss import compute_degeneration_loss
@@ -163,26 +164,39 @@ def _evaluate_multi_head(
     pos_weight: Optional[float],
     layer_indices,
 ) -> Dict[str, float]:
-    """Score every head of a multi-layer probe in one pass over the split."""
+    """Score every head of a multi-layer probe in one pass over the split.
+
+    Every quantity is accumulated across the head axis rather than head by
+    head. A loop here would multiply the per-batch Python work and the
+    device synchronisations by the number of depths, which on a split of
+    thousands of rollouts costs hours rather than minutes, and none of it is
+    arithmetic the machine needs to do serially.
+    """
     device = getattr(probe, "device", next(probe.parameters()).device)
     heads = len(layer_indices)
-    peaks: List[Dict[tuple, float]] = [{} for _ in range(heads)]
+    peaks = [{} for _ in range(heads)]
     labels: Dict[tuple, bool] = {}
-    loss_total = [0.0] * heads
-    plain_total = [0.0] * heads
-    prediction_sum = [0.0] * heads
-    prediction_sq_sum = [0.0] * heads
-    predicted_positive = [0] * heads
+    zeros = torch.zeros(heads, dtype=torch.float64, device=device)
+    loss_total = zeros.clone()
+    plain_total = zeros.clone()
+    prediction_sum = zeros.clone()
+    prediction_sq_sum = zeros.clone()
+    predicted_positive = zeros.clone()
     total_tokens = 0
     target_sum = target_sq_sum = 0.0
     plain_matches_weighted = (
         loss_name != "bce" or pos_weight is None or float(pos_weight) == 1.0
     )
+    weight = (
+        torch.tensor(float(pos_weight), device=device)
+        if loss_name == "bce" and pos_weight is not None
+        else None
+    )
 
     for batch in dataloader:
         targets = batch["targets"].to(device)
         target_mask = batch["target_mask"].to(device)
-        logits = probe(features=batch["features"].to(device))["probe_logits"]
+        logits = probe(features=batch["features"].to(device))["probe_logits"].float()
         valid = target_mask & torch.isfinite(targets)
         active = int(valid.sum().item())
         if not active:
@@ -191,32 +205,49 @@ def _evaluate_multi_head(
         valid_targets = targets[valid].float()
         target_sum += float(valid_targets.sum().item())
         target_sq_sum += float(valid_targets.square().sum().item())
-        is_positive = batch.get("is_positive", [False] * len(batch["prompt_id"]))
-        for index in range(heads):
-            head_logits = logits[..., index]
-            head_loss, _ = compute_degeneration_loss(
-                loss_name, head_logits, targets, target_mask, pos_weight=pos_weight
+
+        keep = valid.unsqueeze(-1)
+        spread = torch.where(valid, targets, torch.zeros_like(targets)).unsqueeze(-1)
+        spread = spread.expand_as(logits)
+        if loss_name == "bce":
+            elementwise = F.binary_cross_entropy_with_logits(
+                logits, spread, pos_weight=weight, reduction="none"
             )
-            loss_total[index] += float(head_loss.item()) * active
-            if plain_matches_weighted:
-                plain_total[index] += float(head_loss.item()) * active
-            else:
-                plain, _ = compute_degeneration_loss(
-                    loss_name, head_logits, targets, target_mask, pos_weight=None
+            plain_elementwise = (
+                elementwise
+                if plain_matches_weighted
+                else F.binary_cross_entropy_with_logits(
+                    logits, spread, reduction="none"
                 )
-                plain_total[index] += float(plain.item()) * active
-            predictions = torch.sigmoid(head_logits[valid].float())
-            prediction_sum[index] += float(predictions.sum().item())
-            prediction_sq_sum[index] += float(predictions.square().sum().item())
-            predicted_positive[index] += int((predictions >= 0.5).sum().item())
-            probabilities = torch.sigmoid(head_logits.float())
-            for row, key in enumerate(zip(batch["prompt_id"], batch["rollout_idx"])):
-                row_valid = valid[row]
-                if not bool(row_valid.any()):
-                    continue
-                peak = float(probabilities[row][row_valid].max())
-                peaks[index][key] = max(peaks[index].get(key, 0.0), peak)
-                labels[key] = bool(is_positive[row])
+            )
+        elif loss_name == "mse":
+            elementwise = (torch.sigmoid(logits) - spread).square()
+            plain_elementwise = elementwise
+        else:
+            raise ValueError(f"Unknown degeneration loss {loss_name!r}")
+        loss_total += (elementwise * keep).sum(dim=(0, 1)).double()
+        plain_total += (plain_elementwise * keep).sum(dim=(0, 1)).double()
+
+        probabilities = torch.sigmoid(logits)
+        masked = probabilities * keep
+        prediction_sum += masked.sum(dim=(0, 1)).double()
+        prediction_sq_sum += (masked * masked).sum(dim=(0, 1)).double()
+        predicted_positive += ((probabilities >= 0.5) & keep).sum(dim=(0, 1)).double()
+
+        # The highest score each rollout reaches, per head, in one reduction.
+        # Padding is pushed below every real score so it can never be the peak.
+        row_peaks = probabilities.masked_fill(~keep, -1.0).amax(dim=1).cpu()
+        rows_present = valid.any(dim=1).cpu()
+        is_positive = batch.get("is_positive", [False] * len(batch["prompt_id"]))
+        for row, key in enumerate(zip(batch["prompt_id"], batch["rollout_idx"])):
+            if not bool(rows_present[row]):
+                continue
+            labels[key] = bool(is_positive[row])
+            row_values = row_peaks[row]
+            for index in range(heads):
+                value = float(row_values[index])
+                if value > peaks[index].get(key, -1.0):
+                    peaks[index][key] = value
 
     if total_tokens == 0:
         raise ValueError(f"Evaluation split {prefix!r} contains no valid target tokens")
@@ -237,15 +268,15 @@ def _evaluate_multi_head(
     best: Dict[str, float] = {}
     for index, layer in enumerate(layer_indices):
         name = f"{prefix}/layer{layer:02d}"
-        mean = prediction_sum[index] / total_tokens
+        mean = float(prediction_sum[index]) / total_tokens
         head_metrics = {
-            f"{name}/loss": loss_total[index] / total_tokens,
-            f"{name}/loss_unweighted": plain_total[index] / total_tokens,
+            f"{name}/loss": float(loss_total[index]) / total_tokens,
+            f"{name}/loss_unweighted": float(plain_total[index]) / total_tokens,
             f"{name}/prediction_mean": mean,
             f"{name}/prediction_std": math.sqrt(
-                max(0.0, prediction_sq_sum[index] / total_tokens - mean**2)
+                max(0.0, float(prediction_sq_sum[index]) / total_tokens - mean**2)
             ),
-            f"{name}/prediction_positive_rate": predicted_positive[index] / total_tokens,
+            f"{name}/prediction_positive_rate": float(predicted_positive[index]) / total_tokens,
         }
         ordered = [labels[key] for key in peaks[index]]
         if any(ordered) and not all(ordered):
