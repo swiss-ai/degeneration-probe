@@ -202,6 +202,15 @@ def onset_labels_path(config: DatasetGenConfig) -> Path:
     return onset_labels_dir(config) / "onset_labels.parquet"
 
 
+def onset_quote_positions_path(config: DatasetGenConfig) -> Path:
+    """Judge quotes located in the token stream, one row per capped rollout.
+
+    Cached separately from the labels because locating a quote is the expensive
+    step and only changes when the judge is re-run.
+    """
+    return onset_labels_dir(config) / "onset_quote_positions.parquet"
+
+
 # --- work root (scratch, resumable intermediates) ---------------------------------
 
 def work_root(config: DatasetGenConfig) -> Path:
