@@ -310,3 +310,60 @@ def test_a_zero_budget_holds_even_when_the_scorer_reaches_one():
     # And nothing fires at the strict threshold, positives included.
     detection = view_a_detection(per_rollout_table(frame, [strict])).iloc[0]
     assert (detection.false_positive, detection.true_positive) == (0, 0)
+
+
+def test_a_tie_at_the_ceiling_is_reported_not_left_to_be_inferred():
+    """A silent scorer and a saturated one produce the same empty columns.
+
+    When most negatives share the scorer's highest value, no threshold can
+    spend a small budget: it is forced past the top of the range and nothing
+    fires anywhere. Read without a flag, that looks like a scorer which never
+    triggers, when in fact it triggers on everything and cannot rank.
+    """
+    import pandas as pd
+
+    from degeneration_probe.evaluation.protocol import choose_thresholds
+
+    # Eighty per cent of negatives pinned to 1.0, which is what an
+    # already-saturated per-token signal produces once pooled by its peak.
+    frame = pd.DataFrame(
+        {
+            "split": ["val"] * 12,
+            "is_positive": [False] * 10 + [True] * 2,
+            "scores": [np.array([1.0])] * 8
+            + [np.array([0.2])] * 2
+            + [np.array([1.0])] * 2,
+        }
+    )
+    thresholds = {t.target_negative_fpr: t for t in choose_thresholds(frame, [0.01, 0.9])}
+
+    tight = thresholds[0.01]
+    assert tight.saturated
+    assert tight.tied_at_ceiling == pytest.approx(0.8)
+    # The budget is genuinely unspendable, so nothing fires at all.
+    assert tight.realized_negative_fpr == 0.0
+    assert tight.tau > 1.0
+
+    # Only a budget wider than the tie itself is spendable: the tie is admitted
+    # whole or not at all, so every budget below it is equally unreachable.
+    loose = thresholds[0.9]
+    assert not loose.saturated
+    assert loose.realized_negative_fpr == pytest.approx(0.8)
+
+
+def test_a_well_spread_scorer_is_never_flagged_as_saturated():
+    import pandas as pd
+
+    from degeneration_probe.evaluation.protocol import choose_thresholds
+
+    rng = np.random.default_rng(0)
+    scores = np.sort(rng.uniform(0.0, 0.9, 200))
+    frame = pd.DataFrame(
+        {
+            "split": ["val"] * 210,
+            "is_positive": [False] * 200 + [True] * 10,
+            "scores": [np.array([s]) for s in scores] + [np.array([0.95])] * 10,
+        }
+    )
+    for threshold in choose_thresholds(frame, [0.01, 0.05, 0.1]):
+        assert not threshold.saturated

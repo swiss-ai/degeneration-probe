@@ -105,10 +105,32 @@ class Threshold:
     tau: float
     realized_negative_fpr: float
     negative_rollouts: int
+    # True when so many negatives tie at the top of the range that no threshold
+    # can spend the budget. Every downstream number is then a statement about
+    # the scorer's resolution rather than about its accuracy, and saying so is
+    # the difference between "it stayed quiet" and "it fired on everything".
+    saturated: bool = False
+    tied_at_ceiling: float = 0.0
 
 
 def threshold_for_budget(negative_scores: np.ndarray, budget: float) -> Tuple[float, float]:
     """The lowest threshold whose false-alarm rate stays inside the budget."""
+    tau, realized, _ = threshold_for_budget_detail(negative_scores, budget)
+    return tau, realized
+
+
+def threshold_for_budget_detail(
+    negative_scores: np.ndarray, budget: float
+) -> Tuple[float, float, float]:
+    """As above, plus the share of negatives tied at the top of the range.
+
+    A scorer whose negatives pile up on one value cannot be given a small
+    budget: every threshold either admits the whole tie or excludes it, so the
+    achievable false-alarm rates jump straight past the budget. The protocol
+    still answers, by placing the threshold above the tie, but the answer then
+    describes the scorer's resolution rather than its accuracy, and that is
+    worth reporting rather than leaving to be inferred from an empty column.
+    """
     if not 0.0 <= budget <= 1.0:
         raise ValueError(f"a false-alarm budget must lie in [0, 1], got {budget}")
     scores = np.sort(np.asarray(negative_scores, dtype=np.float64))[::-1]
@@ -124,7 +146,8 @@ def threshold_for_budget(negative_scores: np.ndarray, budget: float) -> Tuple[fl
         # 1.0, and stepping toward 1.0 from 1.0 would not move at all.
         tau = float(np.nextafter(scores[allowed], np.inf))
     realized = float((scores >= tau).mean())
-    return tau, realized
+    tied = float((scores >= scores[0]).mean())
+    return tau, realized, tied
 
 
 def choose_thresholds(
@@ -154,13 +177,18 @@ def choose_thresholds(
     )
     thresholds = []
     for budget in budgets:
-        tau, realized = threshold_for_budget(scores, budget)
+        tau, realized, tied = threshold_for_budget_detail(scores, budget)
         thresholds.append(
             Threshold(
                 target_negative_fpr=float(budget),
                 tau=tau,
                 realized_negative_fpr=realized,
                 negative_rollouts=int(scores.size),
+                # The tie is only a problem when it is larger than the budget:
+                # that is exactly when it forces the threshold past the top of
+                # the range and silences the scorer completely.
+                saturated=bool(tied > budget and realized < budget),
+                tied_at_ceiling=tied,
             )
         )
     return thresholds

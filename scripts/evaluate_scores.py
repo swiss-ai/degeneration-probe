@@ -209,6 +209,15 @@ def main() -> None:
                 f"realized={threshold.realized_negative_fpr:.4f}  "
                 f"over {threshold.negative_rollouts} negative rollouts"
             )
+        if any(threshold.saturated for threshold in thresholds):
+            worst = max(t.tied_at_ceiling for t in thresholds if t.saturated)
+            print(
+                f"\n  WARNING: {worst:.1%} of negative rollouts tie at this scorer's highest "
+                "score.\n  No threshold can spend a budget smaller than that, so the "
+                "thresholds above\n  sit past the top of the range and nothing fires. The "
+                "empty columns that\n  follow mean the scorer cannot separate these rollouts, "
+                "not that it stayed\n  quiet on them."
+            )
 
     splits = args.splits
     if splits is None:
