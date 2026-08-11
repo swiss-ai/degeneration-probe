@@ -172,3 +172,23 @@ def test_features_and_heads_must_agree_about_depth():
         assert "layers" in str(error)
     else:
         raise AssertionError("a depth mismatch must be refused, not broadcast")
+
+
+def test_a_multi_head_probe_survives_a_save_and_reload_cycle(tmp_path):
+    """The path a run takes when it restores its best checkpoint.
+
+    Training writes checkpoints and then loads the best one back at the end, so
+    a probe that can save but not reload fails only in the final seconds of a
+    run, after all the work is done.
+    """
+    multi = _multi()
+    with torch.no_grad():
+        for index, head in enumerate(multi.heads):
+            head.linear.weight.add_(0.1 * (index + 1))
+    multi.save(tmp_path)
+
+    restored = _multi()
+    restored.load_weights(tmp_path)
+    for original, loaded in zip(multi.heads, restored.heads):
+        assert torch.equal(original.linear.weight, loaded.linear.weight)
+        assert torch.equal(original.pre_head_norm.weight, loaded.pre_head_norm.weight)

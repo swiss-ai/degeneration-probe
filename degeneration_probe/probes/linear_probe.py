@@ -348,6 +348,12 @@ class _Head(nn.Module):
             default_dtype=torch.float32,
         )
 
+    @property
+    def device(self) -> torch.device:
+        # Saving and loading a head go through the same helpers a single-layer
+        # probe uses, and those read the device off their owner.
+        return self.linear.weight.device
+
 
 class MultiLayerCachedProbe(nn.Module):
     """One independent head per depth, trained together over one pass.
