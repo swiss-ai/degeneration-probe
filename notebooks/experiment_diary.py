@@ -942,6 +942,168 @@ def _(FIGURES, missing, plt, protocol_table):
 
 @app.cell
 def _(mo):
+    mo.md(r"""
+    ### What the equal budget selects
+
+    Every recipe is given the same number of tokens per optimizer step and
+    the same number of steps, so the total gradient is held constant and
+    only the *choice* of tokens varies. Holding the total constant has a
+    consequence worth being explicit about: the rules produce very
+    different amounts of data, so a rule with a large pool never finishes a
+    pass over it, while a rule with a small pool goes round several times.
+
+    That raises the obvious question, which is what decides *which* tokens
+    a rule uses when it only gets through a fraction of its pool. Three
+    stages answer it, and only the last one truncates.
+
+    1. **Tiling or drawing.** The rule turns rollouts into candidate
+       windows. Nothing is discarded yet.
+    2. **Composition fixes the order.** Positive windows are shuffled
+       across the whole split, then consumed a fixed number per batch;
+       negative windows are drawn per batch in proportion to each domain's
+       share. This is what holds every batch at the same class mix.
+    3. **Training reads that order in sequence** and stops at the step
+       limit, taking a prefix of it.
+
+    Because the shuffle happens in stage 2 and the cut in stage 3, **a
+    prefix is a uniform random sample**, not the first rollouts in file
+    order. A rule that gets through a tenth of its pool still draws that
+    tenth from everywhere, across every domain and every position within a
+    rollout.
+
+    The table below reports what each rule actually receives. The column
+    to read alongside the unique-window count is the number of *rollouts*
+    touched: a rule can use a small share of its windows while still
+    seeing nearly every degeneration episode, which is a very different
+    situation from having seen only a small share of the episodes.
+    """)
+    return
+
+
+@app.cell
+def _(BASE, REPO, missing, mo, pd):
+    def budget_coverage():
+        import numpy as np
+        from hydra import compose, initialize_config_dir
+        from omegaconf import OmegaConf
+
+        from degeneration_probe.config import (
+            ExperimentConfig,
+            LabelConfig,
+            SelectionConfig,
+        )
+        from degeneration_probe.data.dataset import load_degeneration_records
+        from degeneration_probe.data.windowed_dataset import WindowedActivationDataset
+        from degeneration_probe.training.arguments import resolve_token_budget
+
+        try:
+            with initialize_config_dir(
+                config_dir=str(REPO / "configs"), version_base=None
+            ):
+                composed = compose(config_name="main")
+            experiment = ExperimentConfig.from_dict(
+                OmegaConf.to_container(composed, resolve=True)
+            )
+            records = load_degeneration_records(
+                experiment.dataset,
+                split="train",
+                label_config=LabelConfig(),
+                training=True,
+            )
+        except Exception as error:
+            return missing(f"Could not read the training split: {error}")
+
+        batch = int(BASE["training.runtime.per_device_train_batch_size"])
+        steps = int(BASE["training.runtime.max_steps"])
+        tokens_per_step = int(BASE["training.budget.tokens_per_step"])
+        defaults = OmegaConf.to_container(composed.training.selection, resolve=True)
+        defaults.update(
+            window_size=BASE["training.selection.window_size"],
+            anchor=BASE["training.selection.anchor"],
+            positive_fraction=BASE["training.selection.positive_fraction"],
+        )
+        positive_rollouts = sum(record.is_positive for record in records)
+
+        rows = []
+        for strategy in (
+            "all_tokens",
+            "rollout_balanced",
+            "random_window",
+            "frontier_window",
+        ):
+            dataset = WindowedActivationDataset(
+                records,
+                build_root=experiment.dataset.build_root,
+                probe_layer=BASE["training.probe.layer"],
+                selection=SelectionConfig(**{**defaults, "strategy": strategy}),
+                batch_size=batch,
+                seed=BASE["training.runtime.seed"],
+            )
+            resolved = resolve_token_budget(
+                tokens_per_step,
+                valid_tokens=dataset.summary()["valid_tokens"],
+                examples=len(dataset),
+                per_device_batch_size=batch,
+            )
+            consumed = steps * resolved["gradient_accumulation_steps"] * batch
+            order = np.array(dataset.order)
+            is_positive = np.array(
+                [
+                    dataset.records[dataset.windows[index].record_index].is_positive
+                    for index in order
+                ]
+            )
+            seen = order[:consumed]
+            seen_positive = seen[is_positive[:consumed]]
+            rows.append(
+                {
+                    "rule": strategy,
+                    "windows built": len(dataset.windows),
+                    "slots in one pass": len(order),
+                    "slots consumed": min(consumed, len(order)),
+                    "passes": round(consumed / max(1, len(order)), 2),
+                    "positive windows used": len(set(seen_positive.tolist())),
+                    "positive windows available": int(is_positive.sum()),
+                    "positive rollouts touched": len(
+                        {dataset.windows[int(i)].record_index for i in seen_positive}
+                    ),
+                    "of positive rollouts": positive_rollouts,
+                }
+            )
+        return mo.ui.table(pd.DataFrame(rows), selection=None)
+
+    budget_coverage()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    Two things follow from this that are worth checking rather than
+    assuming.
+
+    **Redrawing versus repeating.** A rule that completes several passes
+    redraws its windows at each pass boundary, so it does not see the same
+    tokens again; it sees freshly placed ones. Comparing rules on windows
+    seen *per rollout* rather than on total windows is therefore the fair
+    reading, and by that measure the rules are much closer than the
+    raw counts suggest.
+
+    **A rule that never completes a pass never redraws.** Its sample is
+    fixed for the whole run while others keep drawing. The effect should be
+    small at these numbers, but it is real and it is not part of what the
+    ladder sets out to measure.
+
+    The budget is only fair if it is not also starving anyone. The check is
+    the training curve: a run whose selection metric is still climbing at
+    the step limit was cut short rather than fairly constrained, and the
+    budget needs raising for every recipe together.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
     split_choice = mo.ui.dropdown(
         options=["val", "test_indomain", "test_heldout_domains"],
         value="val",
