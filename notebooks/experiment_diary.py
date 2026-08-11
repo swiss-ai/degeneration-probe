@@ -552,6 +552,29 @@ def _(BASE, LADDER_RUNGS, SEEDS):
             for fraction in (0.25, 0.5)
         ]
 
+    def _budget_runs():
+        # Long enough to run past the point where the metric stops improving,
+        # and validated often enough to see where that happens. Layer varies
+        # too, so one sweep answers both how long to train and whether the
+        # depth ranking is a property of the layer or of when training stopped.
+        return [
+            {
+                "label": f"layer {layer}, 3000 steps",
+                "overrides": recipe(
+                    **{
+                        "training.selection.strategy": "frontier_window",
+                        "training.probe.layer": layer,
+                        "training.runtime.max_steps": 3000,
+                        "training.validation.steps": 100,
+                        "training.checkpoint.steps": 100,
+                    }
+                ),
+                "sbatch": "--time=06:00:00",
+            }
+            for layer in (8, 12, 16, 30)
+        ]
+
+    budget_runs = _budget_runs()
     ladder_runs = _ladder_runs()
     window_runs = _window_runs()
     layer_runs = _layer_runs()
@@ -560,6 +583,7 @@ def _(BASE, LADDER_RUNGS, SEEDS):
     balance_runs = _balance_runs()
     return (
         balance_runs,
+        budget_runs,
         label_runs,
         ladder_runs,
         layer_runs,
@@ -571,6 +595,7 @@ def _(BASE, LADDER_RUNGS, SEEDS):
 @app.cell
 def _(
     balance_runs,
+    budget_runs,
     label_runs,
     ladder_runs,
     layer_runs,
@@ -578,6 +603,13 @@ def _(
     window_runs,
 ):
     EXPERIMENTS = [
+        {
+            "id": "E9",
+            "title": "How long is long enough, and at what depth",
+            "depends_on": [],
+            "runs": budget_runs,
+            "shell": [],
+        },
         {
             "id": "E0",
             "title": "Baselines through the same protocol",
@@ -664,7 +696,13 @@ def _(EXPERIMENTS, mo, shlex):
             for run in entry["runs"]:
                 key = tuple(sorted(run["overrides"].items()))
                 slot = plan.setdefault(
-                    key, {"overrides": run["overrides"], "exps": [], "labels": []}
+                    key,
+                    {
+                        "overrides": run["overrides"],
+                        "exps": [],
+                        "labels": [],
+                        "sbatch": run.get("sbatch", ""),
+                    },
                 )
                 if entry["id"] not in slot["exps"]:
                     slot["exps"].append(entry["id"])
@@ -678,7 +716,9 @@ def _(EXPERIMENTS, mo, shlex):
         overrides = [f"{key}={value}" for key, value in sorted(slot["overrides"].items())]
         overrides.append(f"training.wandb.tags=[{tags}]")
         rendered = " ".join(shlex.quote(item) for item in overrides)
-        return f"sbatch cluster/train.sbatch {rendered}"
+        # A recipe may need more than the queue script's default walltime.
+        flags = f"{slot['sbatch']} " if slot.get("sbatch") else ""
+        return f"sbatch {flags}cluster/train.sbatch {rendered}"
 
     def commands_for(exp_id):
         entry = next(e for e in EXPERIMENTS if e["id"] == exp_id)
@@ -1111,6 +1151,132 @@ def _(mo):
     )
     split_choice
     return (split_choice,)
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # E9. How long is long enough, and at what depth
+
+    **The question.** Two, sharing one sweep, because neither answer is worth
+    much without the other.
+
+    Every recipe is trained on the same token budget so that the choice of
+    tokens is the only thing separating them. That is only a fair constraint if
+    it is not also a cut-off: a recipe still improving when the budget runs out
+    was stopped, not constrained, and comparing it to another is comparing two
+    unfinished runs. This sweep trains far past the point of interest and
+    validates often enough to see where each curve flattens.
+
+    The same runs vary the layer. Depth and training length are entangled,
+    because a layer that looks weak may simply converge more slowly, and a
+    short budget would report that as a property of the layer. Running several
+    depths at a length where all of them have finished separates the two.
+
+    **What to expect, and why.** The metric should rise quickly and then
+    flatten; where it flattens is the budget every other experiment should use,
+    taken across layers rather than from the fastest one. On depth, the
+    expectation is a plateau over the middle layers with a falloff at both
+    ends: early layers should not yet represent anything as abstract as "I am
+    repeating myself", and the last layers are specialised for choosing the
+    next token, which is a narrower job than describing the state of the
+    generation.
+
+    Read this before anything else. A comparison drawn from runs that were
+    still improving describes the budget, not the recipes.
+    """)
+    return
+
+
+@app.cell
+def _(show_commands):
+    show_commands("E9")
+    return
+
+
+@app.cell
+def _(run_status):
+    run_status("E9")
+    return
+
+
+@app.cell
+def _(FIGURES, load_curves, missing, plt):
+    def budget_figure():
+        frame = load_curves("E9")
+        if frame.empty or "val/rollout_auc" not in frame.columns:
+            return missing(
+                "No finished run tagged `exp:E9` has written a validation curve yet."
+            )
+        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2))
+        for run, group in frame.groupby("run"):
+            points = group[["step", "val/rollout_auc"]].dropna().sort_values("step")
+            if not len(points):
+                continue
+            label = run.split("_")[1] if "_" in run else run[:12]
+            axes[0].plot(points["step"], points["val/rollout_auc"], marker="", label=label)
+            # The same curve as distance from its own best, which is where a
+            # plateau is legible: flat here means more steps buy nothing.
+            best = points["val/rollout_auc"].cummax()
+            axes[1].plot(points["step"], best.iloc[-1] - points["val/rollout_auc"], label=label)
+        axes[0].set_ylabel("rollout AUC on validation")
+        axes[0].set_title("does it flatten?")
+        axes[1].set_yscale("log")
+        axes[1].set_ylabel("gap to the run's final best")
+        axes[1].set_title("how far from converged")
+        for axis in axes:
+            axis.set_xlabel("step")
+            axis.grid(alpha=0.3)
+        axes[0].legend(fontsize=8, title="layer")
+        fig.tight_layout()
+        path = FIGURES / "E9_budget"
+        fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+        fig.savefig(path.with_suffix(".png"), dpi=150, bbox_inches="tight")
+        return fig
+
+    budget_figure()
+    return
+
+
+@app.cell
+def _(load_curves, missing, mo, pd):
+    def plateau_table():
+        frame = load_curves("E9")
+        if frame.empty or "val/rollout_auc" not in frame.columns:
+            return missing("No validation curve for any run tagged `exp:E9` yet.")
+        rows = []
+        for run, group in frame.groupby("run"):
+            points = group[["step", "val/rollout_auc"]].dropna().sort_values("step")
+            if not len(points):
+                continue
+            best = float(points["val/rollout_auc"].max())
+            peak_step = int(points.loc[points["val/rollout_auc"].idxmax(), "step"])
+            last_step = int(points["step"].iloc[-1])
+            # The first step reaching within a small margin of the best is the
+            # honest reading of "long enough": improvements past it are smaller
+            # than the seed-to-seed spread anything will be compared against.
+            within = points[points["val/rollout_auc"] >= best - 0.001]
+            rows.append(
+                {
+                    "run": run,
+                    "best AUC": round(best, 5),
+                    "step of best": peak_step,
+                    "first within 0.001": int(within["step"].iloc[0]) if len(within) else None,
+                    "last step": last_step,
+                    "still improving at the end": peak_step >= last_step - 100,
+                }
+            )
+        return mo.ui.table(pd.DataFrame(rows).sort_values("run"), selection=None)
+
+    plateau_table()
+    return
+
+
+@app.cell
+def _(protocol_table, split_choice):
+    protocol_table("E9", split_choice.value)
+    return
 
 
 @app.cell
