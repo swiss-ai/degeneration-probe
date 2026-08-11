@@ -52,6 +52,28 @@ class ProbeTrainer(Trainer):
         self.pos_weight = pos_weight
         self._diagnostics: Dict[str, float] = {}
         self._diagnostic_batches = 0
+        groups = getattr(getattr(self, "model", None), "head_parameters", None)
+        self._head_parameter_groups = groups() if callable(groups) else None
+        self._per_head_clip = float(self.cfg.runtime.max_grad_norm or 0.0)
+
+    def _clip_head_gradients(self, *_args, **_kwargs) -> None:
+        """Clip each head's gradient on its own when a probe has several.
+
+        A norm taken across every head at once would rescale all of them
+        whenever any one exceeded the limit, which is the single place a joint
+        run stops matching separate runs. The global clip is switched off in the
+        arguments for a multi-head probe, and this restores the same limit per
+        head, where it means what it meant for one.
+
+        Attached to the optimizer rather than to the training step, because the
+        limit applies to the gradient a step is taken on: that is the one
+        accumulated across micro-batches, not the one any single micro-batch
+        produced.
+        """
+        if not self._head_parameter_groups or self._per_head_clip <= 0:
+            return
+        for parameters in self._head_parameter_groups:
+            torch.nn.utils.clip_grad_norm_(parameters, self._per_head_clip)
 
     # ---- training ----
 
@@ -133,7 +155,9 @@ class ProbeTrainer(Trainer):
         for name, parameter in model.named_parameters():
             if not parameter.requires_grad:
                 continue
-            if name.startswith("linear.") or name.startswith("pre_head_norm."):
+            # A multi-head probe nests the same two modules under heads.<i>.
+            tail = name.split("heads.", 1)[-1].split(".", 1)[-1] if name.startswith("heads.") else name
+            if tail.startswith("linear.") or tail.startswith("pre_head_norm."):
                 probe_parameters.append(parameter)
             elif "lora" in name.lower():
                 lora_parameters.append(parameter)
@@ -159,6 +183,8 @@ class ProbeTrainer(Trainer):
                 }
             )
         self.optimizer = AdamW(groups)
+        if self._head_parameter_groups:
+            self.optimizer.register_step_pre_hook(self._clip_head_gradients)
         return self.optimizer
 
     def _get_train_sampler(self, *args, **kwargs):

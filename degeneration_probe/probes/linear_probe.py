@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -323,6 +323,131 @@ class CachedFeatureProbe(nn.Module):
         _save_head(self, Path(path))
 
 
+class _Head(nn.Module):
+    """One depth's normalization and linear map: the unit that gets trained."""
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        context_window_size: int,
+        probe_dtype: str,
+        normalization: str,
+        seed: int,
+        device: torch.device,
+    ) -> None:
+        super().__init__()
+        _init_head(
+            self,
+            hidden_size=hidden_size,
+            context_window_size=context_window_size,
+            probe_dtype=probe_dtype,
+            normalization=normalization,
+            seed=seed,
+            device=device,
+            default_dtype=torch.float32,
+        )
+
+
+class MultiLayerCachedProbe(nn.Module):
+    """One independent head per depth, trained together over one pass.
+
+    The heads share nothing: each owns its normalization and its weights, and
+    the training loss is their sum. A sum of independent terms has, for each
+    head, exactly the gradient that head would receive on its own, so this is
+    not an approximation of training the depths separately but a rearrangement
+    of it. Two things would quietly break that equivalence and are handled
+    elsewhere: a gradient norm clipped across all heads at once, and a shared
+    normalization. Both are the reason the equivalence is asserted by a test.
+
+    What makes it worth doing is the cache layout rather than arithmetic. Every
+    depth of a rollout lives in one file, and opening that file costs far more
+    than reading it, so the depths cost little more together than one costs
+    alone.
+    """
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        layer_indices: Sequence[int],
+        context_window_size: int = 1,
+        probe_dtype: str = "float32",
+        normalization: str = "layernorm",
+        seed: int = 42,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super().__init__()
+        self.layer_indices = [int(layer) for layer in layer_indices]
+        if not self.layer_indices:
+            raise ValueError("a multi-layer probe needs at least one layer")
+        self.context_window_size = int(context_window_size)
+        self.probe_dtype = probe_dtype
+        self.normalization = normalization
+        self._device = torch.device(device) if device is not None else torch.device("cpu")
+        # Seeded per depth, so a head's initialization does not depend on which
+        # other depths happen to share the run with it.
+        self.heads = nn.ModuleList(
+            [
+                _Head(
+                    hidden_size=hidden_size,
+                    context_window_size=self.context_window_size,
+                    probe_dtype=probe_dtype,
+                    normalization=normalization,
+                    seed=seed,
+                    device=self._device,
+                )
+                for _ in self.layer_indices
+            ]
+        )
+
+    def forward(self, features: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
+        """``[batch, tokens, layers, hidden]`` to ``[batch, tokens, layers]``."""
+        if features.shape[-2] != len(self.heads):
+            raise ValueError(
+                f"features carry {features.shape[-2]} layers but the probe has "
+                f"{len(self.heads)} heads; the loader and the probe disagree about depth"
+            )
+        logits = [
+            apply_head(
+                features[..., index, :].to(head.linear.weight.dtype),
+                pre_head_norm=head.pre_head_norm,
+                linear=head.linear,
+                context_window_size=self.context_window_size,
+            )
+            for index, head in enumerate(self.heads)
+        ]
+        return {"probe_logits": torch.stack(logits, dim=-1)}
+
+    def head_parameters(self) -> list[list[nn.Parameter]]:
+        """Each head's parameters on their own, for clipping them separately."""
+        return [list(head.parameters()) for head in self.heads]
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    def save(self, path: Union[str, Path]) -> None:
+        """One directory per depth, each holding exactly a single-layer probe.
+
+        Written this way so a head from a joint run is indistinguishable from
+        one trained alone, and loads into the ordinary probe without a special
+        case anywhere downstream.
+        """
+        path = Path(path)
+        for layer, head in zip(self.layer_indices, self.heads):
+            head.layer_idx = layer
+            head.context_window_size = self.context_window_size
+            head.probe_dtype = self.probe_dtype
+            head.normalization = self.normalization
+            _save_head(head, path / f"layer_{layer:02d}")
+
+    def load_weights(self, path: Union[str, Path]) -> None:
+        path = Path(path)
+        for layer, head in zip(self.layer_indices, self.heads):
+            _load_head(head, path / f"layer_{layer:02d}")
+
+
 def _lora_layers(config: LoraConfig, probe_layer: int) -> list[int]:
     if not config.enabled or config.layers == "none":
         return []
@@ -375,8 +500,34 @@ def setup_cached_probe(
     checkpoint_path: Optional[Union[str, Path]] = None,
     seed: int = 42,
     device: Optional[torch.device] = None,
-) -> CachedFeatureProbe:
-    """Build the head alone, for training against the activation cache."""
+) -> Union[CachedFeatureProbe, MultiLayerCachedProbe]:
+    """Build the head alone, for training against the activation cache.
+
+    Naming several layers builds one head per layer instead, trained together
+    over a single pass of the cache.
+    """
+    if probe_config.layers is not None:
+        if checkpoint_path is not None:
+            probe = MultiLayerCachedProbe(
+                hidden_size=hidden_size,
+                layer_indices=probe_config.layers,
+                context_window_size=probe_config.context_window_size,
+                probe_dtype=probe_config.dtype,
+                normalization=probe_config.normalization,
+                seed=seed,
+                device=device,
+            )
+            probe.load_weights(checkpoint_path)
+            return probe
+        return MultiLayerCachedProbe(
+            hidden_size=hidden_size,
+            layer_indices=probe_config.layers,
+            context_window_size=probe_config.context_window_size,
+            probe_dtype=probe_config.dtype,
+            normalization=probe_config.normalization,
+            seed=seed,
+            device=device,
+        )
     return CachedFeatureProbe(
         hidden_size=hidden_size,
         layer_idx=probe_config.layer,

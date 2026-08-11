@@ -23,7 +23,7 @@ import torch
 from torch.utils.data import Dataset
 
 from degeneration_probe.config import DatasetConfig, TokenizationConfig
-from degeneration_probe.data.activation_store import load_probe_layer
+from degeneration_probe.data.activation_store import load_probe_layers
 from degeneration_probe.data.dataset import (
     DegenerationRecord,
     load_degeneration_records,
@@ -45,7 +45,14 @@ class CachedActivationDataset(Dataset):
     ) -> None:
         self.records = list(records)
         self.build_root = str(build_root)
-        self.probe_layer = int(probe_layer)
+        # One depth or many: a sequence trains a head per layer from a single
+        # read, since the seek dominates the cost of the file.
+        self.probe_layers = (
+            [int(probe_layer)]
+            if isinstance(probe_layer, (int, np.integer))
+            else [int(layer) for layer in probe_layer]
+        )
+        self.probe_layer = self.probe_layers[0]
         self.tokenization = tokenization
         if shuffle:
             order = np.random.default_rng(seed).permutation(len(self.records))
@@ -59,13 +66,16 @@ class CachedActivationDataset(Dataset):
         targets = np.asarray(
             record.targets[: self.tokenization.max_completion_length], dtype=np.float32
         )
-        features = load_probe_layer(
+        features = load_probe_layers(
             self.build_root,
             record.domain,
             record.prompt_id,
             record.rollout_idx,
-            probe_layer=self.probe_layer,
-        )[: len(targets)]
+            probe_layers=self.probe_layers,
+        )
+        # [layers, tokens, hidden] to [tokens, hidden] for one depth, or
+        # [tokens, layers, hidden] when several share the pass.
+        features = features[0] if len(self.probe_layers) == 1 else features.permute(1, 0, 2)[: len(targets)]
         targets = torch.from_numpy(targets[: features.shape[0]])
         return {
             "features": features.to(torch.float32),
@@ -122,8 +132,11 @@ class CachedActivationDataset(Dataset):
 def cached_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]:
     """Pad to the longest rollout in the batch, masking what was added."""
     max_length = max(item["features"].shape[0] for item in batch)
-    hidden = batch[0]["features"].shape[1]
-    features = torch.zeros((len(batch), max_length, hidden), dtype=torch.float32)
+    # Everything after the token axis is carried through unchanged, which is
+    # what lets a probe reading several depths at once use the same collate: its
+    # features simply carry a layer axis before the hidden one.
+    trailing = tuple(batch[0]["features"].shape[1:])
+    features = torch.zeros((len(batch), max_length, *trailing), dtype=torch.float32)
     targets = torch.full((len(batch), max_length), float("nan"), dtype=torch.float32)
     target_mask = torch.zeros((len(batch), max_length), dtype=torch.bool)
     for row, item in enumerate(batch):

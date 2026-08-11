@@ -20,7 +20,7 @@ checked on read rather than assumed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import torch
 from safetensors import safe_open
@@ -68,10 +68,39 @@ def load_probe_layer(
     expected_tokens: Optional[int] = None,
 ) -> torch.Tensor:
     """Return ``[num_tokens, hidden_size]`` for one probed layer of one rollout."""
+    return load_probe_layers(
+        build_root,
+        domain,
+        prompt_id,
+        rollout_idx,
+        probe_layers=[probe_layer],
+        expected_tokens=expected_tokens,
+    )[0]
+
+
+def load_probe_layers(
+    build_root: Union[str, Path],
+    domain: str,
+    prompt_id: str,
+    rollout_idx: int,
+    *,
+    probe_layers: Sequence[int],
+    expected_tokens: Optional[int] = None,
+) -> torch.Tensor:
+    """Return ``[len(probe_layers), num_tokens, hidden_size]`` from one open.
+
+    Opening the file and seeking dominates the cost of reading it, so asking for
+    every layer costs little more than asking for one. That is what makes a
+    probe per layer affordable: the depths can be trained together in a single
+    pass over the data rather than one pass each.
+    """
     path = activation_path(build_root, domain, prompt_id, rollout_idx)
     if not path.is_file():
         raise FileNotFoundError(f"No cached activations for {domain}/{prompt_id}/{rollout_idx}: {path}")
-    slot = cached_slot_for_probe_layer(probe_layer)
+    requested = [int(layer) for layer in probe_layers]
+    if not requested:
+        raise ValueError("at least one probe layer is required")
+    slots_wanted = [cached_slot_for_probe_layer(layer) for layer in requested]
     with safe_open(str(path), framework="pt") as handle:
         metadata = handle.metadata() or {}
         recorded = metadata.get("layer_order")
@@ -82,16 +111,30 @@ def load_probe_layer(
             )
         sliced = handle.get_slice(TENSOR_KEY)
         slots, num_tokens, _ = sliced.get_shape()
-        if slot >= slots:
-            raise ValueError(
-                f"probe layer {probe_layer} maps to cached slot {slot}, but {path} holds "
-                f"{slots} slots ({slots - EMBEDDING_SLOTS} decoder blocks)"
-            )
+        for layer, slot in zip(requested, slots_wanted):
+            if slot >= slots:
+                raise ValueError(
+                    f"probe layer {layer} maps to cached slot {slot}, but {path} holds "
+                    f"{slots} slots ({slots - EMBEDDING_SLOTS} decoder blocks)"
+                )
         if expected_tokens is not None and num_tokens != expected_tokens:
             raise ValueError(
                 f"{path} holds {num_tokens} tokens, but the rollout is {expected_tokens} tokens long"
             )
-        return sliced[slot]
+        # One contiguous read spanning the requested slots, then the wanted rows
+        # out of it. Seeking to each slot separately is what costs, not the
+        # bytes, so a span plus a gather beats a slice per layer. Narrowing the
+        # token range instead would be slower still, since that turns one
+        # sequential read into a strided one per layer.
+        low, high = min(slots_wanted), max(slots_wanted)
+        span = sliced[low : high + 1]
+        wanted = [slot - low for slot in slots_wanted]
+        # The gather copies the whole span, which for every layer of a long
+        # rollout is hundreds of megabytes. Asking for the span itself is the
+        # common case and needs no copy at all.
+        if wanted == list(range(span.shape[0])):
+            return span
+        return span[wanted]
 
 
 def agrees_with_live_capture(

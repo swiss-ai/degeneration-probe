@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from degeneration_probe.data.activation_store import load_probe_layer
+from degeneration_probe.data.activation_store import load_probe_layers
 from degeneration_probe.data.sampling import build_windows, compose_batches
 
 
@@ -45,7 +45,14 @@ class WindowedActivationDataset(Dataset):
     ) -> None:
         self.records = list(records)
         self.build_root = str(build_root)
-        self.probe_layer = int(probe_layer)
+        # One depth or many: a sequence trains a head per layer from a single
+        # read, since the seek dominates the cost of the file.
+        self.probe_layers = (
+            [int(probe_layer)]
+            if isinstance(probe_layer, (int, np.integer))
+            else [int(layer) for layer in probe_layer]
+        )
+        self.probe_layer = self.probe_layers[0]
         self.selection = selection
         self.batch_size = int(batch_size)
         self.seed = int(seed)
@@ -115,18 +122,26 @@ class WindowedActivationDataset(Dataset):
         window = self.windows[self.order[index]]
         record = self.records[window.record_index]
         positions = window.positions
-        features = load_probe_layer(
+        features = load_probe_layers(
             self.build_root,
             record.domain,
             record.prompt_id,
             record.rollout_idx,
-            probe_layer=self.probe_layer,
+            probe_layers=self.probe_layers,
         )
+        # The window's tokens are taken while the depths are still the leading
+        # axis, because that keeps the copy to the window rather than the whole
+        # rollout: a permute first would make the same selection strided over
+        # every layer of every token.
+        features = features[:, positions]
+        # [layers, window, hidden] to [window, hidden] for one depth, or
+        # [window, layers, hidden] when several share the pass.
+        features = features[0] if len(self.probe_layers) == 1 else features.permute(1, 0, 2)
         targets = torch.from_numpy(
             np.asarray(record.targets, dtype=np.float32)[positions]
         )
         return {
-            "features": features[positions].to(torch.float32),
+            "features": features.to(torch.float32),
             "targets": targets,
             "target_mask": torch.isfinite(targets),
             "prompt_id": record.prompt_id,

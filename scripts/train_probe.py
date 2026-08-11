@@ -202,7 +202,7 @@ def _train(
                 config.dataset,
                 split=split,
                 label_config=config.training.label,
-                probe_layer=config.training.probe.layer,
+                probe_layer=config.training.probe.probed_layers,
                 training=training,
             )
             if not training:
@@ -228,7 +228,7 @@ def _train(
             return WindowedActivationDataset(
                 dataset.records,
                 build_root=config.dataset.build_root,
-                probe_layer=config.training.probe.layer,
+                probe_layer=config.training.probe.probed_layers,
                 selection=config.training.selection,
                 batch_size=config.training.runtime.per_device_train_batch_size,
                 seed=config.training.runtime.seed,

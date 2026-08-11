@@ -4,6 +4,12 @@ task: degeneration
 probe:
   id: ${model.short_name}_degeneration_${dataset.short_name}_${training.loss.name}_layer${training.probe.layer}
   layer: 30
+  # Several depths at once, for example [8,12,16]. Every layer of a rollout
+  # lives in one file and opening it costs far more than reading it, so a head
+  # per depth trained over a single pass costs little more than one head does.
+  # The heads share no parameters and their losses are added, which leaves each
+  # one's gradient identical to what it would be trained on its own.
+  layers: null
   dtype: float32
   normalization: layernorm
   context_window_size: 1

@@ -59,6 +59,27 @@ def compute_degeneration_loss(
     *,
     pos_weight: Optional[float] = None,
 ) -> Tuple[torch.Tensor, int]:
+    """One scalar loss, whether the probe has one head or many.
+
+    Logits carrying a trailing head axis are scored head by head against the
+    same targets and the results added. Adding rather than averaging is what
+    keeps a joint run equivalent to separate ones: the heads share no
+    parameters, so each head's gradient comes only from its own term and is
+    left at the size it would have had alone.
+    """
+    if logits.dim() == targets.dim() + 1:
+        total = None
+        active = 0
+        for index in range(logits.shape[-1]):
+            head_loss, active = compute_degeneration_loss(
+                loss_name,
+                logits[..., index],
+                targets,
+                target_mask,
+                pos_weight=pos_weight,
+            )
+            total = head_loss if total is None else total + head_loss
+        return total, active
     if loss_name == "bce":
         return compute_bce_loss(
             logits, targets, target_mask, pos_weight=pos_weight

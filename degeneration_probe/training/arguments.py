@@ -52,6 +52,12 @@ def build_training_arguments(
     runtime = config.training.runtime
     validation = config.training.validation
     checkpoint = config.training.checkpoint
+    # Clipping a norm taken across every head at once would couple heads that
+    # otherwise share nothing, so a multi-head probe turns the global clip off
+    # and the trainer reapplies the same limit to each head separately.
+    max_grad_norm = (
+        0.0 if config.training.probe.layers is not None else runtime.max_grad_norm
+    )
     return TrainingArguments(
         output_dir=str(run_dir),
         per_device_train_batch_size=runtime.per_device_train_batch_size,
@@ -59,7 +65,7 @@ def build_training_arguments(
         gradient_accumulation_steps=runtime.gradient_accumulation_steps,
         num_train_epochs=runtime.num_train_epochs,
         max_steps=runtime.max_steps,
-        max_grad_norm=runtime.max_grad_norm,
+        max_grad_norm=max_grad_norm,
         logging_steps=runtime.logging_steps,
         dataloader_num_workers=runtime.dataloader_num_workers,
         eval_strategy=validation.strategy,

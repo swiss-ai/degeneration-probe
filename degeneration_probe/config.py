@@ -23,6 +23,12 @@ class ModelConfig:
 class ProbeConfig:
     id: str
     layer: int = 30
+    # Several depths at once. Reading one layer out of the cache costs almost
+    # what reading every layer costs, since the seek dominates, so a probe per
+    # depth can be trained in a single pass instead of one pass each. The heads
+    # share no parameters and their losses are added, which makes each one's
+    # gradient identical to what it would be trained alone.
+    layers: Optional[List[int]] = None
     dtype: str = "float32"
     normalization: str = "layernorm"
     context_window_size: int = 1
@@ -34,6 +40,19 @@ class ProbeConfig:
             raise ValueError("training.probe.context_window_size must be at least 1")
         if self.normalization not in {"none", "layernorm", "rmsnorm", "l2"}:
             raise ValueError("training.probe.normalization must be none, layernorm, rmsnorm, or l2")
+        if self.layers is not None:
+            self.layers = [int(layer) for layer in self.layers]
+            if not self.layers:
+                raise ValueError("training.probe.layers must name at least one layer")
+            if len(set(self.layers)) != len(self.layers):
+                raise ValueError("training.probe.layers must not repeat a layer")
+            if any(layer < 0 for layer in self.layers):
+                raise ValueError("training.probe.layers must all be non-negative")
+
+    @property
+    def probed_layers(self) -> List[int]:
+        """Every depth this run trains a head for."""
+        return list(self.layers) if self.layers is not None else [self.layer]
 
 
 @dataclass
