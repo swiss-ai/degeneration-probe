@@ -147,9 +147,35 @@ def run(
     checkpoint: str,
     splits: Optional[List[str]],
     batch_size: int,
+    layer: Optional[int] = None,
 ) -> List[Path]:
     config = load_run_config(run_dir)
     checkpoint_dir = run_dir / checkpoint
+    output_dir = run_dir
+
+    if layer is not None:
+        # A run covering several depths writes each head as an ordinary
+        # single-layer probe, so one depth is scored by pointing the ordinary
+        # path at that head. Scores go to their own directory, since the whole
+        # reason to score several depths is to compare them and a shared one
+        # would leave only the last.
+        available = config.training.probe.probed_layers
+        if layer not in available:
+            raise ValueError(
+                f"layer {layer} was not trained by this run; it covers {available}"
+            )
+        checkpoint_dir = checkpoint_dir / f"layer_{layer:02d}"
+        config.training.probe.layers = None
+        config.training.probe.layer = layer
+        output_dir = run_dir / "layers" / f"layer_{layer:02d}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+    elif config.training.probe.layers is not None:
+        raise ValueError(
+            f"this run trained {len(config.training.probe.layers)} depths at once. "
+            "Name one with --layer, since a scores file holds one score per token "
+            "and cannot represent several probes."
+        )
+
     if not (checkpoint_dir / "probe_config.json").is_file():
         raise FileNotFoundError(f"No probe checkpoint at {checkpoint_dir}")
 
@@ -205,7 +231,7 @@ def run(
             metadata=metadata,
             batch_size=batch_size,
         )
-        path = write_scores(frame, run_dir / SCORES_DIR / f"{split}.parquet")
+        path = write_scores(frame, output_dir / SCORES_DIR / f"{split}.parquet")
         tokens = int(frame["num_tokens"].sum())
         positives = int(frame["is_positive"].sum())
         print(f"  {split:<22} {len(frame):>6} rollouts ({positives} positive), {tokens:>10,} tokens -> {path}")
@@ -223,12 +249,19 @@ def main() -> None:
     )
     parser.add_argument("--splits", nargs="*", default=None, help="Defaults to every evaluation split.")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=None,
+        help="Which depth to score, for a run that trained a head per layer.",
+    )
     args = parser.parse_args()
     run(
         args.run_dir.resolve(),
         checkpoint=args.checkpoint,
         splits=args.splits,
         batch_size=args.batch_size,
+        layer=args.layer,
     )
 
 

@@ -13,6 +13,7 @@ another's. A break would not raise anything. It would produce slightly wrong
 numbers that still look entirely plausible, which is why this is a test.
 """
 
+import pytest
 import torch
 
 from degeneration_probe.probes.linear_probe import (
@@ -192,3 +193,37 @@ def test_a_multi_head_probe_survives_a_save_and_reload_cycle(tmp_path):
     for original, loaded in zip(multi.heads, restored.heads):
         assert torch.equal(original.linear.weight, loaded.linear.weight)
         assert torch.equal(original.pre_head_norm.weight, loaded.pre_head_norm.weight)
+
+
+def test_scoring_a_multi_head_run_must_name_a_depth(tmp_path, monkeypatch):
+    """One scores file holds one score per token, so it holds one probe.
+
+    Scoring a many-depth run without saying which depth would either silently
+    keep one of them or write a shape nothing downstream can read, and both are
+    worse than being told to choose.
+    """
+    import json
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "scripts"))
+    import score_rollouts
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "resolved_config.json").write_text("{}")
+
+    class Probe:
+        layers = [4, 8, 12]
+        probed_layers = [4, 8, 12]
+        layer = 4
+
+    config = type("C", (), {"training": type("T", (), {"probe": Probe()})()})()
+    monkeypatch.setattr(score_rollouts, "load_run_config", lambda _dir: config)
+
+    with pytest.raises(ValueError, match="Name one with --layer"):
+        score_rollouts.run(run_dir, checkpoint="final", splits=["val"], batch_size=1)
+
+    with pytest.raises(ValueError, match="was not trained by this run"):
+        score_rollouts.run(
+            run_dir, checkpoint="final", splits=["val"], batch_size=1, layer=99
+        )
