@@ -380,7 +380,11 @@ def _train(
     monitor = subsample_for_monitoring(
         datasets[splits.validation], config.training.validation.max_rollouts
     )
-    final_splits = config.training.validation.final_splits or splits.final_evaluation
+    # An empty list means none: scoring now happens from saved checkpoints, so
+    # an exploratory run has no reason to spend an hour evaluating splits it
+    # will not read. Only an unset value falls back to every split.
+    configured = config.training.validation.final_splits
+    final_splits = splits.final_evaluation if configured is None else list(configured)
     unknown = set(final_splits) - set(datasets)
     if unknown:
         raise ValueError(
