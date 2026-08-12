@@ -81,3 +81,38 @@ def test_the_unweighted_loss_matches_the_weighted_one_when_unweighted():
             FixedProbe(), [_batch("val")], loss_name="bce", prefix="val", pos_weight=weight
         )
         assert metrics["val/loss"] == pytest.approx(metrics["val/loss_unweighted"])
+
+
+def test_the_monitor_reports_recall_at_a_fixed_false_alarm_budget():
+    """A rank metric saturates; the operating point is what a run is steered by.
+
+    Separating a mostly-degenerate rollout from a healthy one is easy, so ranking
+    reaches its ceiling long before a probe is useful. Recall under a cap on
+    false alarms keeps moving after that, which is what makes it worth selecting
+    on.
+    """
+    from degeneration_probe.evaluation.evaluate import operating_point
+
+    # Ninety negatives spread low, ten positives above all but one of them.
+    peaks = {("n", i): 0.1 + 0.004 * i for i in range(90)}
+    labels = {("n", i): False for i in range(90)}
+    # One negative the probe is confidently wrong about, which is what sets the
+    # bar when only a one percent false-alarm rate is affordable.
+    peaks[("n", 99)] = 0.99
+    labels[("n", 99)] = False
+    for i in range(10):
+        peaks[("p", i)] = 0.7 + 0.01 * i
+        labels[("p", i)] = True
+
+    point = operating_point(peaks, labels)
+    assert point["budget_realized_fpr"] <= 0.01 + 1e-9
+    assert 0.0 <= point["recall_at_budget"] <= 1.0
+    # The one confidently wrong negative sets the bar, so it costs recall.
+    assert point["budget_tau"] > 0.9
+
+
+def test_the_operating_point_is_undefined_without_both_classes():
+    from degeneration_probe.evaluation.evaluate import operating_point
+
+    assert operating_point({("a", 0): 0.5}, {("a", 0): True}) == {}
+    assert operating_point({("a", 0): 0.5}, {("a", 0): False}) == {}

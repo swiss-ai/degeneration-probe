@@ -5,11 +5,44 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from degeneration_probe.evaluation.metrics import build_validation_metrics
 from degeneration_probe.training.loss import compute_degeneration_loss
+
+# The budget an in-training operating point is reported at. One number rather
+# than the reported family, because this exists to steer a run rather than to
+# describe it.
+MONITOR_BUDGET = 0.01
+
+
+def operating_point(peaks: Dict[tuple, float], labels: Dict[tuple, bool]) -> Dict[str, float]:
+    """Recall when the threshold is set to spend exactly the monitor's budget.
+
+    A rank metric asks whether the ordering is right and saturates long before a
+    probe is good, because separating a mostly-degenerate rollout from a healthy
+    one is easy. What a deployment turns on is narrower: with false alarms capped
+    at a small rate, how many degenerations are actually caught. That question
+    stays sensitive where ranking does not, so it is the one worth steering on.
+
+    The threshold comes from the same rule the reported protocol uses, so this
+    number and the reported one mean the same thing at a persistence of one.
+    """
+    from degeneration_probe.evaluation.protocol import threshold_for_budget
+
+    negatives = [peak for key, peak in peaks.items() if not labels.get(key)]
+    positives = [peak for key, peak in peaks.items() if labels.get(key)]
+    if not negatives or not positives:
+        return {}
+    tau, realized = threshold_for_budget(np.asarray(negatives), MONITOR_BUDGET)
+    caught = sum(1 for peak in positives if peak >= tau)
+    return {
+        "recall_at_budget": caught / len(positives),
+        "budget_tau": tau,
+        "budget_realized_fpr": realized,
+    }
 
 
 @torch.no_grad()
@@ -146,6 +179,8 @@ def evaluate_probe(
         peaks = [rollout_peak[key] for key in rollout_peak]
         metrics[f"{prefix}/rollout_auc"] = float(roc_auc_score(labels, peaks))
         metrics[f"{prefix}/rollout_ap"] = float(average_precision_score(labels, peaks))
+    for key, value in operating_point(rollout_peak, rollout_label).items():
+        metrics[f"{prefix}/{key}"] = value
     metrics[f"{prefix}/rollouts"] = len(rollout_peak)
     metrics[f"{prefix}/positive_rollouts"] = int(sum(labels))
     for name, metric in optional_metrics.items():
@@ -287,13 +322,15 @@ def _evaluate_multi_head(
             head_metrics[f"{name}/rollout_ap"] = float(
                 average_precision_score(ordered, values)
             )
+        for key, value in operating_point(peaks[index], labels).items():
+            head_metrics[f"{name}/{key}"] = value
         metrics.update(head_metrics)
         for key, value in head_metrics.items():
             suffix = key.rsplit("/", 1)[1]
             # The run's headline number is its best depth, since that is the
             # probe the run would actually be used for. Reported unprefixed so
             # checkpoint selection and the collapse guard keep working unchanged.
-            better = suffix in {"rollout_auc", "rollout_ap", "prediction_std"}
+            better = suffix in {"rollout_auc", "rollout_ap", "prediction_std", "recall_at_budget"}
             current = best.get(suffix)
             if current is None or (value > current if better else value < current):
                 best[suffix] = value
