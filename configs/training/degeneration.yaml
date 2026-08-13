@@ -104,9 +104,11 @@ checkpoint:
   steps: null
   save_total_limit: 2
   keep_best: true
-  # Any monitored quantity can drive selection; the protocol metrics replace
-  # loss here once they are available.
-  metric_for_best_model: rollout_auc
+  # Selection runs on the operating point rather than on a ranking. Telling a
+  # mostly-degenerate rollout from a healthy one is easy, so ranking reaches
+  # its ceiling long before the probe is useful and stops separating
+  # checkpoints; recall under a cap on false alarms keeps moving after that.
+  metric_for_best_model: recall_at_budget
   greater_is_better: true
   resume: auto
 

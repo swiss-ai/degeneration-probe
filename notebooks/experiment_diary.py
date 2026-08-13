@@ -264,7 +264,9 @@ def _(mo):
 
     | Metric | What it means | How to read it |
     |---|---|---|
-    | `val/rollout_auc` | Ranking quality over rollouts, using each rollout's peak score | **The selection metric.** Rank-based, so unaffected by class weighting. 0.5 is chance, 1.0 is perfect separation |
+    | `val/recall_at_budget` | Of the rollouts that really degenerate, the share caught while holding false alarms at 1% | **The selection metric.** Ties a checkpoint to the point it would actually be used at |
+    | `val/budget_tau` | The threshold that 1% of false alarms buys | Rises when a negative rollout is scored confidently and wrongly, which is what costs recall |
+    | `val/rollout_auc` | Ranking quality over rollouts, using each rollout's peak score | Rank-based, so unaffected by class weighting. **Saturates:** it reaches its ceiling long before the probe is useful, so read it as a health check, not a comparison |
     | `val/rollout_ap` | Average precision over the same ranking | More sensitive than AUC when positives are rare |
     | `val/loss` | The training objective, evaluated on validation | Weighted by a class weight fitted to *this recipe's* training stream. **Not comparable between recipes** |
     | `val/loss_unweighted` | The same loss with the weight removed | Measured identically for every recipe, so this is the one to compare across runs |
@@ -274,7 +276,15 @@ def _(mo):
     | `train/active_tokens` | Tokens actually reaching the loss, per forward pass | Times the accumulation, this is the realized token budget per step |
     | `train/pos_weight` | The class weight in use | Derived from the training stream's own balance |
 
-    Two things worth knowing before comparing runs on these.
+    Three things worth knowing before comparing runs on these.
+
+    **Every metric above exists once per depth.** A run carries a head at
+    every layer, so each of these is logged as `val/layerNN/...`. The same
+    name without a depth holds the *best depth at that step*, which is what
+    the checkpoint is selected on, since the best depth is the probe the run
+    would actually be used for. The depth selector above chooses which one
+    the tables and figures below show; the aggregate appears beside it as
+    `val/best_...` and belongs to no single layer.
 
     **The validation population is the same for every recipe.** Selection
     rules apply to training only; validation always scores every token of
@@ -1373,7 +1383,11 @@ def _(run_status):
 def _(FIGURES, load_curves, missing, plt):
     def budget_figure():
         frame = load_curves("E9")
-        if frame.empty or "val/rollout_auc" not in frame.columns:
+        # Asked on the metric the checkpoint is selected on. A ranking metric
+        # would answer the wrong question here: it flattens because it has run
+        # out of room, not because the probe has stopped improving.
+        metric = "val/recall_at_budget"
+        if frame.empty or metric not in frame.columns:
             return missing(
                 "No finished run tagged `exp:E9` has written a validation curve yet."
             )
@@ -1382,15 +1396,15 @@ def _(FIGURES, load_curves, missing, plt):
         # the same optimizer steps over the same tokens throughout and the
         # curves differ only in where the probe reads.
         for label, group in frame.groupby("layer"):
-            points = group[["step", "val/rollout_auc"]].dropna().sort_values("step")
+            points = group[["step", metric]].dropna().sort_values("step")
             if not len(points):
                 continue
-            axes[0].plot(points["step"], points["val/rollout_auc"], marker="", label=label)
+            axes[0].plot(points["step"], points[metric], marker="", label=label)
             # The same curve as distance from its own best, which is where a
             # plateau is legible: flat here means more steps buy nothing.
-            best = points["val/rollout_auc"].cummax()
-            axes[1].plot(points["step"], best.iloc[-1] - points["val/rollout_auc"], label=label)
-        axes[0].set_ylabel("rollout AUC on validation")
+            best = points[metric].cummax()
+            axes[1].plot(points["step"], best.iloc[-1] - points[metric], label=label)
+        axes[0].set_ylabel("recall at a 1% false-alarm budget")
         axes[0].set_title("does it flatten?")
         axes[1].set_yscale("log")
         axes[1].set_ylabel("gap to the run's final best")
@@ -1413,26 +1427,31 @@ def _(FIGURES, load_curves, missing, plt):
 def _(load_curves, missing, mo, pd):
     def plateau_table():
         frame = load_curves("E9")
-        if frame.empty or "val/rollout_auc" not in frame.columns:
+        metric = "val/recall_at_budget"
+        if frame.empty or metric not in frame.columns:
             return missing("No validation curve for any run tagged `exp:E9` yet.")
+        # One positive rollout out of the hundred-odd on the monitor is worth
+        # about a hundredth of recall, so anything finer than that is a single
+        # rollout changing its mind and not a run still improving.
+        MARGIN = 0.01
         rows = []
         for layer, group in frame.groupby("layer"):
-            points = group[["step", "val/rollout_auc"]].dropna().sort_values("step")
+            points = group[["step", metric]].dropna().sort_values("step")
             if not len(points):
                 continue
-            best = float(points["val/rollout_auc"].max())
-            peak_step = int(points.loc[points["val/rollout_auc"].idxmax(), "step"])
+            best = float(points[metric].max())
+            peak_step = int(points.loc[points[metric].idxmax(), "step"])
             last_step = int(points["step"].iloc[-1])
             # The first step reaching within a small margin of the best is the
             # honest reading of "long enough": improvements past it are smaller
             # than the seed-to-seed spread anything will be compared against.
-            within = points[points["val/rollout_auc"] >= best - 0.001]
+            within = points[points[metric] >= best - MARGIN]
             rows.append(
                 {
                     "layer": int(layer),
-                    "best AUC": round(best, 5),
+                    "best recall": round(best, 5),
                     "step of best": peak_step,
-                    "first within 0.001": int(within["step"].iloc[0]) if len(within) else None,
+                    f"first within {MARGIN}": int(within["step"].iloc[0]) if len(within) else None,
                     "last step": last_step,
                     "still improving at the end": peak_step >= last_step - 100,
                 }

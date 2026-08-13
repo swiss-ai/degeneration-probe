@@ -59,7 +59,11 @@ def run_axes(config: ExperimentConfig) -> Dict[str, Any]:
         "model": config.model.short_name,
         "dataset": config.dataset.short_name,
         "task": training.task,
-        "layer": training.probe.layer,
+        # A run reading one depth has a layer; a run reading many has a span
+        # and no layer, so that nothing downstream mistakes the leftover
+        # single-layer setting for the depth a result came from.
+        "layer": training.probe.layer if training.probe.layers is None else None,
+        "layers": depth_label(training.probe)[1:] if training.probe.layers is not None else None,
         "context_window": training.probe.context_window_size,
         "normalization": training.probe.normalization,
         "features": training.features.regime,
@@ -120,6 +124,20 @@ def recipe_fingerprint(config: ExperimentConfig) -> str:
     return _fingerprint(_fingerprint_payload(config, ignore_seed=True))
 
 
+def depth_label(probe) -> str:
+    """How a run names the depths it reads.
+
+    A run that carries a head at every depth belongs to no single layer, so
+    naming it after one would be a claim about the run that is not true.
+    """
+    layers = sorted(probe.probed_layers)
+    if len(layers) == 1:
+        return f"L{layers[0]}"
+    if layers == list(range(layers[0], layers[-1] + 1)):
+        return f"L{layers[0]}-{layers[-1]}"
+    return f"L{len(layers)}x"
+
+
 def _readable_prefix(config: ExperimentConfig) -> str:
     training = config.training
     label = training.label.family.replace("frontier_", "")
@@ -132,7 +150,7 @@ def _readable_prefix(config: ExperimentConfig) -> str:
         selection = f"{selection}{training.selection.window_size}"
     return (
         f"{config.dataset.short_name}"
-        f"_L{training.probe.layer}"
+        f"_{depth_label(training.probe)}"
         f"_{selection}"
         f"_{label}"
         f"_{training.loss.name}"

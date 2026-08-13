@@ -28,9 +28,11 @@ def test_defaults_produce_resumable_checkpoints_and_keep_the_best(tmp_path):
     assert args.eval_strategy.value == "epoch"
     assert args.load_best_model_at_end is True
     assert args.save_total_limit == 2
-    # Selection keys off a protocol metric, not the loss: a token loss is
-    # dominated by the trivially separable in-pattern tokens.
-    assert args.metric_for_best_model == "rollout_auc"
+    # Selection keys off an operating point, not the loss and not a ranking. A
+    # token loss is dominated by the trivially separable in-pattern tokens, and
+    # a ranking metric reaches its ceiling while the probe is still improving,
+    # after which it can no longer tell two checkpoints apart.
+    assert args.metric_for_best_model == "recall_at_budget"
     assert args.greater_is_better is True
 
 

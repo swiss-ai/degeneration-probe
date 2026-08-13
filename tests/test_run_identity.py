@@ -33,6 +33,30 @@ def test_run_name_carries_the_axes_a_reader_scans_for():
         assert fragment in name
 
 
+def test_a_run_reading_every_depth_is_not_named_after_one():
+    """Naming a many-headed run after a single layer states something untrue.
+
+    The single-layer setting stays at whatever it was when the run asked for
+    every depth instead, so a name built from it would claim a depth the run
+    never committed to, and the claim would follow the run into its directory
+    name, its group, and every table built from either.
+    """
+    every = _experiment(["training.probe.layers=[1,2,3]", "training.probe.layer=30"])
+    name = derive_run_name(every)
+    assert "L1-3" in name
+    assert "L30" not in name
+
+    axes = run_axes(every)
+    assert axes["layer"] is None, "a run over many depths has no one layer"
+    assert axes["layers"] == "1-3"
+
+    # A run that really does read one depth is unchanged by any of this.
+    one = _experiment(["training.probe.layer=12"])
+    assert "L12" in derive_run_name(one)
+    assert run_axes(one)["layer"] == 12
+    assert run_axes(one)["layers"] is None
+
+
 def test_seed_repeats_share_a_group_but_not_a_name():
     first = _experiment(["training.runtime.seed=1"])
     second = _experiment(["training.runtime.seed=2"])
