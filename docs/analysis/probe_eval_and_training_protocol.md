@@ -160,9 +160,10 @@ Two regimes exist, and which one is in use is a configuration field:
 - **Frozen** (`cached` in the configuration). The language model is fixed, so
   the hidden state at every token of every rollout is a constant. Those hidden
   states are extracted once for the whole corpus and stored, and training then
-  reads vectors from disk instead of running the model. Training a linear head on precomputed vectors
-  is bounded by input/output rather than by compute, which makes large sweeps
-  over recipes, window sizes and seeds cheap enough to run exhaustively.
+  reads vectors from disk instead of running the model. Training a linear head
+  on precomputed vectors is bounded by input/output rather than by compute,
+  which makes large sweeps over recipes, window sizes and seeds cheap enough to
+  run exhaustively.
 - **Adapted.** Low-rank adapters are attached to the layers up to and including
   the probed layer and are trained jointly with the probe head. The hidden
   states now change at every optimizer step, so the cached activations cannot
