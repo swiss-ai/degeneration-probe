@@ -45,10 +45,12 @@ typo silently creates a second, different run instead of failing.
 - Job scripts already exist: `cluster/train.sbatch` (Hydra overrides pass
   straight through), `cluster/score_layers.sbatch <run_dir> "<depths>" <split>`,
   `cluster/baselines.sbatch`.
-- **Walltime**: generous for training (a timeout throws away hours), tight for
-  scoring (a timeout costs one cheap re-run, and short jobs backfill sooner).
-  Training runs take about 80 minutes; ask for 3 hours. Scoring takes about
-  3 minutes per depth plus 3 minutes of startup; ask for 40 minutes.
+- **Walltime**: generous where a timeout is expensive, tight where it is not,
+  because short jobs backfill into gaps that long reservations cannot fit.
+  A training run takes about 80 minutes and a timeout throws all of it away, so
+  ask for 3 hours. Scoring costs about 3 minutes per depth plus 3 minutes of
+  startup, so all 31 depths is about 100 minutes; ask for 3 hours there too.
+  Anything reading already-written scores is a few minutes; ask for 30.
 
 ## Order of work
 
