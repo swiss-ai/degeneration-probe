@@ -139,14 +139,28 @@ and both are covered where they arise: the gradient norm is clipped per head
 (Section 6.2), and each head keeps its own normalization, since activation scale
 varies with depth.
 
+Depth turns out to matter more than any other axis studied here, which is the
+practical argument for sweeping it inside every run rather than fixing it once.
+Between the best depth and the worst, token-level coverage at a fixed
+false-alarm budget differs by more than an order of magnitude, while the knobs
+of Sections 4 and 5 move it by a few points. The best depths sit around a third
+of the way up the stack, the region is broad rather than a single winner, and
+the last few layers are the worst by a wide margin. A late layer also converges
+more slowly, so a comparison made at a fixed step can mistake a depth that has
+not finished for a depth that cannot do the job.
+
+Because a run carries every depth, a result is read at a named depth and the
+name is part of the result. Reading one depth as though it settled the question
+for the others is the mistake this arrangement exists to make avoidable.
+
 ### 3.2 Frozen features versus an adapted model
 
 Two regimes exist, and which one is in use is a configuration field:
 
-- **Frozen.** The language model is fixed, so the hidden state at every token
-  of every rollout is a constant. Those hidden states are extracted once for
-  the whole corpus and stored, and training then reads vectors from disk
-  instead of running the model. Training a linear head on precomputed vectors
+- **Frozen** (`cached` in the configuration). The language model is fixed, so
+  the hidden state at every token of every rollout is a constant. Those hidden
+  states are extracted once for the whole corpus and stored, and training then
+  reads vectors from disk instead of running the model. Training a linear head on precomputed vectors
   is bounded by input/output rather than by compute, which makes large sweeps
   over recipes, window sizes and seeds cheap enough to run exhaustively.
 - **Adapted.** Low-rank adapters are attached to the layers up to and including
@@ -169,6 +183,15 @@ can be run at several seeds. The adapted regime is reserved for a small final
 comparison, since its cost per configuration is orders of magnitude higher and
 it answers a different question (does adapting the representation help) than the
 recipe comparison does (which selection rule and which target help).
+
+The two regimes also differ in how many depths a run can carry. Sweeping depth
+inside a run works because the stored activations hold every layer, and an
+adapted run has no stored activations, so it carries one probe at one depth and
+places its adapters up to that depth. An adapted comparison therefore runs at a
+depth already chosen in the frozen regime, and its control is a frozen run at
+that same depth rather than one depth of a many-headed run: a many-headed run
+selects its checkpoint on whichever depth leads and fits one class weight for
+all of them, so it differs from an adapted run in more than the regime.
 
 ## 4. Targets
 
@@ -197,11 +220,24 @@ fire $N$ tokens before degeneration is confirmed. The formula needs no special
 case past the frontier, since the distance $f_r - t$ simply goes negative there
 and the condition stays satisfied for every horizon.
 
-The horizon is a genuine axis rather than a relabeling trick, because it is
-visible in the evaluation. A probe trained at a large $N$ should fire earlier
-relative to the frontier, which shows up directly in the lead-time view while
-leaving rollout-level detection roughly unchanged. That view is what gives $N$
-an interpretation.
+Whether the horizon is a genuine axis or only a relabeling is a question the
+lead-time view settles, since a probe asked to fire earlier should be seen to
+fire earlier while rollout-level detection stays roughly unchanged.
+
+Measured that way, the horizon does nothing. Across an eightfold range of $N$,
+at a window wide enough to express every horizon in it and at both anchors, the
+median alarm position moves by a few tokens while coverage falls slightly. The
+labels do change as intended, and the positive rate of the training stream rises
+monotonically with $N$, so this is a property of the probe and not of the
+labelling. The reading is that the probe fires when the loop becomes visible and
+cannot be relabelled into committing earlier.
+
+Two consequences follow. The horizon is held at zero rather than treated as an
+axis to sweep, and the interesting question moves from *when the target says to
+fire* to *how much of the run-up is readable at all*, which is what the frozen
+against adapted comparison of Section 3.2 asks. Note that this is a statement
+about the horizon, not about the run-up: the run-up does carry signal, and
+Section 5.2 records how much of it different selection rules recover.
 
 ### 4.3 Frontier labels, soft
 
@@ -341,13 +377,63 @@ rungs and never the pool itself.
    deliberate exposure to repetitive-but-legitimate text reduces false alarms on
    the text those heuristics are known to misfire on.
 
+What the ladder separates is not what it was built to separate, and the
+difference changes which view it should be read in. Rollout-level detection
+cannot see the ladder at all: every rung catches nearly every degenerate
+rollout, so recall is saturated and the rungs are indistinguishable in it. They
+split cleanly in lead time and coverage instead, and into two groups rather than
+five. The three rules that sample broadly behave alike, the two anchored on the
+frontier behave alike, and the gap between the groups is many times the spread
+across seeds.
+
+The anchored rules fire substantially earlier and cover substantially less. The
+mechanism is not the one that trade-off first suggests. Aligning every
+degenerate rollout on its own frontier and averaging shows the same monotone
+rise for every rung, with no anchored rule producing a sharper peak at onset.
+What differs is how far the score of a degenerate rollout sits above that of a
+healthy one at the same distance before the frontier, where the anchored rules
+hold roughly half again the separation. The advantage is confined to the run-up
+and has gone shortly after the frontier. That is the whole of the effect: the
+anchored rules read the approach better, and no rule reads the loop itself
+better.
+
+Two controls make that safe to state. A healthy rollout has no frontier to align
+on, so it borrows one drawn from the frontier distribution of the degenerate
+rollouts. Without that null the comparison is unreadable, because a probe's
+score drifts upward with position on its own and much of the apparent rise
+before a frontier is drift rather than anticipation. And the ordering holds at
+every false-alarm budget and at matched coverage, so it is a property of the
+probe rather than of where a threshold happened to land.
+
 ### 5.3 Choosing the window size
 
-$W$ is not fixed a priori. A small set of candidate sizes is piloted on the two
-cheapest rungs, and the winner is then locked for the remaining rungs. Running
-the full ladder at every candidate size would multiply its cost to answer a
-question (how much context a window needs) that is orthogonal to what the
-ladder measures (which selection rule helps).
+$W$ is not fixed a priori. A small set of candidate sizes is piloted and the
+winner is then locked for the ladder. Running the full ladder at every candidate
+size would multiply its cost to answer a question (how much context a window
+needs) that is orthogonal to what the ladder measures (which selection rule
+helps).
+
+Two constraints bound the choice before any measurement.
+
+$W$ has to be large enough for the window to express the horizon, or a
+comparison of horizons measures the window instead. A centered window spends
+half its length after the frontier and so shows only $W/2$ tokens of run-up,
+needing $W \geq 2N$; a trailing window is all run-up and needs $W \geq N$. Below
+that, two different horizons label every token in the window positive, train on
+identical data, and are reported as two points that differ in nothing. The same
+bound applies to a soft label, with the decay length in place of the horizon.
+
+And the pilot has to run at a depth worth locking against. A window size chosen
+at a depth that turns out to be poor is a window size chosen on a probe that
+barely works, and there is no reason to expect it to transfer. Since a run
+carries every depth at once (Section 3.1), the pilot is read at the depth the
+ladder will be read at, and both are named in the result.
+
+The two rules that place windows deliberately are the informative ones to pilot
+on, since window size is the same lever those rules pull: an anchored window
+trades coverage for lead time, and its size moves the probe along that same
+trade-off. Where a rule ignores position entirely, $W$ only sets how contiguous
+its tokens are.
 
 ### 5.4 Batch composition
 
@@ -470,15 +556,37 @@ loss plateaus stops each one at a different point of the same trade-off curve.
 Every recipe, whatever it was trained against, produces a per-token score in
 $[0, 1]$, so all of them can be judged on the same score-space quantity.
 
-The default is the threshold-free, rollout-level area under the ROC curve. It
-assumes no threshold and no calibration, and it is invariant to any monotone
-rescaling of the score, which is what makes it equally fair to a probe trained
-on hard labels and one trained on a decayed target whose outputs live in a
-compressed range. The metric is a configuration field and may be something else
-(area under the precision-recall curve, true positive rate at a fixed false
-alarm budget, median lead time at a fixed budget) when a different question is
-being asked. The rule is that it may differ between comparison tables and never
-within one.
+The metric is recall at a fixed false-alarm budget: the share of degenerate
+rollouts caught while no more than one percent of healthy ones are allowed to
+fire. It ties the checkpoint to the operating point the probe would actually run
+at, and it keeps moving over the range where checkpoints differ.
+
+A threshold-free ranking metric is the obvious alternative and is the wrong
+choice here, for a reason worth recording because it is invisible until
+measured. Separating a mostly-degenerate rollout from a healthy one is easy, so
+the area under the ROC curve reaches its ceiling long before the probe is
+useful. Across depths spanning a threefold difference in token coverage it
+agrees to within a thousandth, which makes it unable to tell two checkpoints
+apart exactly where the choice matters. Ranking is still worth recording, as a
+health check and as the calibration-free number that survives a score-scale
+shift across domains, but not as the quantity anything is selected on.
+
+The price of an operating-point metric is that it is not invariant to a monotone
+rescaling of the score, so a probe trained on a decayed target whose outputs
+live in a compressed range is not automatically comparable to one trained on
+hard labels. This is why the threshold is re-derived per run rather than shared,
+which restores the comparison at the cost of one number per run.
+
+The metric is a configuration field and may be something else (median lead time
+at a fixed budget, token-level coverage at a fixed budget) when a different
+question is being asked. The rule is that it may differ between comparison
+tables and never within one.
+
+A run carrying a head at every depth reports each metric per depth and again
+without one, the latter holding the best depth at that step. Selection reads the
+aggregate, since the best depth is the probe the run would be used for. Any
+comparison across recipes reads a named depth, because the aggregate can move
+between depths from one step to the next.
 
 Stopping works as follows: the best checkpoint by the selection metric is kept,
 training halts after a configured number of evaluations without improvement, and
@@ -668,13 +776,41 @@ Three rules keep this view honest:
   remaining after the first alarm, otherwise a probe that fires late looks
   artificially incoherent.
 
-This view also decides $m$. If false alarms on negative rollouts are runs of a
-few tokens while true alarms on positives run for hundreds, then a small
-persistence window removes most spurious early stops at a cost of a few tokens
-of lead time, and that trade-off is read directly off the two run-length
-distributions instead of being guessed at. $m$ is therefore chosen from
-persistence measured on validation data, alongside the thresholds, rather than
-being fixed in advance.
+This view also decides $m$, and how it does so needs stating carefully, because
+the obvious reading of the trade-off is wrong.
+
+The tempting argument is that false alarms on negative rollouts are runs of a
+few tokens while true alarms on positives run for hundreds, so a persistence
+window should remove spurious early stops at a cost of a few tokens of lead
+time. What that argument misses is that $m$ and the threshold are not
+independent. The budget is an equation rather than an observation: the threshold
+is solved for so that a fixed share of healthy rollouts fires. Requiring $m$
+consecutive tokens makes firing strictly harder at any fixed threshold, so
+holding the budget forces the threshold down until the same share of healthy
+rollouts again reaches $m$ in a row.
+
+Both halves of that are large and they oppose each other. Lowering the threshold
+alone moves the alarm hundreds of tokens earlier and spends many times the
+budget; requiring the run alone moves it hundreds of tokens later and leaves
+most of the budget unspent. The net is the small difference between two large
+opposing terms, which is why the curve of lead time against $m$ is nearly flat
+and why its noise grows with $m$: at a persistence of one the spread across
+seeds is a few tokens, and at sixty-four it is tens of tokens, larger than the
+effect being measured.
+
+So $m$ is chosen on validation alongside the thresholds, as a small window near
+the low end rather than by seeking an optimum. The optimum is not identifiable
+at the seed counts these comparisons run at, and reporting one would be
+reporting noise. What the view is genuinely for is the diagnosis it was built
+for: telling a jittery probe from a confidently wrong one, and confirming that a
+first alarm is a decision rather than a blip.
+
+Two quantities are reported with any choice of $m$, because the budget does not
+constrain them. The token-level false-positive rate moves several-fold across
+the range of $m$ while the rollout-level budget sits still, and the run length
+of a false alarm grows with $m$, so a fixed budget at a large $m$ means a
+sustained wrong alarm rather than a flicker. A budget held at the rollout level
+says nothing about either.
 
 ### 7.7 What is tuned where
 
@@ -721,7 +857,19 @@ them apart.
   is reported and marked anecdotal, never silently hidden and never quoted as an
   estimate of generalization.
 - Every metric of a recipe is a mean and a standard deviation over its seed
-  repeats.
+  repeats. Three seeds is the minimum for a claim that one recipe beats another.
+  A single-seed run is a pilot: it can establish that a configuration trains,
+  and it can support a negative result when the same flat answer appears across
+  many settings of the axis under study, but it cannot rank two recipes. Any
+  table mixing the two says which rows are which.
+- Numbers from the in-loop monitor are never reported, including in a table
+  meant only to show progress. The monitor runs on a thinned split, so a monitor
+  number and a protocol number for the same run and the same metric will differ,
+  and putting them in one table invites a comparison that is not valid. Reported
+  numbers come from stored scores through the views above.
+- Any metric read at an operating point names the persistence window it was
+  computed at, since lead time, coverage and the token-level false-positive rate
+  all move with it while the budget does not.
 
 ## 8. Comparing recipes
 
@@ -755,11 +903,15 @@ tracking) are incidental.
 
 ```yaml
 features:
-  regime: frozen            # frozen | adapted
-  layer: 30                 # which residual stream the probe reads
-  layers: null              # or several: a head per depth, trained in one pass
+  regime: cached            # cached (stored activations) | adapted (run the model)
+
+probe:
+  layer: 12                 # which residual stream the probe reads
+  layers: null              # or several: a head per depth, trained in one pass;
+                            # cached only, since adapted carries one probe
   context_window_size: 1    # consecutive hidden states concatenated per decision
   normalization: layernorm  # none | layernorm | rmsnorm | l2
+  dtype: float32
 
 label:
   family: frontier_hard     # frontier_hard | frontier_soft | token_signal
@@ -770,47 +922,68 @@ label:
 
 loss:
   name: bce                 # bce | mse | l1 | smooth_l1
-  pos_weight: sampled       # sampled | none | <float>
+  bce:
+    use_pos_weight: true    # weight fitted to this recipe's own stream
+  mse:
+    output_activation: sigmoid
 
-sampling:
+selection:
   strategy: frontier_window # all_tokens | rollout_balanced | random_window |
                             # frontier_window | frontier_window_hard_negative
   window_size: 128
-  anchor: trailing          # frontier_window: trailing | centered
-  negative_rollouts_per_positive: 4.0
-  positive_windows_per_batch_fraction: 0.2
-  domain_stratified: true
-  max_rollouts_per_prompt: 4
+  anchor: centered          # frontier_window: trailing | centered
+  positive_fraction: 0.25
+  max_rollouts_per_prompt: null
   hard_negative_fraction: 0.5
   resample_each_epoch: true
 
-adapters:
+lora:
+  enabled: false            # adapted regime only
   layers: all               # none | all | [list of layer indices]
   rank: 16
   alpha: 32
   dropout: 0.05
 
 budget:
-  max_steps: 2000
-  tokens_per_step: 8192
-  eval_every_steps: 50
-  patience: 6
-  selection_metric: rollout_auc
+  tokens_per_step: 2048     # measured from the training stream, not from W
+  patience: null            # evaluations without improvement before stopping
+  collapse_threshold: 0.01  # minimum score spread on the monitor
+
+optimizer:
   probe_learning_rate: 1e-4
-  adapter_learning_rate: 1e-4
+  lora_learning_rate: 1e-4
   weight_decay: 0.0
-  max_grad_norm: 1.0
+
+runtime:
+  max_steps: 800
+  per_device_train_batch_size: 8
+  max_grad_norm: 1.0        # applied per head, after accumulation
   seed: 42
 
-evaluation:
-  monitor_negatives_per_positive: 4.0   # in-loop monitoring only
-  monitor_max_rollouts: null            # thin the monitor, keeping every positive
-  final_splits: null                    # which splits the end-of-run pass covers
-  false_alarm_budgets: [0.01, 0.05, 0.10]
-  persistence_candidates: [1, 3, 5]
-  per_domain: true
-  min_positives_for_reporting: 10
+validation:
+  strategy: steps
+  steps: 200
+  max_rollouts: 400         # thin the monitor, keeping every positive
+  final_splits: []          # which splits the end-of-run pass covers; empty
+                            # skips it, for a run scored from a checkpoint later
+
+checkpoint:
+  strategy: steps
+  steps: 200                # must match the validation cadence to keep the best
+  metric_for_best_model: recall_at_budget
+  greater_is_better: true
+
+dataset.sampling:
+  train_negative_rollouts_per_positive: 4.0
+  evaluation_negative_rollouts_per_positive: null   # evaluation never subsamples
+  domain_stratified: true
 ```
+
+Evaluation is not configured here. It runs over stored scores after training,
+so its budgets, its persistence windows and the splits it covers are arguments
+to the reporting step rather than properties of a run: false-alarm budgets of
+one, five and ten percent, a persistence sweep, per-domain reporting, and a
+minimum positive count below which a cell is marked anecdotal.
 
 ## 10. Reproducibility
 
