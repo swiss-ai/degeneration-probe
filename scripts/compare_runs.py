@@ -33,6 +33,12 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path("outputs"))
     parser.add_argument("--split", default="test_indomain")
     parser.add_argument("--ladder", nargs="*", default=None, help="Group names, in rung order.")
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=None,
+        help="Which depth to compare, for runs that carry a probe at every layer.",
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -40,10 +46,11 @@ def main() -> None:
     if runs.empty:
         raise SystemExit(f"No runs under {args.root}")
     finished = runs[runs["status"] == "finished"]
-    results = collect_results(finished, args.split)
+    results = collect_results(finished, args.split, args.layer)
     if results.empty:
+        at_layer = "" if args.layer is None else f" at layer {args.layer}"
         raise SystemExit(
-            f"No run under {args.root} has protocol output for split {args.split!r}. "
+            f"No run under {args.root} has protocol output for split {args.split!r}{at_layer}. "
             "Run score_rollouts.py then evaluate_scores.py first."
         )
 

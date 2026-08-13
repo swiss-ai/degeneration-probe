@@ -59,11 +59,38 @@ def collect_runs(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def collect_results(runs: pd.DataFrame, split: str) -> pd.DataFrame:
-    """The protocol's views for each run, joined into one tidy frame."""
+def evaluation_dir(run_dir: Path, split: str, layer: Optional[int], own_layer=None) -> Optional[Path]:
+    """Where one depth of one run keeps its protocol output, if it has any.
+
+    A run carrying a probe at every depth stores each one separately, since a
+    score file holds one score per token and cannot represent several probes at
+    once. A run that trained a single depth keeps its output at the root, and
+    can only answer for the depth it trained.
+    """
+    root = Path(run_dir)
+    if layer is not None:
+        scoped = root / "layers" / f"layer_{int(layer):02d}" / "evaluation" / split
+        if scoped.is_dir():
+            return scoped
+        if own_layer is not None and int(own_layer) != int(layer):
+            return None
+    plain = root / "evaluation" / split
+    return plain if plain.is_dir() else None
+
+
+def collect_results(runs: pd.DataFrame, split: str, layer: Optional[int] = None) -> pd.DataFrame:
+    """The protocol's views for each run, joined into one tidy frame.
+
+    Naming a layer reads that depth of every run. Leaving it out reads whatever
+    each run stored at its root, which is what a single-depth run writes.
+    """
     frames = []
-    for row in runs.itertuples(index=False):
-        base = Path(row.run_dir) / "evaluation" / split
+    # Records rather than tuples: the axis columns carry dots in their names,
+    # which a named tuple cannot hold and would silently rename.
+    for row in runs.to_dict("records"):
+        base = evaluation_dir(Path(row["run_dir"]), split, layer, row.get("axis.layer"))
+        if base is None:
+            continue
         detection = base / "view_a_detection.csv"
         if not detection.is_file():
             continue
@@ -82,9 +109,10 @@ def collect_results(runs: pd.DataFrame, split: str) -> pd.DataFrame:
             rank = json.loads(summary.read_text(encoding="utf-8")).get("rank_metrics", {})
             for key, value in rank.items():
                 frame[key] = value
-        frame["run_dir"] = row.run_dir
-        frame["group"] = row.group
-        frame["seed"] = row.seed
+        frame["run_dir"] = row["run_dir"]
+        frame["group"] = row["group"]
+        frame["seed"] = row["seed"]
+        frame["layer"] = layer if layer is not None else row.get("axis.layer")
         frame["split"] = split
         frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

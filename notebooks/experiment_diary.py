@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import json
+    import re
     import shlex
     from pathlib import Path
 
@@ -23,7 +24,7 @@ def _():
     )
     FIGURES = REPO / "notebooks" / "figures" / "diary"
     FIGURES.mkdir(parents=True, exist_ok=True)
-    return FIGURES, OUTPUTS, Path, REPO, json, mo, pd, plt, shlex
+    return FIGURES, OUTPUTS, Path, REPO, json, mo, pd, plt, re, shlex
 
 
 @app.cell
@@ -383,6 +384,19 @@ def _():
     # that two recipes are the same recipe exactly when their settings match. A
     # list would let one run spell out a default that another leaves implicit,
     # and the two would look different while training the identical probe.
+    # Every run carries a head at every depth rather than picking one. Reading
+    # the residual stream is what a run spends its time on, and that cost is
+    # paid once whether one head or thirty-one hang off it, so depth stops
+    # being a variable that has to be swept and becomes an axis every result
+    # already has. Depth is then chosen when a result is read, not before it
+    # is measured.
+    PROBED_LAYERS = list(range(1, 32))
+    # Scoring writes one file per token per depth, so it is done for a few
+    # depths rather than all of them: the best found so far, a shallower
+    # neighbour to show the plateau is broad, and a late one to show the fall.
+    SCORED_LAYERS = [8, 12, 30]
+    DEFAULT_LAYER = 12
+
     BASE = {
         "training.features.regime": "cached",
         "training.lora.enabled": "false",
@@ -390,17 +404,31 @@ def _():
         # of steps for every recipe, so the total tokens seen is held constant
         # and only the choice of tokens varies.
         "training.budget.tokens_per_step": 2048,
-        "training.runtime.max_steps": 400,
+        # Long enough that every depth has stopped improving. The good depths
+        # settle by step 400 and the late ones keep creeping to about 600, so
+        # this leaves margin without paying for it twice.
+        "training.runtime.max_steps": 800,
         "training.runtime.per_device_train_batch_size": 8,
         "training.validation.strategy": "steps",
-        "training.validation.steps": 50,
+        "training.validation.steps": 200,
         "training.checkpoint.strategy": "steps",
-        "training.checkpoint.steps": 50,
+        "training.checkpoint.steps": 200,
+        # Monitoring reads a fixed subsample rather than the whole split. The
+        # full split costs more than the training it is watching once every
+        # depth is scored on it.
+        "training.validation.max_rollouts": 400,
+        # A run writes no end-of-run evaluation. Scoring happens afterwards
+        # from a checkpoint, one depth at a time, so evaluating every split at
+        # every depth inside the run would be work nothing reads.
+        "training.validation.final_splits": "[]",
+        # Ranking saturates long before a probe is useful, so the checkpoint is
+        # chosen on the operating point instead.
+        "training.checkpoint.metric_for_best_model": "recall_at_budget",
         "training.runtime.seed": 42,
         # Every setting any experiment varies is named here even when it equals
         # the configured default, so that a recipe is described the same way
         # wherever it appears and identical recipes collapse to one run.
-        "training.probe.layer": 30,
+        "training.probe.layers": "[" + ",".join(str(n) for n in PROBED_LAYERS) + "]",
         "training.selection.window_size": 128,
         "training.selection.anchor": "centered",
         "training.selection.positive_fraction": 0.25,
@@ -417,7 +445,7 @@ def _():
         "frontier_window_hard_negative",
     ]
     SEEDS = [42, 43, 44]
-    return BASE, LADDER_RUNGS, SEEDS
+    return BASE, DEFAULT_LAYER, LADDER_RUNGS, PROBED_LAYERS, SCORED_LAYERS, SEEDS
 
 
 @app.cell
@@ -460,31 +488,44 @@ def _(BASE, LADDER_RUNGS, SEEDS):
         return runs
 
     def _layer_runs():
+        # Depth is no longer swept. One run carries a head at every depth, so
+        # the depth question is answered by reading one run along its layer
+        # axis, and this recipe is the same one the ladder trains at rung four.
+        # Planning it here tags that single run for both experiments rather
+        # than training it twice.
         return [
             {
-                "label": f"layer {layer}",
+                "label": "every depth at once",
                 "overrides": recipe(
-                    **{
-                        "training.probe.layer": layer,
-                        "training.selection.strategy": "frontier_window",
-                    }
+                    **{"training.selection.strategy": "frontier_window"}
                 ),
             }
-            for layer in (4, 8, 12, 16, 20, 24, 28, 30, 31)
         ]
 
     def _label_runs():
+        # The window has to be wide enough to express the horizon, or the
+        # comparison measures the window instead. A centered window spends half
+        # its length after the frontier and so shows only W/2 tokens of run-up,
+        # which means it needs W >= 2N; a trailing window is all run-up and
+        # needs W >= N. Below that, two different horizons label every token in
+        # the window positive and train on identical data, and the two runs
+        # would be reported as a pair of points showing no difference.
+        #
+        # W is therefore fixed at 512 across the whole experiment, wide enough
+        # for the largest horizon at either anchor, and the tokens per step are
+        # raised to match so that a step still covers the same number of
+        # windows as elsewhere.
+        WIDE = {
+            "training.selection.strategy": "frontier_window",
+            "training.selection.window_size": 512,
+            "training.budget.tokens_per_step": 8192,
+        }
         runs = [
             {
                 "label": f"centered, horizon {horizon}",
-                "overrides": recipe(
-                    **{
-                        "training.selection.strategy": "frontier_window",
-                        "training.label.horizon": horizon,
-                    }
-                ),
+                "overrides": recipe(**WIDE, **{"training.label.horizon": horizon}),
             }
-            for horizon in (0, 32, 128, 512)
+            for horizon in (0, 32, 128, 256)
         ]
         # A trailing window sits entirely before the frontier, so a horizon of
         # zero would leave no positive token in it at all. Only horizons that
@@ -493,14 +534,14 @@ def _(BASE, LADDER_RUNGS, SEEDS):
             {
                 "label": f"trailing, horizon {horizon}",
                 "overrides": recipe(
+                    **WIDE,
                     **{
-                        "training.selection.strategy": "frontier_window",
                         "training.selection.anchor": "trailing",
                         "training.label.horizon": horizon,
-                    }
+                    },
                 ),
             }
-            for horizon in (128, 512)
+            for horizon in (128, 256, 512)
         ]
         return runs
 
@@ -554,16 +595,18 @@ def _(BASE, LADDER_RUNGS, SEEDS):
 
     def _budget_runs():
         # Long enough to run past the point where the metric stops improving,
-        # and validated often enough to see where that happens. Layer varies
-        # too, so one sweep answers both how long to train and whether the
-        # depth ranking is a property of the layer or of when training stopped.
+        # and validated often enough to see where that happens. Every depth is
+        # carried at once, so one run answers both how long to train and
+        # whether the depth ranking is a property of the layer or only of when
+        # training was stopped. The two are easy to confuse: a shallow depth
+        # that has converged and a late depth that is still climbing look the
+        # same at any single step.
         return [
             {
-                "label": f"layer {layer}, 3000 steps",
+                "label": "every depth, 3000 steps",
                 "overrides": recipe(
                     **{
                         "training.selection.strategy": "frontier_window",
-                        "training.probe.layer": layer,
                         "training.runtime.max_steps": 3000,
                         "training.validation.steps": 100,
                         "training.checkpoint.steps": 100,
@@ -571,7 +614,6 @@ def _(BASE, LADDER_RUNGS, SEEDS):
                 ),
                 "sbatch": "--time=06:00:00",
             }
-            for layer in (8, 12, 16, 30)
         ]
 
     budget_runs = _budget_runs()
@@ -846,69 +888,180 @@ def _(BY_ID, all_runs, commands_for, missing, mo, pd, shared_note):
 
 
 @app.cell
-def _(Path, missing, pd, tagged_with):
-    def run_dirs_for(exp_id):
+def _(Path, missing, pd, re, tagged_with):
+    # A run holds a probe at every depth, so depth is a column here rather than
+    # something that distinguishes one run directory from another. Both readers
+    # below turn what is stored per depth into a `layer` column, so that a
+    # single-depth run and a run covering all of them read the same way and can
+    # be put on one axis.
+    LAYER_COLUMN = re.compile(r"^(?P<prefix>.*?)layer(?P<layer>\d+)/(?P<metric>.+)$")
+
+    def run_rows_for(exp_id):
         found = tagged_with(exp_id)
         if found.empty or "status" not in found.columns:
             return []
-        return found[found["status"] == "finished"]["run_dir"].tolist()
+        finished = found[found["status"] == "finished"]
+        return list(finished[["run_dir", "layer"]].itertuples(index=False, name=None))
 
-    def load_curves(exp_id):
+    def run_dirs_for(exp_id):
+        return [run_dir for run_dir, _ in run_rows_for(exp_id)]
+
+    def _spread_layers(frame, own_layer):
+        """Turn `val/layerNN/metric` columns into rows carrying a layer."""
+        found = {}
+        for column in frame.columns:
+            match = LAYER_COLUMN.match(column)
+            if match:
+                renamed = match.group("prefix") + match.group("metric")
+                found.setdefault(int(match.group("layer")), {})[column] = renamed
+        if not found:
+            # A run that trained one depth already has the plain names; it only
+            # needs to say which depth they belong to.
+            plain = frame.copy()
+            plain["layer"] = own_layer
+            return plain
+        shared = [c for c in frame.columns if not LAYER_COLUMN.match(c)]
+        # Beside the per-depth columns, a run also logs each metric without a
+        # depth, holding the best depth at that step. That is what the
+        # checkpoint is selected on, and it belongs to no single layer, so it
+        # keeps a name of its own rather than colliding with the depth it
+        # happened to come from.
+        wanted = {new for renames in found.values() for new in renames.values()}
+        best = {}
+        for column in shared:
+            if column in wanted:
+                prefix, _, metric = column.rpartition("/")
+                best[column] = f"{prefix}/best_{metric}" if prefix else f"best_{metric}"
+        pieces = []
+        for layer, renames in sorted(found.items()):
+            piece = frame[shared + list(renames)].rename(columns={**best, **renames})
+            piece["layer"] = layer
+            pieces.append(piece)
+        return pd.concat(pieces, ignore_index=True)
+
+    def load_curves(exp_id, layer=None):
         frames = []
-        for run_dir in run_dirs_for(exp_id):
+        for run_dir, own_layer in run_rows_for(exp_id):
             path = Path(run_dir) / "history.parquet"
             if not path.is_file():
                 continue
-            frame = pd.read_parquet(path)
+            frame = _spread_layers(pd.read_parquet(path), own_layer)
             frame["run"] = Path(run_dir).parent.name
             frames.append(frame)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if not frames:
+            return pd.DataFrame()
+        curves = pd.concat(frames, ignore_index=True)
+        if layer is not None:
+            curves = curves[curves["layer"] == layer].reset_index(drop=True)
+        return curves
 
-    def load_views(exp_id, split, view):
+    def _evaluation_dir(run_dir, own_layer, split, layer):
+        """Where one depth of one run keeps its protocol output, if it has any."""
+        root = Path(run_dir)
+        if layer is not None:
+            scoped = root / "layers" / f"layer_{int(layer):02d}" / "evaluation" / split
+            if scoped.is_dir():
+                return scoped
+            # A run that trained a single depth keeps its output at the root,
+            # but it can only answer for the depth it actually trained.
+            if own_layer is not None and int(own_layer) != int(layer):
+                return None
+        plain = root / "evaluation" / split
+        return plain if plain.is_dir() else None
+
+    def scored_layers(exp_id, split="val"):
+        """Which depths of this experiment have been through the evaluator."""
+        depths = set()
+        for run_dir, own_layer in run_rows_for(exp_id):
+            root = Path(run_dir)
+            for scoped in sorted(root.glob("layers/layer_*/evaluation")):
+                if (scoped / split).is_dir():
+                    depths.add(int(scoped.parent.name.split("_")[-1]))
+            if (root / "evaluation" / split).is_dir() and own_layer is not None:
+                depths.add(int(own_layer))
+        return sorted(depths)
+
+    def load_views(exp_id, split, view, layer=None):
         frames = []
-        for run_dir in run_dirs_for(exp_id):
-            path = Path(run_dir) / "evaluation" / split / f"{view}.csv"
-            if not path.is_file():
+        for run_dir, own_layer in run_rows_for(exp_id):
+            directory = _evaluation_dir(run_dir, own_layer, split, layer)
+            if directory is None or not (directory / f"{view}.csv").is_file():
                 continue
-            frame = pd.read_csv(path)
+            frame = pd.read_csv(directory / f"{view}.csv")
             frame.insert(0, "run", Path(run_dir).parent.name)
+            frame.insert(1, "layer", layer if layer is not None else own_layer)
             frames.append(frame)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    def protocol_table(exp_id, split):
-        detection = load_views(exp_id, split, "view_a_detection")
+    def protocol_table(exp_id, split, layer=None):
+        detection = load_views(exp_id, split, "view_a_detection", layer)
         if detection.empty:
+            available = scored_layers(exp_id, split)
+            where = (
+                f" Depths scored so far: {available}."
+                if available
+                else " No depth of this experiment has been scored yet."
+            )
             return missing(
-                f"No run for {exp_id} has protocol output on `{split}`. "
-                "Training writes no scores by itself: run `cluster/score.sbatch` "
-                "then `scripts/evaluate_scores.py` for each finished run."
+                f"No run for {exp_id} has protocol output on `{split}` at layer "
+                f"{layer}.{where} Training writes no scores by itself: run "
+                "`cluster/score_layers.sbatch <run_dir> \"8 12 30\" <split>` for "
+                "each finished run, which scores those depths and puts each "
+                "through the evaluator."
             )
         merged = detection
         for view, columns in (
             ("view_c_lead_time", ["median_offset", "never_fired_positives", "false_early_stop_rate"]),
             ("view_b_coverage", ["in_pattern_recall", "token_false_positive_rate"]),
         ):
-            extra = load_views(exp_id, split, view)
+            extra = load_views(exp_id, split, view, layer)
             if extra.empty:
                 continue
-            keep = ["run", "target_negative_fpr"] + [
+            keep = ["run", "layer", "target_negative_fpr"] + [
                 c for c in columns if c in extra.columns
             ]
-            merged = merged.merge(extra[keep], on=["run", "target_negative_fpr"], how="left")
+            merged = merged.merge(
+                extra[keep], on=["run", "layer", "target_negative_fpr"], how="left"
+            )
         return merged
 
-    return load_curves, protocol_table, run_dirs_for
+    def depth_table(exp_id, split, budget=0.01, layers=None):
+        """One row per run and depth, for reading a result along its depth axis."""
+        depths = layers if layers is not None else scored_layers(exp_id, split)
+        frames = []
+        for layer in depths:
+            table = protocol_table(exp_id, split, layer)
+            if hasattr(table, "columns") and not table.empty:
+                frames.append(table[table["target_negative_fpr"] == budget])
+        if not frames:
+            return missing(
+                f"No depth of {exp_id} has protocol output on `{split}` yet."
+            )
+        return pd.concat(frames, ignore_index=True).sort_values(["layer", "run"])
+
+    return (
+        depth_table,
+        load_curves,
+        load_views,
+        protocol_table,
+        run_dirs_for,
+        scored_layers,
+    )
 
 
 @app.cell
 def _(FIGURES, load_curves, missing, plt):
-    def curve_figure(exp_id):
-        frame = load_curves(exp_id)
+    def curve_figure(exp_id, layer=None):
+        frame = load_curves(exp_id, layer)
         if frame.empty:
-            return missing(f"No finished run for {exp_id} has written `history.parquet` yet.")
+            return missing(
+                f"No finished run for {exp_id} has written `history.parquet` "
+                f"at layer {layer}."
+            )
         columns = [
             ("loss", "training loss"),
             ("val/loss_unweighted", "validation loss (unweighted)"),
+            ("val/recall_at_budget", "recall at a 1% false-alarm budget"),
             ("val/rollout_auc", "rollout AUC"),
             ("val/prediction_std", "score spread"),
         ]
@@ -930,7 +1083,8 @@ def _(FIGURES, load_curves, missing, plt):
         if handles:
             fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=7)
         fig.tight_layout(rect=(0, 0.16, 1, 1))
-        path = FIGURES / f"{exp_id}_curves"
+        suffix = "" if layer is None else f"_L{int(layer):02d}"
+        path = FIGURES / f"{exp_id}{suffix}_curves"
         fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
         fig.savefig(path.with_suffix(".png"), dpi=150, bbox_inches="tight")
         return fig
@@ -940,12 +1094,12 @@ def _(FIGURES, load_curves, missing, plt):
 
 @app.cell
 def _(FIGURES, missing, plt, protocol_table):
-    def operating_figure(exp_id, split):
-        frame = protocol_table(exp_id, split)
+    def operating_figure(exp_id, split, layer=None):
+        frame = protocol_table(exp_id, split, layer)
         if not hasattr(frame, "columns"):
             return frame
         if frame.empty:
-            return missing(f"No protocol output for {exp_id} on `{split}`.")
+            return missing(f"No protocol output for {exp_id} on `{split}` at layer {layer}.")
         panels = [
             ("recall", "recall"),
             ("precision", "precision"),
@@ -972,7 +1126,8 @@ def _(FIGURES, missing, plt, protocol_table):
         if handles:
             fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=7)
         fig.tight_layout(rect=(0, 0.18, 1, 1))
-        path = FIGURES / f"{exp_id}_{split}_operating"
+        suffix = "" if layer is None else f"_L{int(layer):02d}"
+        path = FIGURES / f"{exp_id}_{split}{suffix}_operating"
         fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
         fig.savefig(path.with_suffix(".png"), dpi=150, bbox_inches="tight")
         return fig
@@ -1021,7 +1176,7 @@ def _(mo):
 
 
 @app.cell
-def _(BASE, REPO, missing, mo, pd):
+def _(BASE, DEFAULT_LAYER, REPO, missing, mo, pd):
     def budget_coverage():
         import numpy as np
         from hydra import compose, initialize_config_dir
@@ -1074,7 +1229,9 @@ def _(BASE, REPO, missing, mo, pd):
             dataset = WindowedActivationDataset(
                 records,
                 build_root=experiment.dataset.build_root,
-                probe_layer=BASE["training.probe.layer"],
+                # Which depth is read does not change which windows the rule
+                # builds, and this table is about the windows.
+                probe_layer=DEFAULT_LAYER,
                 selection=SelectionConfig(**{**defaults, "strategy": strategy}),
                 batch_size=batch,
                 seed=BASE["training.runtime.seed"],
@@ -1143,14 +1300,25 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(DEFAULT_LAYER, PROBED_LAYERS, mo):
     split_choice = mo.ui.dropdown(
         options=["val", "test_indomain", "test_heldout_domains"],
         value="val",
         label="Split shown in every experiment below",
     )
-    split_choice
-    return (split_choice,)
+    # Depth is an axis of every result rather than a property of a run, so it
+    # is chosen here, when a result is read. Training curves exist at every
+    # depth; protocol tables exist only where a run has been scored, which is
+    # a few depths per run because scoring writes a score for every token.
+    # A mapping rather than a list, so the value read downstream is the integer
+    # depth and not the label that stands for it.
+    layer_choice = mo.ui.dropdown(
+        options={str(n): n for n in PROBED_LAYERS},
+        value=str(DEFAULT_LAYER),
+        label="Depth shown in every experiment below",
+    )
+    mo.hstack([split_choice, layer_choice], justify="start", gap=2)
+    return layer_choice, split_choice
 
 
 @app.cell
@@ -1210,11 +1378,13 @@ def _(FIGURES, load_curves, missing, plt):
                 "No finished run tagged `exp:E9` has written a validation curve yet."
             )
         fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2))
-        for run, group in frame.groupby("run"):
+        # One curve per depth. A single run carries all of them, so these are
+        # the same optimizer steps over the same tokens throughout and the
+        # curves differ only in where the probe reads.
+        for label, group in frame.groupby("layer"):
             points = group[["step", "val/rollout_auc"]].dropna().sort_values("step")
             if not len(points):
                 continue
-            label = run.split("_")[1] if "_" in run else run[:12]
             axes[0].plot(points["step"], points["val/rollout_auc"], marker="", label=label)
             # The same curve as distance from its own best, which is where a
             # plateau is legible: flat here means more steps buy nothing.
@@ -1246,7 +1416,7 @@ def _(load_curves, missing, mo, pd):
         if frame.empty or "val/rollout_auc" not in frame.columns:
             return missing("No validation curve for any run tagged `exp:E9` yet.")
         rows = []
-        for run, group in frame.groupby("run"):
+        for layer, group in frame.groupby("layer"):
             points = group[["step", "val/rollout_auc"]].dropna().sort_values("step")
             if not len(points):
                 continue
@@ -1259,7 +1429,7 @@ def _(load_curves, missing, mo, pd):
             within = points[points["val/rollout_auc"] >= best - 0.001]
             rows.append(
                 {
-                    "run": run,
+                    "layer": int(layer),
                     "best AUC": round(best, 5),
                     "step of best": peak_step,
                     "first within 0.001": int(within["step"].iloc[0]) if len(within) else None,
@@ -1267,15 +1437,15 @@ def _(load_curves, missing, mo, pd):
                     "still improving at the end": peak_step >= last_step - 100,
                 }
             )
-        return mo.ui.table(pd.DataFrame(rows).sort_values("run"), selection=None)
+        return mo.ui.table(pd.DataFrame(rows).sort_values("layer"), selection=None)
 
     plateau_table()
     return
 
 
 @app.cell
-def _(protocol_table, split_choice):
-    protocol_table("E9", split_choice.value)
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("E9", split_choice.value, layer_choice.value)
     return
 
 
@@ -1413,20 +1583,20 @@ def _(run_status):
 
 
 @app.cell
-def _(curve_figure):
-    curve_figure("E1")
+def _(curve_figure, layer_choice):
+    curve_figure("E1", layer_choice.value)
     return
 
 
 @app.cell
-def _(protocol_table, split_choice):
-    protocol_table("E1", split_choice.value)
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("E1", split_choice.value, layer_choice.value)
     return
 
 
 @app.cell
-def _(operating_figure, split_choice):
-    operating_figure("E1", split_choice.value)
+def _(layer_choice, operating_figure, split_choice):
+    operating_figure("E1", split_choice.value, layer_choice.value)
     return
 
 
@@ -1484,20 +1654,20 @@ def _(run_status):
 
 
 @app.cell
-def _(curve_figure):
-    curve_figure("E2")
+def _(curve_figure, layer_choice):
+    curve_figure("E2", layer_choice.value)
     return
 
 
 @app.cell
-def _(protocol_table, split_choice):
-    protocol_table("E2", split_choice.value)
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("E2", split_choice.value, layer_choice.value)
     return
 
 
 @app.cell
-def _(operating_figure, split_choice):
-    operating_figure("E2", split_choice.value)
+def _(layer_choice, operating_figure, split_choice):
+    operating_figure("E2", split_choice.value, layer_choice.value)
     return
 
 
@@ -1518,8 +1688,8 @@ def _(mo):
 
 
 @app.cell
-def _(missing, mo, pd, run_dirs_for, split_choice):
-    def pooled_ladder(split):
+def _(layer_choice, missing, mo, pd, run_dirs_for, split_choice):
+    def pooled_ladder(split, layer):
         try:
             from degeneration_probe.analysis.run_comparison import (
                 collect_results,
@@ -1533,13 +1703,15 @@ def _(missing, mo, pd, run_dirs_for, split_choice):
         runs = collect_runs("outputs")
         if runs.empty:
             return missing("No runs under `outputs/`.")
-        results = collect_results(runs[runs["status"] == "finished"], split)
+        results = collect_results(runs[runs["status"] == "finished"], split, layer)
         if results.empty:
-            return missing(f"No protocol output on `{split}` for any run.")
+            return missing(
+                f"No protocol output on `{split}` at layer {layer} for any run."
+            )
         pooled = pool_seeds(results)
         return mo.ui.table(pd.DataFrame(pooled).round(4), selection=None)
 
-    pooled_ladder(split_choice.value)
+    pooled_ladder(split_choice.value, layer_choice.value)
     return
 
 
@@ -1610,8 +1782,8 @@ def _(FIGURES, missing, plt, tagged_with):
 
 
 @app.cell
-def _(protocol_table, split_choice):
-    protocol_table("E3", split_choice.value)
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("E3", split_choice.value, layer_choice.value)
     return
 
 
@@ -1662,14 +1834,14 @@ def _(run_status):
 
 
 @app.cell
-def _(protocol_table, split_choice):
-    protocol_table("E4", split_choice.value)
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("E4", split_choice.value, layer_choice.value)
     return
 
 
 @app.cell
-def _(operating_figure, split_choice):
-    operating_figure("E4", split_choice.value)
+def _(layer_choice, operating_figure, split_choice):
+    operating_figure("E4", split_choice.value, layer_choice.value)
     return
 
 
@@ -1714,8 +1886,8 @@ def _(run_status):
 
 
 @app.cell
-def _(protocol_table, split_choice):
-    protocol_table("E5", split_choice.value)
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("E5", split_choice.value, layer_choice.value)
     return
 
 
@@ -1793,8 +1965,8 @@ def _(Path, json, missing, mo, pd, run_dirs_for):
 
 
 @app.cell
-def _(curve_figure):
-    curve_figure("E6")
+def _(curve_figure, layer_choice):
+    curve_figure("E6", layer_choice.value)
     return
 
 
