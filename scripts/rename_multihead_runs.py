@@ -46,6 +46,9 @@ def planned_renames():
             continue
         old_segment = f"_L{probe.layer}_"
         new_segment = f"_{depth_label(probe)}_"
+        if new_segment in run_dir.name:
+            # Already carries its span; running this twice changes nothing.
+            continue
         if old_segment not in run_dir.name:
             print(f"  ! {run_dir.name} has no {old_segment!r} segment, skipped")
             continue
