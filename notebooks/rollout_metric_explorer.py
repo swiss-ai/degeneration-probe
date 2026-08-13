@@ -6,15 +6,16 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    import html
     import json
     from pathlib import Path
 
+    import anywidget
     import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
     import torch
+    import traitlets
     from sklearn.cluster import KMeans
 
     from degeneration_probe.data.activation_store import activation_path, load_probe_layer
@@ -29,8 +30,8 @@ def _():
         KMeans,
         Path,
         activation_path,
+        anywidget,
         find_string_in_tokens,
-        html,
         json,
         load_probe_layer,
         mo,
@@ -40,6 +41,7 @@ def _():
         plt,
         read_probe_config,
         torch,
+        traitlets,
     )
 
 
@@ -116,6 +118,168 @@ def _(DATASET_CONFIGS):
         return _tokenizer_cache[tag]
 
     return (get_tokenizer,)
+
+
+@app.cell
+def _(anywidget, traitlets):
+    # Two clicks select the loop band: the first click is both the band start
+    # and the frontier, the second click is the band end. A third click starts
+    # a new selection. Selection happens directly in the rendered text instead
+    # of a separate token-index table, so there's no risk of picking the wrong
+    # row -- and there's no drag to get wrong either.
+    _ROLLOUT_TEXT_SELECTOR_ESM = """
+    function render({ model, el }) {
+      el.classList.add("rts-root");
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "rts-toolbar";
+      const info = document.createElement("span");
+      info.className = "rts-info";
+      const clearBtn = document.createElement("button");
+      clearBtn.textContent = "clear selection";
+      clearBtn.className = "rts-btn";
+      toolbar.append(info, clearBtn);
+
+      const legend = document.createElement("div");
+      legend.className = "rts-legend";
+      legend.innerHTML = `
+        <span><i class="rts-swatch rts-swatch-quote"></i> llm-judge onset_quote</span>
+        <span><i class="rts-swatch rts-swatch-frontier"></i> 1st click: frontier / band start</span>
+        <span><i class="rts-swatch rts-swatch-band"></i> 2nd click: band end</span>
+      `;
+
+      const textEl = document.createElement("pre");
+      textEl.className = "rts-text";
+
+      el.append(toolbar, legend, textEl);
+
+      const tokens = model.get("tokens");
+      const tooltips = model.get("tooltips");
+      const spans = tokens.map((tok, i) => {
+        const span = document.createElement("span");
+        span.className = "rts-tok";
+        span.textContent = tok.length ? tok : "\\u200b";
+        span.dataset.idx = String(i);
+        if (tooltips && tooltips[i]) span.title = tooltips[i];
+        textEl.appendChild(span);
+        return span;
+      });
+
+      // Whether the next click sets the band end (true) or starts a fresh
+      // selection (false). Local UI state, not synced to Python.
+      let awaitingEnd = model.get("band_start") >= 0 && model.get("band_end") < 0;
+
+      function updateInfo() {
+        const f = model.get("frontier_index");
+        const bs = model.get("band_start");
+        const be = model.get("band_end");
+        const parts = [];
+        parts.push(f >= 0 ? `frontier: ${f}` : "frontier: none");
+        parts.push(bs >= 0 && be >= 0 ? `band: ${bs}-${be}` : awaitingEnd ? "band: click the end token" : "band: none");
+        info.textContent = parts.join("   ·   ");
+      }
+
+      function applyHighlights() {
+        const hs = model.get("highlight_start");
+        const he = model.get("highlight_end");
+        const f = model.get("frontier_index");
+        const bs = model.get("band_start");
+        const be = model.get("band_end");
+        spans.forEach((span, i) => {
+          span.classList.toggle("rts-quote", hs >= 0 && he > hs && i >= hs && i < he);
+          span.classList.toggle("rts-band", bs >= 0 && be >= 0 && i >= bs && i <= be);
+          span.classList.toggle("rts-frontier", i === f);
+        });
+        updateInfo();
+      }
+
+      function onTextClick(e) {
+        const span = e.target.closest(".rts-tok");
+        if (!span) return;
+        const idx = Number(span.dataset.idx);
+        if (!awaitingEnd) {
+          model.set("frontier_index", idx);
+          model.set("band_start", idx);
+          model.set("band_end", -1);
+          awaitingEnd = true;
+        } else {
+          const start = model.get("band_start");
+          model.set("band_start", Math.min(start, idx));
+          model.set("band_end", Math.max(start, idx));
+          model.set("frontier_index", Math.min(start, idx));
+          awaitingEnd = false;
+        }
+        model.save_changes();
+        applyHighlights();
+      }
+
+      function onClear() {
+        model.set("frontier_index", -1);
+        model.set("band_start", -1);
+        model.set("band_end", -1);
+        awaitingEnd = false;
+        model.save_changes();
+        applyHighlights();
+      }
+
+      textEl.addEventListener("click", onTextClick);
+      clearBtn.addEventListener("click", onClear);
+
+      model.on("change:frontier_index", applyHighlights);
+      model.on("change:band_start", applyHighlights);
+      model.on("change:band_end", applyHighlights);
+      model.on("change:highlight_start", applyHighlights);
+      model.on("change:highlight_end", applyHighlights);
+
+      applyHighlights();
+    }
+    export default { render };
+    """
+
+    _ROLLOUT_TEXT_SELECTOR_CSS = """
+    .rts-toolbar { display:flex; align-items:center; gap:0.9em; margin-bottom:0.35em; font-size:0.8em; }
+    .rts-info { color:#888; font-variant-numeric: tabular-nums; }
+    .rts-btn { font-size:0.85em; padding:1px 8px; border-radius:4px; border:1px solid #8883; background:transparent; cursor:pointer; }
+    .rts-btn:hover { background:#8882; }
+    .rts-legend { display:flex; gap:1.2em; font-size:0.75em; color:#888; margin-bottom:0.35em; flex-wrap:wrap; }
+    .rts-legend span { display:inline-flex; align-items:center; gap:0.35em; }
+    .rts-swatch { display:inline-block; width:0.9em; height:0.9em; border-radius:2px; }
+    .rts-swatch-quote { background:rgba(253,191,111,0.7); }
+    .rts-swatch-frontier { background:transparent; border:2px dotted purple; }
+    .rts-swatch-band { background:rgba(128,0,128,0.28); }
+    .rts-text {
+      white-space: pre-wrap;
+      font-family: monospace;
+      font-size: 0.85em;
+      max-height: 420px;
+      overflow-y: auto;
+      padding: 0.5em;
+      border: 1px solid #8883;
+      border-radius: 4px;
+      cursor: pointer;
+      user-select: none;
+      margin: 0;
+    }
+    .rts-tok { border-radius:2px; }
+    .rts-tok:hover { background: rgba(120,120,120,0.2); }
+    .rts-quote { background: rgba(253,191,111,0.55); }
+    .rts-band { background: rgba(128,0,128,0.22); }
+    .rts-frontier { outline: 2px dotted purple; outline-offset: -1px; background: rgba(128,0,128,0.4); }
+    """
+
+    class RolloutTextSelector(anywidget.AnyWidget):
+        _esm = _ROLLOUT_TEXT_SELECTOR_ESM
+        _css = _ROLLOUT_TEXT_SELECTOR_CSS
+
+        tokens = traitlets.List(traitlets.Unicode()).tag(sync=True)
+        tooltips = traitlets.List(traitlets.Unicode()).tag(sync=True)
+        highlight_start = traitlets.Int(-1).tag(sync=True)
+        highlight_end = traitlets.Int(-1).tag(sync=True)
+        frontier_index = traitlets.Int(-1).tag(sync=True)
+        band_start = traitlets.Int(-1).tag(sync=True)
+        band_end = traitlets.Int(-1).tag(sync=True)
+
+    return (RolloutTextSelector,)
 
 
 @app.cell
@@ -266,7 +430,6 @@ def _(
     label_row = _label_match.iloc[0] if not _label_match.empty else None
 
     token_ids = [int(t) for t in _gen_row["generated_token_ids"]]
-    generated_text = _gen_row["generated_text"]
     num_tokens = int(_gen_row["num_tokens"])
     stop_reason = _gen_row["stop_reason"]
     entropy = np.asarray(label_row["entropy"], dtype=float) if label_row is not None else None
@@ -276,6 +439,7 @@ def _(
     # production) -- a paraphrased/hallucinated quote has no position and is skipped.
     onset_quote_text = None
     onset_quote_position = None
+    onset_quote_end = None
     _tokenizer = get_tokenizer(dataset_dd.value)
     for _entry in llm_judge_lookup.get((prompt_dd.value, int(rollout_dd.value)), []):
         _quote = _entry.get("onset_quote")
@@ -287,14 +451,14 @@ def _(
             continue
         onset_quote_text = _quote
         onset_quote_position = int(_span.start)
+        onset_quote_end = int(_span.stop)
         break
     return (
         entropy,
-        generated_text,
         label_row,
         num_tokens,
+        onset_quote_end,
         onset_quote_position,
-        onset_quote_text,
         stop_reason,
         token_ids,
     )
@@ -398,72 +562,37 @@ def _(layer_dd, mo, probe_runs_by_layer):
 
 @app.cell
 def _(mo):
-    mo.md("""
-    ## 3. Rollout text (onset_quote highlighted)
-    """)
-    return
-
-
-@app.cell
-def _(generated_text, html, mo, onset_quote_text):
-    _escaped = html.escape(generated_text)
-    if onset_quote_text:
-        _escaped_quote = html.escape(onset_quote_text)
-        _idx = _escaped.find(_escaped_quote)
-        if _idx != -1:
-            _escaped = (
-                _escaped[:_idx]
-                + '<mark style="background:#fdbf6f;">'
-                + _escaped_quote
-                + "</mark>"
-                + _escaped[_idx + len(_escaped_quote):]
-            )
-    mo.Html(
-        '<pre style="white-space:pre-wrap; font-family:monospace; font-size:0.85em; '
-        'max-height:420px; overflow-y:auto; padding:0.5em; border:1px solid #8883; border-radius:4px;">'
-        + _escaped
-        + "</pre>"
-    )
-    return
-
-
-@app.cell
-def _(mo):
     mo.md(r"""
-    ## 4. Frontier token and loop band
+    ## 3. Rollout text -- click to select the loop band
 
-    Click a row to mark the frontier; shift-click or drag across rows to
-    mark the loop band. Both tables are searchable (handy for jumping to a
-    recognizable word) and start with the row(s) `label.py`'s signals
-    already point at selected -- clear a selection to hide that marker on
-    the plot below.
+    The frontier is the first token of the loop band, so one selection sets
+    both: click a token to mark the band start (and frontier), then click
+    another token to mark the band end. Both come out as exact token indices
+    directly from the text, no separate table or typing needed. The orange
+    highlight is the llm-judge's `onset_quote`. The selection starts prefilled
+    from the signals `label.py` already computes for this rollout (the
+    digit-run-normalized onset position for the start, the first exact-repeat
+    span `find_longest_repeated_substring` finds for the end); click "clear
+    selection" and reselect if you disagree with the default.
     """)
     return
 
 
 @app.cell
-def _(entropy, label_row, np, pd, token_ids, token_texts):
-    _n = len(token_ids)
-    token_table_df = pd.DataFrame({"token_index": range(_n), "token_text": token_texts})
-    if entropy is not None:
-        token_table_df["entropy"] = np.round(entropy, 3)
-    if label_row is not None:
-        token_table_df["repetition_score"] = np.round(
-            np.asarray(label_row["repetition_score"], dtype=float), 3
-        )
-    return (token_table_df,)
-
-
-@app.cell
-def _(dataset_dd, get_tokenizer, token_ids):
+def _(dataset_dd, entropy, get_tokenizer, label_row, np, token_ids):
     _tokenizer = get_tokenizer(dataset_dd.value)
+    token_raw_texts = [_tokenizer.decode([tid], skip_special_tokens=False) for tid in token_ids]
 
-    def _display_token_text(text):
-        text = text.replace("\n", "↵").replace("\r", "↵").replace("\t", "→")
-        return text if text else "·"
-
-    token_texts = [_display_token_text(_tokenizer.decode([tid], skip_special_tokens=False)) for tid in token_ids]
-    return (token_texts,)
+    _repetition_score = (
+        np.asarray(label_row["repetition_score"], dtype=float) if label_row is not None else None
+    )
+    token_tooltips = [
+        f"#{_i}"
+        + (f" · entropy {entropy[_i]:.3f}" if entropy is not None else "")
+        + (f" · rep {_repetition_score[_i]:.3f}" if _repetition_score is not None else "")
+        for _i in range(len(token_ids))
+    ]
+    return token_raw_texts, token_tooltips
 
 
 @app.cell
@@ -481,34 +610,36 @@ def _(label_row, pd):
 
 
 @app.cell
-def _(band_end_default, band_start_default, mo, onset_default, token_table_df):
-    frontier_table = mo.ui.table(
-        token_table_df,
-        selection="single",
-        initial_selection=([onset_default] if onset_default is not None else []),
-        label="frontier token",
-        page_size=8,
+def _(
+    RolloutTextSelector,
+    band_end_default,
+    band_start_default,
+    mo,
+    onset_default,
+    onset_quote_end,
+    onset_quote_position,
+    token_raw_texts,
+    token_tooltips,
+):
+    text_selector = mo.ui.anywidget(
+        RolloutTextSelector(
+            tokens=token_raw_texts,
+            tooltips=token_tooltips,
+            highlight_start=(onset_quote_position if onset_quote_position is not None else -1),
+            highlight_end=(onset_quote_end if onset_quote_end is not None else -1),
+            frontier_index=(onset_default if onset_default is not None else -1),
+            band_start=(band_start_default if band_start_default is not None else -1),
+            band_end=(band_end_default if band_end_default is not None else -1),
+        )
     )
-    _band_initial = (
-        list(range(band_start_default, band_end_default + 1))
-        if band_start_default is not None and band_end_default is not None
-        else []
-    )
-    band_table = mo.ui.table(
-        token_table_df,
-        selection="multi",
-        initial_selection=_band_initial,
-        label="loop band tokens",
-        page_size=8,
-    )
-    mo.hstack([frontier_table, band_table], justify="space-between")
-    return band_table, frontier_table
+    text_selector
+    return (text_selector,)
 
 
 @app.cell
 def _(mo):
     mo.md("""
-    ## 5. Rendered metric
+    ## 4. Rendered metric
     """)
     return
 
@@ -574,14 +705,12 @@ def _(
 @app.cell
 def _(
     FIGURES_DIR,
-    band_table,
     cluster_labels,
     color_by_cluster_cb,
     dataset_dd,
     domain_dd,
     entropy,
     features_note,
-    frontier_table,
     metric_radio,
     mo,
     num_tokens,
@@ -593,6 +722,7 @@ def _(
     rollout_dd,
     show_onset_quote_cb,
     stop_reason,
+    text_selector,
 ):
     _metric_values = {
         "entropy": entropy,
@@ -605,11 +735,9 @@ def _(
         "probe_logit": "probe score (raw logit)",
     }[metric_radio.value]
 
-    _frontier_sel = frontier_table.value
-    _frontier_pos = int(_frontier_sel["token_index"].iloc[0]) if len(_frontier_sel) else None
-    _band_indices = band_table.value["token_index"].tolist() if len(band_table.value) else []
-    _band_start = min(_band_indices) if _band_indices else None
-    _band_end = max(_band_indices) if _band_indices else None
+    _frontier_pos = text_selector.frontier_index if text_selector.frontier_index >= 0 else None
+    _band_start = text_selector.band_start if text_selector.band_start >= 0 else None
+    _band_end = text_selector.band_end if text_selector.band_end >= 0 else None
 
     if _metric_values is None:
         rollout_figure = mo.md(

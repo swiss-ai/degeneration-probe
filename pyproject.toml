@@ -33,6 +33,7 @@ dependencies = [
   "anthropic>=0.75.0",
   "openai>=2.6.0",
   "claude-agent-sdk>=0.2.115",
+  "anywidget>=0.11.0",
 ]
 
 [dependency-groups]
