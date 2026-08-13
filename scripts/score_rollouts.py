@@ -148,9 +148,11 @@ def run(
     splits: Optional[List[str]],
     batch_size: int,
     layer: Optional[int] = None,
+    output_dir: Optional[Path] = None,
 ) -> List[Path]:
     config = load_run_config(run_dir)
     checkpoint_dir = run_dir / checkpoint
+    requested_output = output_dir
     output_dir = run_dir
 
     if layer is not None:
@@ -175,6 +177,14 @@ def run(
             "Name one with --layer, since a scores file holds one score per token "
             "and cannot represent several probes."
         )
+
+    if requested_output is not None:
+        # Scoring writes to one place per run and depth, so scoring a second
+        # checkpoint of the same depth would replace the first. Naming a
+        # destination is what lets several checkpoints of one run be compared,
+        # which is how a metric's trajectory over training is measured.
+        output_dir = requested_output
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     if not (checkpoint_dir / "probe_config.json").is_file():
         raise FileNotFoundError(f"No probe checkpoint at {checkpoint_dir}")
@@ -255,6 +265,12 @@ def main() -> None:
         default=None,
         help="Which depth to score, for a run that trained a head per layer.",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Where the scores go. Needed to keep several checkpoints of one run side by side.",
+    )
     args = parser.parse_args()
     run(
         args.run_dir.resolve(),
@@ -262,6 +278,7 @@ def main() -> None:
         splits=args.splits,
         batch_size=args.batch_size,
         layer=args.layer,
+        output_dir=args.output_dir.resolve() if args.output_dir else None,
     )
 
 

@@ -24,10 +24,15 @@ def _build(config, tmp_path):
 
 def test_defaults_produce_resumable_checkpoints_and_keep_the_best(tmp_path):
     args = _build(_experiment(), tmp_path)
-    assert args.save_strategy.value == "epoch"
-    assert args.eval_strategy.value == "epoch"
+    # Validation runs on a step cadence, and saving matches it: a metric that
+    # picks a step is useless if no weights were written there.
+    assert args.save_strategy.value == "steps"
+    assert args.eval_strategy.value == "steps"
+    assert args.save_steps == args.eval_steps
     assert args.load_best_model_at_end is True
-    assert args.save_total_limit == 2
+    # Every checkpoint is kept. They hold one small head per depth, and keeping
+    # them is what lets a selection rule be reconsidered without retraining.
+    assert args.save_total_limit is None
     # Selection keys off an operating point, not the loss and not a ranking. A
     # token loss is dominated by the trivially separable in-pattern tokens, and
     # a ranking metric reaches its ceiling while the probe is still improving,
@@ -100,3 +105,41 @@ def test_a_budget_smaller_than_one_example_still_takes_a_step():
     assert resolved["gradient_accumulation_steps"] == 1
     # Reported honestly as the overshoot it is, rather than as the request.
     assert resolved["tokens_per_step_realized"] == 4000
+
+
+def test_a_batch_that_overshoots_the_budget_is_refused_when_it_can_be_shrunk():
+    """A step cannot be smaller than one micro-batch, so it silently overshoots.
+
+    Left alone this hands the widest window several times the tokens of every
+    recipe it is compared with, which is invisible in the results and lands on
+    exactly the setting the comparison exists to test. A batch of more than one
+    example can be made smaller, so that case is refused with the two settings
+    that would fix it named.
+    """
+    from degeneration_probe.training.arguments import resolve_token_budget
+
+    with pytest.raises(ValueError, match="cannot come in under the requested"):
+        resolve_token_budget(
+            2048, valid_tokens=512_000, examples=1000, per_device_batch_size=8
+        )
+
+    # Halving the batch brings one micro-batch inside the budget exactly.
+    resolved = resolve_token_budget(
+        2048, valid_tokens=512_000, examples=1000, per_device_batch_size=4
+    )
+    assert resolved["tokens_per_step_realized"] == 2048
+    assert resolved["gradient_accumulation_steps"] == 1
+
+
+def test_every_window_in_a_sweep_lands_on_the_same_budget():
+    """The point of the budget is that only the choice of tokens differs."""
+    from degeneration_probe.training.arguments import resolve_token_budget
+
+    for window in (64, 128, 256, 512):
+        resolved = resolve_token_budget(
+            4096,
+            valid_tokens=window * 1000,
+            examples=1000,
+            per_device_batch_size=8,
+        )
+        assert resolved["tokens_per_step_realized"] == 4096, window

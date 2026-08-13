@@ -83,8 +83,12 @@ runtime:
   seed: 42
 
 validation:
-  strategy: epoch
-  steps: null
+  # Frequent enough to see where a head stops improving. Most heads settle
+  # inside the first few hundred steps, so a coarse cadence leaves the only
+  # interesting stretch of training unmeasured and the earliest checkpoint
+  # looking best by default.
+  strategy: steps
+  steps: 50
   # Rollouts the monitoring split is cut to, keeping every positive. Evaluation
   # reads whole rollouts while training reads a short window of one, so a probe
   # covering many depths pays for every token of every layer each time it is
@@ -100,9 +104,14 @@ checkpoint:
   root_dir: ${oc.env:PROBE_OUTPUT_DIR,outputs}
   # Checkpoints hold the probe head and the adapters only, so saving on the
   # validation cadence is cheap and every run stays resumable.
-  strategy: epoch
-  steps: null
-  save_total_limit: 2
+  # Selection compares checkpoints, so the saving cadence has to match the
+  # validation cadence or the step a metric picked has no weights behind it.
+  strategy: steps
+  steps: 50
+  # A checkpoint holds one small head per depth, so a long run's worth costs a
+  # few hundred megabytes. Keeping all of them is what allows a selection rule
+  # to be reconsidered later without retraining anything.
+  save_total_limit: null
   keep_best: true
   # Selection runs on the operating point rather than on a ranking. Telling a
   # mostly-degenerate rollout from a healthy one is easy, so ranking reaches

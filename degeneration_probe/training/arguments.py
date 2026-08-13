@@ -33,9 +33,33 @@ def resolve_token_budget(
     tokens_per_example = valid_tokens / max(1, examples)
     per_batch = per_device_batch_size * tokens_per_example
     accumulation = max(1, round(tokens_per_step / per_batch)) if per_batch > 0 else 1
+    realized = round(accumulation * per_batch)
+
+    # A single micro-batch larger than the whole step budget cannot be split, so
+    # the accumulation floor of one silently hands that recipe more tokens than
+    # every recipe it is about to be compared with. The failure is invisible in
+    # the results and lands hardest on the largest window, which is usually the
+    # one the comparison exists to test.
+    #
+    # Only a batch of more than one example can be made smaller, so that is the
+    # only case worth refusing. A single example wider than the budget is a
+    # property of the data rather than a misconfiguration, and there is no
+    # setting that would fix it; the realized figure above reports the overshoot
+    # so a comparison can account for it.
+    fixable = per_device_batch_size > 1
+    if fixable and per_batch > 0 and realized > 1.1 * tokens_per_step:
+        raise ValueError(
+            f"one micro-batch is {per_batch:.0f} tokens, so a step cannot come in under the "
+            f"requested {tokens_per_step}: it will see {realized} instead, which is "
+            f"{realized / tokens_per_step:.1f}x the budget every other recipe gets. "
+            "Either lower training.runtime.per_device_train_batch_size to at most "
+            f"{max(1, int(tokens_per_step / max(1.0, tokens_per_example)))}, or raise "
+            "training.budget.tokens_per_step for every recipe in the comparison."
+        )
+
     return {
         "tokens_per_step_requested": int(tokens_per_step),
-        "tokens_per_step_realized": round(accumulation * per_batch),
+        "tokens_per_step_realized": realized,
         "tokens_per_example": tokens_per_example,
         "gradient_accumulation_steps": accumulation,
     }

@@ -124,8 +124,17 @@ def test_an_explicit_sampling_seed_is_still_honoured():
 
 
 def test_best_checkpoint_selection_requires_matching_cadences():
+    """Keeping the best checkpoint needs a checkpoint at every step it judges.
+
+    Saving less often than validating means the step a metric picked may have no
+    weights behind it, and the run silently keeps a neighbour instead.
+    """
     resolved = _resolved()
-    resolved["training"]["checkpoint"]["strategy"] = "steps"
-    resolved["training"]["checkpoint"]["steps"] = 50
+    assert resolved["training"]["validation"]["steps"] == 50, "the default cadence moved"
+    resolved["training"]["checkpoint"]["steps"] = 200
+    with pytest.raises(ValueError, match="cadences to match"):
+        ExperimentConfig.from_dict(deepcopy(resolved))
+
+    resolved["training"]["checkpoint"]["strategy"] = "epoch"
     with pytest.raises(ValueError, match="cadences to match"):
         ExperimentConfig.from_dict(deepcopy(resolved))

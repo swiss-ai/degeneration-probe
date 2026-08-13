@@ -390,55 +390,67 @@ def _(mo):
 
 @app.cell
 def _():
-    # Settings are held as a mapping rather than a list of override strings, so
-    # that two recipes are the same recipe exactly when their settings match. A
-    # list would let one run spell out a default that another leaves implicit,
-    # and the two would look different while training the identical probe.
-    # Every run carries a head at every depth rather than picking one. Reading
-    # the residual stream is what a run spends its time on, and that cost is
-    # paid once whether one head or thirty-one hang off it, so depth stops
-    # being a variable that has to be swept and becomes an axis every result
-    # already has. Depth is then chosen when a result is read, not before it
-    # is measured.
+    # A run carries a head at every depth. Reading the residual stream is what
+    # a run spends its time on, and that cost is paid once whether one head or
+    # thirty-one hang off it, so depth stops being a variable that multiplies
+    # the number of runs and becomes an axis every result already has. Depth is
+    # chosen when a result is read, never before it is measured, and it is a
+    # scoring decision rather than a training one.
     PROBED_LAYERS = list(range(1, 32))
-    # Scoring writes one file per token per depth, so it is done for a few
-    # depths rather than all of them: the best found so far, a shallower
-    # neighbour to show the plateau is broad, and a late one to show the fall.
-    SCORED_LAYERS = [8, 12, 30]
+    # Every depth of every run is scored. Scoring a chosen few would be cheaper,
+    # but choosing them means deciding in advance which depths a result could
+    # possibly be read at, and that decision has to be made before the results
+    # exist. The depth profile of one recipe is then also a measurement rather
+    # than an assumption carried over from another.
     DEFAULT_LAYER = 12
+    # The depth Stage 1 selects, and the one Stage 3 trains its single probe
+    # at. Set it once the depth profile has been read; until then it is a
+    # placeholder and Stage 3's commands are not ready to run.
+    CHOSEN_DEPTH = DEFAULT_LAYER
+    SEEDS = [42, 43, 44]
 
     BASE = {
         "training.features.regime": "cached",
         "training.lora.enabled": "false",
-        # Equal budget: the same tokens per optimizer step and the same number
-        # of steps for every recipe, so the total tokens seen is held constant
-        # and only the choice of tokens varies.
-        "training.budget.tokens_per_step": 2048,
-        # Long enough that every depth has stopped improving. The good depths
-        # settle by step 400 and the late ones keep creeping to about 600, so
-        # this leaves margin without paying for it twice.
-        "training.runtime.max_steps": 800,
+        # Equal budget: the same tokens per optimizer step and the same cap on
+        # steps for every recipe, so the total gradient is held constant and
+        # only the choice of tokens varies.
+        #
+        # The number is large enough that the widest window still fits a whole
+        # micro-batch inside one step. A step cannot be smaller than one
+        # micro-batch, so a budget below batch times window silently hands the
+        # widest window more tokens than every recipe it is compared with.
+        "training.budget.tokens_per_step": 4096,
+        # A cap rather than a target. Training stops when every head has
+        # stopped improving, and a run that reaches this number is a run whose
+        # budget was too small rather than a run that finished.
+        "training.runtime.max_steps": 2000,
         "training.runtime.per_device_train_batch_size": 8,
+        # Often enough to see where a head stops improving. Most heads settle
+        # inside the first few hundred steps, so a coarse cadence leaves the
+        # only interesting stretch unmeasured and makes the earliest checkpoint
+        # look best by default.
         "training.validation.strategy": "steps",
-        "training.validation.steps": 200,
+        "training.validation.steps": 50,
         "training.checkpoint.strategy": "steps",
-        "training.checkpoint.steps": 200,
-        # Monitoring reads a fixed subsample rather than the whole split. The
-        # full split costs more than the training it is watching once every
-        # depth is scored on it.
+        "training.checkpoint.steps": 50,
+        # Every checkpoint is kept. Each holds one small head per depth, so a
+        # long run costs a few hundred megabytes, and keeping them is what lets
+        # a selection rule be reconsidered later without retraining anything.
+        "training.checkpoint.save_total_limit": "null",
+        # Monitoring reads a fixed subsample rather than the whole split, since
+        # a probe covering many depths pays for every token of every layer each
+        # time it is monitored.
         "training.validation.max_rollouts": 400,
-        # A run writes no end-of-run evaluation. Scoring happens afterwards
-        # from a checkpoint, one depth at a time, so evaluating every split at
-        # every depth inside the run would be work nothing reads.
+        # A run writes no end-of-run evaluation. Scoring happens afterwards from
+        # a checkpoint, one depth at a time.
         "training.validation.final_splits": "[]",
-        # Ranking saturates long before a probe is useful, so the checkpoint is
-        # chosen on the operating point instead.
-        "training.checkpoint.metric_for_best_model": "recall_at_budget",
         "training.runtime.seed": 42,
         # Every setting any experiment varies is named here even when it equals
         # the configured default, so that a recipe is described the same way
         # wherever it appears and identical recipes collapse to one run.
         "training.probe.layers": "[" + ",".join(str(n) for n in PROBED_LAYERS) + "]",
+        "training.selection.strategy": "frontier_window",
         "training.selection.window_size": 128,
         "training.selection.anchor": "centered",
         "training.selection.positive_fraction": 0.25,
@@ -447,6 +459,7 @@ def _():
         "training.loss.name": "bce",
         "training.loss.bce.use_pos_weight": "true",
     }
+
     LADDER_RUNGS = [
         "all_tokens",
         "rollout_balanced",
@@ -454,276 +467,295 @@ def _():
         "frontier_window",
         "frontier_window_hard_negative",
     ]
-    SEEDS = [42, 43, 44]
-    return BASE, DEFAULT_LAYER, LADDER_RUNGS, PROBED_LAYERS, SCORED_LAYERS, SEEDS
+    # Window size is positional only for the rules that place a window
+    # deliberately. For the first two it sets how tokens are tiled or how many
+    # each rollout contributes, which is a different question, so they are held
+    # at one size instead of swept.
+    POSITIONAL_RUNGS = ["random_window", "frontier_window", "frontier_window_hard_negative"]
+    WINDOWS = [64, 128, 256, 512]
+    return (
+        BASE,
+        CHOSEN_DEPTH,
+        DEFAULT_LAYER,
+        LADDER_RUNGS,
+        POSITIONAL_RUNGS,
+        PROBED_LAYERS,
+        SEEDS,
+        WINDOWS,
+    )
 
 
 @app.cell
-def _(BASE, LADDER_RUNGS, SEEDS):
+def _(BASE, CHOSEN_DEPTH, LADDER_RUNGS, POSITIONAL_RUNGS, SEEDS, WINDOWS):
     def recipe(**changes):
         return {**BASE, **changes}
 
-    def _ladder_runs():
+    def _grid_runs():
+        """Stage 1: which rule, and how large a window, decided together.
+
+        Locking a window before the ladder runs requires the winner to transfer
+        across rules, which is untested. Sweeping both at once costs more runs
+        and answers the question that was actually asked.
+        """
         runs = []
-        for rung, strategy in enumerate(LADDER_RUNGS, start=1):
-            for seed in SEEDS:
-                runs.append(
-                    {
-                        "label": f"rung {rung}: {strategy} (seed {seed})",
-                        "overrides": recipe(
-                            **{
-                                "training.selection.strategy": strategy,
-                                "training.runtime.seed": seed,
-                            }
-                        ),
-                    }
-                )
+        for strategy in LADDER_RUNGS:
+            sizes = WINDOWS if strategy in POSITIONAL_RUNGS else [128]
+            for window in sizes:
+                for seed in SEEDS:
+                    label = f"{strategy}, W={window} (seed {seed})"
+                    runs.append(
+                        {
+                            "label": label,
+                            "overrides": recipe(
+                                **{
+                                    "training.selection.strategy": strategy,
+                                    "training.selection.window_size": window,
+                                    "training.runtime.seed": seed,
+                                }
+                            ),
+                        }
+                    )
         return runs
 
-    def _window_runs():
+    def _horizon_runs():
+        """Stage 2a: does labelling the run-up positive make the alarm earlier?
+
+        The horizon is a label axis, but its leverage depends on how much run-up
+        the selection rule puts in front of the probe, so it is asked of three
+        rules that differ in exactly that. Under `all_tokens` a horizon of 256
+        adds about seven percent more positive tokens; under a centred window at
+        512 the same horizon adds nearly eighty. If the axis is inert at both
+        ends of that range, it is inert.
+
+        A window has to be wide enough to express the horizon or the comparison
+        measures the window instead: centred spends half its length after the
+        frontier and so needs W at least twice the horizon, trailing is all
+        run-up and needs W at least the horizon.
+        """
+        settings = [
+            ("all_tokens", "centered", 128, [0, 256, 1024]),
+            ("frontier_window", "centered", 512, [0, 128, 256]),
+            # A trailing window holds only tokens before the frontier, so a
+            # horizon of zero would leave it with no positive token at all.
+            ("frontier_window", "trailing", 512, [128, 256, 512]),
+        ]
         runs = []
-        for strategy in ("random_window", "frontier_window"):
-            for window in (64, 128, 256):
-                runs.append(
-                    {
-                        "label": f"{strategy}, W={window}",
-                        "overrides": recipe(
-                            **{
-                                "training.selection.strategy": strategy,
-                                "training.selection.window_size": window,
-                            }
-                        ),
-                    }
-                )
+        for strategy, anchor, window, horizons in settings:
+            for horizon in horizons:
+                for seed in SEEDS:
+                    runs.append(
+                        {
+                            "label": f"{strategy}/{anchor} W={window}, horizon {horizon} (seed {seed})",
+                            "overrides": recipe(
+                                **{
+                                    "training.selection.strategy": strategy,
+                                    "training.selection.anchor": anchor,
+                                    "training.selection.window_size": window,
+                                    "training.label.horizon": horizon,
+                                    "training.runtime.seed": seed,
+                                }
+                            ),
+                        }
+                    )
         return runs
 
-    def _layer_runs():
-        # Depth is no longer swept. One run carries a head at every depth, so
-        # the depth question is answered by reading one run along its layer
-        # axis, and this recipe is the same one the ladder trains at rung four.
-        # Planning it here tags that single run for both experiments rather
-        # than training it twice.
+    def _soft_runs():
+        """Stage 2b: a target that decays back through the run-up.
+
+        The decay length is bounded by the window for the same reason the
+        horizon is: a centred window shows W/2 tokens of run-up, and a decay
+        longer than that is a constant one over everything the probe sees.
+        """
         return [
             {
-                "label": "every depth at once",
-                "overrides": recipe(
-                    **{"training.selection.strategy": "frontier_window"}
-                ),
-            }
-        ]
-
-    def _label_runs():
-        # The window has to be wide enough to express the horizon, or the
-        # comparison measures the window instead. A centered window spends half
-        # its length after the frontier and so shows only W/2 tokens of run-up,
-        # which means it needs W >= 2N; a trailing window is all run-up and
-        # needs W >= N. Below that, two different horizons label every token in
-        # the window positive and train on identical data, and the two runs
-        # would be reported as a pair of points showing no difference.
-        #
-        # W is therefore fixed at 512 across the whole experiment, wide enough
-        # for the largest horizon at either anchor, and the tokens per step are
-        # raised to match so that a step still covers the same number of
-        # windows as elsewhere.
-        WIDE = {
-            "training.selection.strategy": "frontier_window",
-            "training.selection.window_size": 512,
-            "training.budget.tokens_per_step": 8192,
-        }
-        runs = [
-            {
-                "label": f"centered, horizon {horizon}",
-                "overrides": recipe(**WIDE, **{"training.label.horizon": horizon}),
-            }
-            for horizon in (0, 32, 128, 256)
-        ]
-        # A trailing window sits entirely before the frontier, so a horizon of
-        # zero would leave no positive token in it at all. Only horizons that
-        # reach back into the window are defined here.
-        runs += [
-            {
-                "label": f"trailing, horizon {horizon}",
-                "overrides": recipe(
-                    **WIDE,
-                    **{
-                        "training.selection.anchor": "trailing",
-                        "training.label.horizon": horizon,
-                    },
-                ),
-            }
-            for horizon in (128, 256, 512)
-        ]
-        return runs
-
-    def _shape_runs():
-        runs = [
-            {
-                "label": f"soft, {decay} over {length}",
+                "label": f"soft, {decay} over {length} (seed {seed})",
                 "overrides": recipe(
                     **{
-                        "training.selection.strategy": "frontier_window",
+                        "training.selection.window_size": 512,
                         "training.label.family": "frontier_soft",
                         "training.label.decay": decay,
                         "training.label.decay_length": length,
+                        # A soft target has no class to weight.
                         "training.loss.bce.use_pos_weight": "false",
+                        "training.runtime.seed": seed,
                     }
                 ),
             }
             for decay in ("exponential", "linear")
-            for length in (128, 512)
+            for length in (128, 256)
+            for seed in SEEDS
         ]
-        runs.append(
+
+    def _regression_runs():
+        """Stage 2c: a target defined everywhere, including on healthy text."""
+        return [
             {
-                "label": "regression on repetition score",
+                "label": f"regression on repetition score (seed {seed})",
                 "overrides": recipe(
                     **{
-                        "training.selection.strategy": "frontier_window",
                         "training.label.family": "token_signal",
                         "training.label.signal": "repetition_score",
                         "training.loss.name": "mse",
+                        "training.runtime.seed": seed,
                     }
                 ),
             }
-        )
-        return runs
+            for seed in SEEDS
+        ]
 
     def _balance_runs():
+        """Stage 2d: does correcting class imbalance twice change anything?
+
+        Expected to be inert, because a threshold re-derived per run absorbs a
+        calibration shift, which is most of what these two knobs do. Cheap
+        enough to settle rather than assume.
+        """
         return [
             {
-                "label": f"pos_weight {'on' if weight else 'off'}, positives {fraction}",
+                "label": f"pos_weight {'on' if weight else 'off'}, positives {fraction} (seed {seed})",
                 "overrides": recipe(
                     **{
-                        "training.selection.strategy": "frontier_window",
                         "training.loss.bce.use_pos_weight": str(weight).lower(),
                         "training.selection.positive_fraction": fraction,
+                        "training.runtime.seed": seed,
                     }
                 ),
             }
             for weight in (True, False)
             for fraction in (0.25, 0.5)
+            for seed in SEEDS
         ]
 
-    def _budget_runs():
-        # Long enough to run past the point where the metric stops improving,
-        # and validated often enough to see where that happens. Every depth is
-        # carried at once, so one run answers both how long to train and
-        # whether the depth ranking is a property of the layer or only of when
-        # training was stopped. The two are easy to confuse: a shallow depth
-        # that has converged and a late depth that is still climbing look the
-        # same at any single step.
-        return [
-            {
-                "label": "every depth, 3000 steps",
-                "overrides": recipe(
-                    **{
-                        "training.selection.strategy": "frontier_window",
-                        "training.runtime.max_steps": 3000,
-                        "training.validation.steps": 100,
-                        "training.checkpoint.steps": 100,
-                    }
-                ),
-                "sbatch": "--time=06:00:00",
+    def _adapted_runs():
+        """Stage 3: is the frozen representation the ceiling?
+
+        The adapted regime runs the model, so it carries one probe at one depth
+        rather than a head at every depth, and its control is a frozen run at
+        that same depth. One head of a many-headed run would differ in more than
+        the regime, since such a run selects on whichever depth leads and fits
+        one class weight for all of them.
+
+        A randomly initialised probe pushes gradients into the adapters before
+        it knows what it is looking for, which corrupts the representation while
+        the probe is still noise. The adapters therefore move an order of
+        magnitude more slowly than the head. Freezing them outright for the
+        first few hundred steps is the stronger version of the same fix and is
+        not implemented; if the slower rate is not enough, that is the next
+        thing to build rather than a reason to accept the result.
+
+        The depth is the one Stage 1 selects, which is a number this notebook
+        cannot know in advance. It is held in CHOSEN_DEPTH and is the single
+        edit Stage 3 needs.
+        """
+        runs = []
+        for seed in SEEDS:
+            common = {
+                "training.probe.layers": "null",
+                "training.probe.layer": CHOSEN_DEPTH,
+                "training.runtime.seed": seed,
             }
-        ]
+            runs.append(
+                {
+                    "label": f"adapted, LoRA over the probed depth (seed {seed})",
+                    "overrides": recipe(
+                        **common,
+                        **{
+                            "training.features.regime": "adapted",
+                            "training.lora.enabled": "true",
+                            "training.lora.layers": "all",
+                            "training.optimizer.lora_learning_rate": 1e-5,
+                        },
+                    ),
+                    "sbatch": "--time=08:00:00",
+                }
+            )
+            runs.append(
+                {
+                    "label": f"frozen control at the same depth (seed {seed})",
+                    "overrides": recipe(**common),
+                }
+            )
+        return runs
 
-    budget_runs = _budget_runs()
-    ladder_runs = _ladder_runs()
-    window_runs = _window_runs()
-    layer_runs = _layer_runs()
-    label_runs = _label_runs()
-    shape_runs = _shape_runs()
+    grid_runs = _grid_runs()
+    horizon_runs = _horizon_runs()
+    soft_runs = _soft_runs()
+    regression_runs = _regression_runs()
     balance_runs = _balance_runs()
+    adapted_runs = _adapted_runs()
     return (
+        adapted_runs,
         balance_runs,
-        budget_runs,
-        label_runs,
-        ladder_runs,
-        layer_runs,
-        shape_runs,
-        window_runs,
+        grid_runs,
+        horizon_runs,
+        regression_runs,
+        soft_runs,
     )
 
 
 @app.cell
 def _(
+    adapted_runs,
     balance_runs,
-    budget_runs,
-    label_runs,
-    ladder_runs,
-    layer_runs,
-    shape_runs,
-    window_runs,
+    grid_runs,
+    horizon_runs,
+    regression_runs,
+    soft_runs,
 ):
     EXPERIMENTS = [
         {
-            "id": "E9",
-            "title": "How long is long enough, and at what depth",
-            "depends_on": [],
-            "runs": budget_runs,
-            "shell": [],
-        },
-        {
-            "id": "E0",
+            "id": "S0",
             "title": "Baselines through the same protocol",
             "depends_on": [],
             "runs": [],
-            # One job: score all three baselines on all three splits, then put
-            # each through the evaluator with a persistence sweep.
             "shell": ["sbatch cluster/baselines.sbatch"],
         },
         {
-            "id": "E1",
-            "title": "How large should a window be?",
+            "id": "S1",
+            "title": "Which rule, and how large a window",
             "depends_on": [],
-            "runs": window_runs,
+            "runs": grid_runs,
             "shell": [],
         },
         {
-            "id": "E2",
-            "title": "The five-rung ladder",
+            "id": "S2a",
+            "title": "Does the horizon buy lead time?",
             "depends_on": [],
-            "runs": ladder_runs,
+            "runs": horizon_runs,
             "shell": [],
         },
         {
-            "id": "E3",
-            "title": "Which layer knows first?",
-            "depends_on": [],
-            "runs": layer_runs,
+            "id": "S2b",
+            "title": "Soft labels",
+            "depends_on": ["S1"],
+            "runs": soft_runs,
             "shell": [],
         },
         {
-            "id": "E4",
-            "title": "Buying lead time with the label",
-            "depends_on": [],
-            "runs": label_runs,
+            "id": "S2c",
+            "title": "Regression instead of detection",
+            "depends_on": ["S1"],
+            "runs": regression_runs,
             "shell": [],
         },
         {
-            "id": "E5",
-            "title": "Soft labels, and regression instead of detection",
-            "depends_on": [],
-            "runs": shape_runs,
-            "shell": [],
-        },
-        {
-            "id": "E6",
+            "id": "S2d",
             "title": "Class balance and calibration",
-            "depends_on": [],
+            "depends_on": ["S1"],
             "runs": balance_runs,
             "shell": [],
         },
         {
-            "id": "E7",
+            "id": "S3",
             "title": "Do adapters earn their cost?",
-            "depends_on": ["E1", "E2", "E3", "E4"],
-            "runs": [],
+            "depends_on": ["S1", "S2a", "S2b", "S2c", "S2d"],
+            "runs": adapted_runs,
             "shell": [],
         },
         {
-            "id": "E8",
+            "id": "S4",
             "title": "The held-out test, once",
-            "depends_on": ["E7"],
+            "depends_on": ["S3"],
             "runs": [],
             "shell": [],
         },
@@ -1049,14 +1081,7 @@ def _(Path, missing, pd, re, tagged_with):
             )
         return pd.concat(frames, ignore_index=True).sort_values(["layer", "run"])
 
-    return (
-        depth_table,
-        load_curves,
-        load_views,
-        protocol_table,
-        run_dirs_for,
-        scored_layers,
-    )
+    return load_curves, protocol_table, run_dirs_for
 
 
 @app.cell
@@ -1317,9 +1342,9 @@ def _(DEFAULT_LAYER, PROBED_LAYERS, mo):
         label="Split shown in every experiment below",
     )
     # Depth is an axis of every result rather than a property of a run, so it
-    # is chosen here, when a result is read. Training curves exist at every
-    # depth; protocol tables exist only where a run has been scored, which is
-    # a few depths per run because scoring writes a score for every token.
+    # is chosen here, when a result is read. Every depth of every scored run is
+    # available, and a run that has not been scored yet shows a message rather
+    # than an empty table.
     # A mapping rather than a list, so the value read downstream is the integer
     # depth and not the label that stands for it.
     layer_choice = mo.ui.dropdown(
@@ -1335,136 +1360,40 @@ def _(DEFAULT_LAYER, PROBED_LAYERS, mo):
 def _(mo):
     mo.md("""
     ---
-    # E9. How long is long enough, and at what depth
+    # How the stages fit together
 
-    **The question.** Two, sharing one sweep, because neither answer is worth
-    much without the other.
+    Four stages, run in order, each ending in a decision the next one needs.
+    Within a stage the runs are independent of one another and can all be
+    queued at once.
 
-    Every recipe is trained on the same token budget so that the choice of
-    tokens is the only thing separating them. That is only a fair constraint if
-    it is not also a cut-off: a recipe still improving when the budget runs out
-    was stopped, not constrained, and comparing it to another is comparing two
-    unfinished runs. This sweep trains far past the point of interest and
-    validates often enough to see where each curve flattens.
+    | stage | question | runs |
+    |---|---|---|
+    | **S0** | do model-free signals already do this? | none, one job |
+    | **S1** | which selection rule, and how large a window? | 42 |
+    | **S2a–d** | which target? | 54 |
+    | **S3** | is the frozen representation the ceiling? | 6 |
+    | **S4** | how does the winner do on held-out data? | none, scoring only |
 
-    The same runs vary the layer. Depth and training length are entangled,
-    because a layer that looks weak may simply converge more slowly, and a
-    short budget would report that as a property of the layer. Running several
-    depths at a length where all of them have finished separates the two.
+    **What every run shares.** A head at every depth, a token budget of 2048
+    per step, validation and a checkpoint every 50 steps with every checkpoint
+    kept, and a cap of 2000 steps that training is not expected to reach.
+    Three seeds wherever a claim ranks one recipe above another.
 
-    **What to expect, and why.** The metric should rise quickly and then
-    flatten; where it flattens is the budget every other experiment should use,
-    taken across layers rather than from the fastest one. On depth, the
-    expectation is a plateau over the middle layers with a falloff at both
-    ends: early layers should not yet represent anything as abstract as "I am
-    repeating myself", and the last layers are specialised for choosing the
-    next token, which is a narrower job than describing the state of the
-    generation.
+    **What stops a run.** Not the step cap. Each head is watched separately and
+    frozen once its token coverage stops improving; the run ends when the last
+    head is done. The checkpoint kept for a head is the one nearest the
+    frontier among those within a tolerance of its best coverage.
 
-    Read this before anything else. A comparison drawn from runs that were
-    still improving describes the budget, not the recipes.
+    Coverage decides *when to stop* because it is an average over tens of
+    thousands of tokens and moves smoothly. Distance from the frontier decides
+    *which checkpoint to keep* because it is what the probe is for. Using the
+    second to detect a plateau would stop runs on noise: it is a median over
+    roughly a hundred rollouts and swings by more between neighbouring
+    checkpoints than it moves over all of training.
+
+    **What is never tuned here.** The test splits are not read until S4.
+    Thresholds are frozen on validation and reused unchanged.
     """)
-    return
-
-
-@app.cell
-def _(show_commands):
-    show_commands("E9")
-    return
-
-
-@app.cell
-def _(run_status):
-    run_status("E9")
-    return
-
-
-@app.cell
-def _(FIGURES, load_curves, missing, plt):
-    def budget_figure():
-        frame = load_curves("E9")
-        # Asked on the metric the checkpoint is selected on. A ranking metric
-        # would answer the wrong question here: it flattens because it has run
-        # out of room, not because the probe has stopped improving.
-        metric = "val/recall_at_budget"
-        if frame.empty or metric not in frame.columns:
-            return missing(
-                "No finished run tagged `exp:E9` has written a validation curve yet."
-            )
-        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2))
-        # One curve per depth. A single run carries all of them, so these are
-        # the same optimizer steps over the same tokens throughout and the
-        # curves differ only in where the probe reads.
-        for label, group in frame.groupby("layer"):
-            points = group[["step", metric]].dropna().sort_values("step")
-            if not len(points):
-                continue
-            axes[0].plot(points["step"], points[metric], marker="", label=label)
-            # The same curve as distance from its own best, which is where a
-            # plateau is legible: flat here means more steps buy nothing.
-            best = points[metric].cummax()
-            axes[1].plot(points["step"], best.iloc[-1] - points[metric], label=label)
-        axes[0].set_ylabel("recall at a 1% false-alarm budget")
-        axes[0].set_title("does it flatten?")
-        axes[1].set_yscale("log")
-        axes[1].set_ylabel("gap to the run's final best")
-        axes[1].set_title("how far from converged")
-        for axis in axes:
-            axis.set_xlabel("step")
-            axis.grid(alpha=0.3)
-        axes[0].legend(fontsize=8, title="layer")
-        fig.tight_layout()
-        path = FIGURES / "E9_budget"
-        fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
-        fig.savefig(path.with_suffix(".png"), dpi=150, bbox_inches="tight")
-        return fig
-
-    budget_figure()
-    return
-
-
-@app.cell
-def _(load_curves, missing, mo, pd):
-    def plateau_table():
-        frame = load_curves("E9")
-        metric = "val/recall_at_budget"
-        if frame.empty or metric not in frame.columns:
-            return missing("No validation curve for any run tagged `exp:E9` yet.")
-        # One positive rollout out of the hundred-odd on the monitor is worth
-        # about a hundredth of recall, so anything finer than that is a single
-        # rollout changing its mind and not a run still improving.
-        MARGIN = 0.01
-        rows = []
-        for layer, group in frame.groupby("layer"):
-            points = group[["step", metric]].dropna().sort_values("step")
-            if not len(points):
-                continue
-            best = float(points[metric].max())
-            peak_step = int(points.loc[points[metric].idxmax(), "step"])
-            last_step = int(points["step"].iloc[-1])
-            # The first step reaching within a small margin of the best is the
-            # honest reading of "long enough": improvements past it are smaller
-            # than the seed-to-seed spread anything will be compared against.
-            within = points[points[metric] >= best - MARGIN]
-            rows.append(
-                {
-                    "layer": int(layer),
-                    "best recall": round(best, 5),
-                    "step of best": peak_step,
-                    f"first within {MARGIN}": int(within["step"].iloc[0]) if len(within) else None,
-                    "last step": last_step,
-                    "still improving at the end": peak_step >= last_step - 100,
-                }
-            )
-        return mo.ui.table(pd.DataFrame(rows).sort_values("layer"), selection=None)
-
-    plateau_table()
-    return
-
-
-@app.cell
-def _(layer_choice, protocol_table, split_choice):
-    protocol_table("E9", split_choice.value, layer_choice.value)
     return
 
 
@@ -1472,91 +1401,36 @@ def _(layer_choice, protocol_table, split_choice):
 def _(mo):
     mo.md("""
     ---
-    # E0. Baselines through the same protocol
+    # S0. Baselines through the same protocol
 
-    **The question.** How well do simple, model-free signals already do?
+    **The question.** How much of this can be done without a probe at all?
 
-    Three of them: the sliding repetition score, per-token entropy, and a
-    longest-repeated-substring match. Each is turned into a per-token score
-    and pushed through the identical evaluator, so the comparison is not
-    rhetorical.
+    Three model-free scorers go through the identical evaluator: a repetition
+    score over a sliding window, the longest repeated substring, and the
+    model's own predictive entropy. They see the same rollouts, get thresholds
+    frozen the same way, and are reported in the same four views.
 
-    **What to expect, and why.** Repetition scoring should be a genuinely
-    strong detector, because by the time a rollout is looping, repetition
-    is exactly what is there to see. Its weakness should be timing rather
-    than detection: it needs the loop to exist before it can measure it, so
-    it should fire late. Entropy should be weaker and noisier.
+    **What to expect.** Rollout-level detection is the easy question, so a
+    simple repetition counter should do well on it. The interesting comparison
+    is token coverage and distance from the frontier: a counter can only fire
+    once repetition has already happened, so it has no way to be early. A probe
+    that cannot beat it on those has not earned its cost.
 
-    This experiment also sets the persistence window $m$ for everything
-    that follows. The command sweeps $m$ over several values and reports
-    what each buys, which is why View D matters here: if a scorer's false
-    alarms are one token long, a larger $m$ removes them almost for free;
-    if they run for tens of tokens, no $m$ will help and the scorer is
-    confidently wrong rather than jittery.
-
-    Nothing depends on training, so this can run immediately.
+    **Why this runs first.** It depends on nothing, it is one job, and every
+    later number wants something to be measured against.
     """)
     return
 
 
 @app.cell
 def _(show_commands):
-    show_commands("E0")
+    show_commands("S0")
     return
 
 
 @app.cell
-def _(Path, missing, mo, pd):
-    def baseline_table(split):
-        rows = []
-        for name in ("repetition", "entropy", "lrs"):
-            path = Path("outputs/baselines") / name / "evaluation" / split / "view_a_detection.csv"
-            if not path.is_file():
-                continue
-            frame = pd.read_csv(path)
-            frame.insert(0, "baseline", name)
-            rows.append(frame)
-        if not rows:
-            return missing(
-                f"No baseline has protocol output on `{split}` yet. "
-                "Run the two commands above, in order."
-            )
-        return mo.ui.table(pd.concat(rows, ignore_index=True), selection=None)
-
-    return (baseline_table,)
-
-
-@app.cell
-def _(baseline_table, split_choice):
-    baseline_table(split_choice.value)
-    return
-
-
-@app.cell
-def _(Path, missing, mo, pd):
-    def persistence_comparison():
-        frames = []
-        for name in ("repetition", "entropy", "lrs"):
-            path = Path("outputs/baselines") / name / "evaluation" / "persistence_comparison.csv"
-            if not path.is_file():
-                continue
-            frame = pd.read_csv(path)
-            frame.insert(0, "baseline", name)
-            frames.append(frame)
-        if not frames:
-            return missing(
-                "No persistence sweep yet. It comes from `--compare-persistence` "
-                "in the commands above and is written to "
-                "`evaluation/persistence_comparison.csv`."
-            )
-        return mo.ui.table(pd.concat(frames, ignore_index=True), selection=None)
-
-    return (persistence_comparison,)
-
-
-@app.cell
-def _(persistence_comparison):
-    persistence_comparison()
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("S0", split_choice.value, layer_choice.value)
     return
 
 
@@ -1564,303 +1438,90 @@ def _(persistence_comparison):
 def _(mo):
     mo.md("""
     ---
-    # E1. How large should a window be?
+    # S1. Which rule, and how large a window
 
-    **The question.** A training example is a contiguous strip of $W$
-    tokens. Does $W$ matter, and which way?
+    **The question.** Two, deliberately asked together.
 
-    Six runs: $W \in \{64, 128, 256\}$ crossed with two rules, one that
-    places the window at random and one that anchors it on the frontier.
+    The five rungs each change exactly one decision about *which tokens the
+    probe learns from*, from the whole corpus down to windows placed on the
+    frontier and biased toward confusable negatives. The window size says how
+    much context one of those windows carries.
 
-    **What to expect, and why.** Repetition is a pattern *across* tokens,
-    so a window too short to contain a full repeat cannot show the probe
-    what a repeat looks like. That argues for larger $W$. Against it, the
-    token budget per step is fixed, so doubling $W$ halves the number of
-    independent examples per step, and windows drawn from the same rollout
-    are correlated. Somewhere between those two effects there should be a
-    best value, and it may differ between the two rules: an anchored window
-    already contains the interesting region, so it may need less room than
-    one placed at random.
+    These are not independent. An anchored window trades coverage for
+    earliness, and its size moves the probe along that same trade-off, so
+    picking a size first and locking it assumes the winner transfers across
+    rules. That assumption is untested, and asking both at once costs 42 runs
+    instead of 15 and answers the question that was actually asked.
 
-    Whatever wins here is used for the ladder. The ladder is run at
-    $W = 128$ regardless, so the two experiments can proceed in parallel;
-    if this one says otherwise, the ladder is rerun at the better value.
+    Window size is swept only for the three rules that place a window
+    deliberately. For `all_tokens` it sets how tokens are tiled and for
+    `rollout_balanced` how many each rollout contributes, which are different
+    questions and not this one.
+
+    **What to expect.** Rollout-level recall will not separate the rungs: every
+    rule catches nearly every degenerate rollout, so that view saturates. The
+    separation, if there is one, shows up in token coverage and in distance
+    from the frontier, and it is those two the stage is read on.
+
+    **Scoring.** Every depth of every run, on validation. A depth costs about
+    three minutes, so a run is about an hour and a half and the stage is roughly
+    seventy GPU-hours, which parallelises down to an afternoon.
+
+    Scoring a chosen few would be four times cheaper and buys a decision nobody
+    wants to make: which depths a result could possibly be read at, decided
+    before the results exist. It also makes the depth profile of every rule a
+    measurement rather than one rule's profile assumed to hold for the others.
+    Whether the best depth depends on the selection rule is then something this
+    stage answers rather than something it takes on trust.
+
+    Depth is never a training choice. Every run already carries every depth;
+    scoring only decides which of them can be read.
     """)
     return
 
 
 @app.cell
 def _(show_commands):
-    show_commands("E1")
-    return
-
-
-@app.cell
-def _(run_status):
-    run_status("E1")
-    return
-
-
-@app.cell
-def _(curve_figure, layer_choice):
-    curve_figure("E1", layer_choice.value)
-    return
-
-
-@app.cell
-def _(layer_choice, protocol_table, split_choice):
-    protocol_table("E1", split_choice.value, layer_choice.value)
-    return
-
-
-@app.cell
-def _(layer_choice, operating_figure, split_choice):
-    operating_figure("E1", split_choice.value, layer_choice.value)
+    show_commands("S1")
     return
 
 
 @app.cell
 def _(mo):
     mo.md("""
-    ---
-    # E2. The five-rung ladder
-
-    **The question.** Which tokens should the probe be trained on? This is
-    the central experiment.
-
-    Five rules, each changing exactly one decision relative to the one
-    before it, every rung at three seeds and on an identical token budget:
-
-    1. **all_tokens** — every token of every rollout
-    2. **rollout_balanced** — a fixed budget per rollout, drawn at random
-    3. **random_window** — the same budget, now contiguous
-    4. **frontier_window** — the same window, anchored on the frontier
-    5. **+ hard negatives** — negative windows biased toward repetitive spans
-
-    Because adjacent rungs differ by one decision, the difference between
-    them is attributable to that decision. Differences are read against the
-    seed-to-seed spread of the two groups added in quadrature; anything
-    smaller than that spread is not a result.
-
-    **What to expect, and why.** The largest single step should be at rung
-    4. Up to that point a probe can score well by learning "this text is
-    long and repetitive", which is a property of the whole rollout rather
-    than of the moment degeneration begins. A window straddling the
-    frontier contains both sides of that moment and removes the shortcut.
-
-    Hard negatives at rung 5 should show up in the false-alarm rate and in
-    View D rather than in AUC: they are aimed at the specific error of
-    mistaking ordinary repetitive text for a loop.
-
-    The risk worth naming in advance: rung 1 may already be close to
-    ceiling on detection, in which case the ladder has to be read on
-    precision, lead time and false alarms, and the AUC column will say
-    nothing.
-    """)
-    return
-
-
-@app.cell
-def _(show_commands):
-    show_commands("E2")
-    return
-
-
-@app.cell
-def _(run_status):
-    run_status("E2")
-    return
-
-
-@app.cell
-def _(curve_figure, layer_choice):
-    curve_figure("E2", layer_choice.value)
-    return
-
-
-@app.cell
-def _(layer_choice, protocol_table, split_choice):
-    protocol_table("E2", split_choice.value, layer_choice.value)
-    return
-
-
-@app.cell
-def _(layer_choice, operating_figure, split_choice):
-    operating_figure("E2", split_choice.value, layer_choice.value)
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md("""
-    Pooled over seeds, and read as adjacent-rung differences. The
-    `_beats_noise` flag is true only when a difference exceeds the spread
-    it came from.
+    **Scoring command**, once the runs have finished. One job per run, and they
+    are all independent of one another:
 
     ```bash
-    .venv/bin/python scripts/compare_runs.py --split val --ladder     <group of rung 1> <group of rung 2> <group of rung 3>     <group of rung 4> <group of rung 5>
+    for run in outputs/*/2*/; do
+        sbatch --time=03:00:00 cluster/score_layers.sbatch         "$(realpath $run)" "$(seq -s' ' 1 31)" val
+    done
     ```
-
-    The group names are in the status table above.
     """)
-    return
-
-
-@app.cell
-def _(layer_choice, missing, mo, pd, run_dirs_for, split_choice):
-    def pooled_ladder(split, layer):
-        try:
-            from degeneration_probe.analysis.run_comparison import (
-                collect_results,
-                collect_runs,
-                pool_seeds,
-            )
-        except ImportError:
-            return missing("`degeneration_probe` is not importable from this kernel.")
-        if not run_dirs_for("E2"):
-            return missing("No finished run tagged `exp:E2` yet.")
-        runs = collect_runs("outputs")
-        if runs.empty:
-            return missing("No runs under `outputs/`.")
-        results = collect_results(runs[runs["status"] == "finished"], split, layer)
-        if results.empty:
-            return missing(
-                f"No protocol output on `{split}` at layer {layer} for any run."
-            )
-        pooled = pool_seeds(results)
-        return mo.ui.table(pd.DataFrame(pooled).round(4), selection=None)
-
-    pooled_ladder(split_choice.value, layer_choice.value)
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md("""
-    ---
-    # E3. Which layer knows first?
-
-    **The question.** The probe reads one layer. Which one, and how much
-    does it matter?
-
-    Nine runs across the depth of a 32-layer model. This is the cheapest
-    high-information experiment available, because activations for every
-    layer of every rollout are already on disk: the sweep costs training
-    time only.
-
-    **What to expect, and why.** A broad plateau over the later-middle
-    layers, falling off at both ends. Very early layers should not yet
-    represent anything as abstract as "I am repeating myself"; the very
-    last layer is specialised for predicting the next token, which is a
-    narrower job than describing the state of the generation.
-
-    The interesting outcome is the one that would be useful rather than the
-    one that is expected: if a much earlier layer works nearly as well as a
-    late one, a deployed probe could run on a truncated forward pass and
-    cost a fraction of a full one.
-    """)
-    return
-
-
-@app.cell
-def _(show_commands):
-    show_commands("E3")
     return
 
 
 @app.cell
 def _(run_status):
-    run_status("E3")
+    run_status("S1")
     return
 
 
 @app.cell
-def _(FIGURES, missing, plt, tagged_with):
-    def layer_figure():
-        frame = tagged_with("E3")
-        if frame.empty or "status" not in frame.columns:
-            return missing("No run tagged `exp:E3` found under `outputs/`.")
-        frame = frame[frame["status"] == "finished"].dropna(subset=["layer", "best"])
-        if frame.empty:
-            return missing("No finished run tagged `exp:E3` has a best metric yet.")
-        frame = frame.sort_values("layer")
-        fig, axis = plt.subplots(figsize=(6.4, 4.0))
-        axis.plot(frame["layer"], frame["best"], marker="o")
-        axis.set_xlabel("probe layer")
-        axis.set_ylabel(frame["selected_on"].iloc[0] or "best metric")
-        axis.set_title("selection metric by depth")
-        axis.grid(alpha=0.3)
-        fig.tight_layout()
-        path = FIGURES / "E3_layers"
-        fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
-        fig.savefig(path.with_suffix(".png"), dpi=150, bbox_inches="tight")
-        return fig
-
-    layer_figure()
+def _(curve_figure, layer_choice):
+    curve_figure("S1", layer_choice.value)
     return
 
 
 @app.cell
 def _(layer_choice, protocol_table, split_choice):
-    protocol_table("E3", split_choice.value, layer_choice.value)
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    ---
-    # E4. Buying lead time with the label
-
-    **The question.** An alarm is only useful if it arrives in time. Can
-    the label be used to buy earliness, and what does it cost?
-
-    Two things vary together, because they interact. The **horizon** $N$
-    marks the $N$ tokens before the frontier as positive too, explicitly
-    teaching the probe to fire early. The **anchor** decides whether the
-    training window straddles the frontier or sits entirely before it.
-
-    A trailing window with a horizon of zero contains no positive token at
-    all, so that combination is refused at dataset construction rather than
-    trained silently. Only horizons that reach back into the window appear
-    here.
-
-    **What to expect, and why.** A clean trade. Larger $N$ should move the
-    median alarm earlier and cost precision, because tokens that are not
-    yet degenerate are being labelled as if they were. The trailing anchor
-    asks the sharper question: can the run-up alone predict the loop, with
-    the probe never having seen the loop itself during training? If it can,
-    that is the strongest form of the result, since it cannot be explained
-    by the probe recognising repetition it has already been shown.
-
-    Read this one against View C rather than View A, and keep in mind that
-    the frontier itself carries positional uncertainty, so differences of a
-    few tokens mean nothing.
-    """)
-    return
-
-
-@app.cell
-def _(show_commands):
-    show_commands("E4")
-    return
-
-
-@app.cell
-def _(run_status):
-    run_status("E4")
-    return
-
-
-@app.cell
-def _(layer_choice, protocol_table, split_choice):
-    protocol_table("E4", split_choice.value, layer_choice.value)
+    protocol_table("S1", split_choice.value, layer_choice.value)
     return
 
 
 @app.cell
 def _(layer_choice, operating_figure, split_choice):
-    operating_figure("E4", split_choice.value, layer_choice.value)
+    operating_figure("S1", split_choice.value, layer_choice.value)
     return
 
 
@@ -1868,45 +1529,64 @@ def _(layer_choice, operating_figure, split_choice):
 def _(mo):
     mo.md("""
     ---
-    # E5. Soft labels, and regression instead of detection
+    # S2a. Does the horizon buy lead time?
 
-    **The question.** Does degeneration have to be framed as a moment at
-    all?
+    **The question.** The hard frontier label calls a token one position before
+    the loop as innocent as one a thousand positions before. The horizon moves
+    that boundary earlier, asking the probe to fire while the text still looks
+    fine. Whether that produces an earlier alarm is the whole of its claim.
 
-    Two alternatives to the hard step. **Soft labels** ramp the target up
-    towards the frontier instead of switching at it, over two shapes and
-    two lengths. **Regression** abandons the frontier entirely and predicts
-    a continuous per-token repetition score.
+    **Why it is asked of three rules.** The horizon is a property of the label,
+    but its leverage depends on how much run-up the selection rule puts in
+    front of the probe. Under `all_tokens` a horizon of 256 adds about seven
+    percent more positive tokens, because onsets land early and most of a
+    degenerate rollout is already loop. Under a centred window at 512 the same
+    horizon adds nearly eighty percent. A trailing window is all run-up, so the
+    horizon controls its entire positive class.
 
-    **What to expect, and why.** Soft labels should land between the hard
-    horizons of E4, with a smoother score trajectory. That smoothness
-    should help persistence specifically: an alarm built from a gradually
-    rising score is less likely to flicker than one built from a step.
+    Asking only where leverage is high would leave the interaction untested,
+    and asking only where it is low would predict a null from the label counts
+    alone. Both ends are therefore in.
 
-    Regression is a different task wearing the same clothes. It predicts
-    *how repetitive* rather than *whether degenerate*, so it should do
-    relatively better on coverage (View B) and relatively worse on rollout
-    detection (View C and A). It is included as a check that the frontier
-    framing earns its place, not because it is expected to win.
+    **The constraint that makes this measurable.** A window has to be wide
+    enough to express the horizon. A centred window spends half its length past
+    the frontier, so it needs a width of at least twice the horizon; a trailing
+    window needs at least the horizon. Below that, two different horizons label
+    every token in the window positive, train on identical data, and get
+    reported as two points that differ in nothing.
+
+    **What to expect.** A previous single-seed attempt found the median alarm
+    moving by a couple of tokens across an eightfold range of horizons, which
+    is under the seed-to-seed spread and so cannot be distinguished from no
+    effect. Three seeds settles that. This stage is also read on **distance**
+    from the frontier rather than signed offset: if the frontier marks where
+    degeneration begins, firing five hundred tokens early is a false alarm
+    inside a positive rollout rather than an achievement.
     """)
     return
 
 
 @app.cell
 def _(show_commands):
-    show_commands("E5")
+    show_commands("S2a")
     return
 
 
 @app.cell
 def _(run_status):
-    run_status("E5")
+    run_status("S2a")
     return
 
 
 @app.cell
 def _(layer_choice, protocol_table, split_choice):
-    protocol_table("E5", split_choice.value, layer_choice.value)
+    protocol_table("S2a", split_choice.value, layer_choice.value)
+    return
+
+
+@app.cell
+def _(layer_choice, operating_figure, split_choice):
+    operating_figure("S2a", split_choice.value, layer_choice.value)
     return
 
 
@@ -1914,47 +1594,138 @@ def _(layer_choice, protocol_table, split_choice):
 def _(mo):
     mo.md("""
     ---
-    # E6. Class balance and calibration
+    # S2b. Soft labels
 
-    **The question.** Positives are rare. Two mechanisms correct for that,
-    and they can be applied together: over-sampling positives when
-    composing batches, and weighting the positive class in the loss. Does
-    either help, and does applying both correct twice?
+    **The question.** The same frontier with the step replaced by a decay, so
+    that closer to the loop means more degenerate without committing to a hard
+    cut. The decay length says how far back the run-up is taken to reach.
 
-    Four runs: the class weight on and off, crossed with two positive
-    fractions.
+    **The constraint.** The same bound as the horizon, with the decay length in
+    its place. A centred window shows half its width of run-up, so a decay
+    longer than that is a constant one over everything the probe sees. These
+    run at a width of 512 with decay lengths of 128 and 256 for that reason.
 
-    **What to expect, and why.** Very little movement in AUC, which is
-    rank-based and largely indifferent to how the classes are weighted.
-    Substantial movement in where the raw scores sit, which the threshold
-    step then absorbs, since thresholds are chosen by budget rather than
-    fixed at 0.5.
+    **What to expect.** The class weight is off here, because a soft target has
+    no class to weight, which also means the loss is not comparable with the
+    hard-label runs and only the protocol views are.
 
-    The quantity to watch is the effective ratio recorded beside each run:
-    it lands on one when the weight matches the sampled population, and
-    departs from one when the imbalance has been corrected twice or not at
-    all. This is also the experiment that shows why the unweighted
-    validation loss exists, since the weighted one moves here for reasons
-    that have nothing to do with the probe.
+    If the earlier finding holds that anchored rules win by reading the
+    approach better rather than by reading the loop differently, then a target
+    that grades the approach is aimed at the same mechanism from the label side
+    and is the most likely of the target axes to move something.
     """)
     return
 
 
 @app.cell
 def _(show_commands):
-    show_commands("E6")
+    show_commands("S2b")
     return
 
 
 @app.cell
 def _(run_status):
-    run_status("E6")
+    run_status("S2b")
+    return
+
+
+@app.cell
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("S2b", split_choice.value, layer_choice.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # S2c. Regression instead of detection
+
+    **The question.** A target that exists everywhere, including on healthy
+    rollouts, where a nonzero repetition score describes text that is genuinely
+    repetitive and perfectly legitimate.
+
+    This trains a different concept from "this rollout has broken", which is
+    exactly why it is an axis and not a foregone conclusion. A probe that
+    tracks repetition will fire on a numbered list; a probe that tracks
+    degeneration should not.
+
+    **What to expect.** Better token coverage inside a loop, because the target
+    is dense there, and worse false-alarm behaviour on legitimate repetition.
+    The comparison to watch is the token-level false-positive rate at a fixed
+    budget, not recall.
+    """)
+    return
+
+
+@app.cell
+def _(show_commands):
+    show_commands("S2c")
+    return
+
+
+@app.cell
+def _(run_status):
+    run_status("S2c")
+    return
+
+
+@app.cell
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("S2c", split_choice.value, layer_choice.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # S2d. Class balance and calibration
+
+    **The question.** Imbalance can be corrected in the composition of the
+    training stream or in the loss, and doing both at once corrects it twice.
+    This crosses the class weight with the fraction of positive windows.
+
+    **What to expect.** Very likely nothing. Both knobs mostly shift where the
+    scores sit rather than how well they separate, and a threshold re-derived
+    per run absorbs a shift. The reason to run it anyway is that "very likely
+    nothing" is a prediction, it costs twelve runs, and leaving it unmeasured
+    means every later result carries an untested assumption.
+
+    The number that would change the verdict is the score spread: a probe whose
+    scores collapse toward a constant converges nicely and distinguishes
+    nothing, and that failure is invisible in the loss.
+    """)
+    return
+
+
+@app.cell
+def _(show_commands):
+    show_commands("S2d")
+    return
+
+
+@app.cell
+def _(run_status):
+    run_status("S2d")
+    return
+
+
+@app.cell
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("S2d", split_choice.value, layer_choice.value)
     return
 
 
 @app.cell
 def _(Path, json, missing, mo, pd, run_dirs_for):
     def composition_table(exp_id):
+        """What the probe actually saw, split by split, as it was assembled.
+
+        Composition and the class weight both correct imbalance, so the pair is
+        read together: the realized positive rate of the training stream beside
+        the weight in force is what makes a double correction visible.
+        """
         rows = []
         for run_dir in run_dirs_for(exp_id):
             path = Path(run_dir) / "dataset_summary.json"
@@ -1979,13 +1750,73 @@ def _(Path, json, missing, mo, pd, run_dirs_for):
             return missing(f"No finished run tagged `exp:{exp_id}` has a dataset summary yet.")
         return mo.ui.table(pd.DataFrame(rows), selection=None)
 
-    composition_table("E6")
+    return (composition_table,)
+
+
+@app.cell
+def _(composition_table):
+    composition_table("S2d")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # S3. Do adapters earn their cost?
+
+    **The question.** Everything so far reads a frozen representation. If the
+    run-up carries a signal the probe cannot reach, the limit might be the
+    representation rather than the label or the selection rule. Low-rank
+    adapters let the representation move, at a cost per configuration orders of
+    magnitude higher.
+
+    **Why it runs at one depth.** Sweeping depth inside a run works because the
+    stored activations hold every layer. An adapted run has no stored
+    activations, so it carries one probe at one depth and places its adapters
+    up to that depth. The depth is the one S1 selected.
+
+    **Why the control is its own run.** The comparison needs a frozen run at
+    the same depth trained the same way, not one head of a many-headed run. A
+    many-headed run selects its checkpoint on whichever depth leads and fits one
+    class weight across all of them, so it differs from an adapted run in more
+    than the regime.
+
+    **What went wrong the first time, and what changed.** An earlier attempt
+    was already worse than frozen at its first evaluation and got steadily
+    worse, with validation loss climbing while ranking stayed high. That is a
+    randomly initialised probe pushing gradients into the adapters before it
+    knows what it is looking for: the ordering survives, the calibration does
+    not, and a few confidently wrong negatives push the threshold up and
+    collapse recall. The adapters now move an order of magnitude more slowly
+    than the head. Freezing them outright for the first few hundred steps is the
+    stronger version of the same fix and is not implemented; if the slower rate
+    is not enough, that is the next thing to build.
+    """)
+    return
+
+
+@app.cell
+def _(show_commands):
+    show_commands("S3")
+    return
+
+
+@app.cell
+def _(run_status):
+    run_status("S3")
     return
 
 
 @app.cell
 def _(curve_figure, layer_choice):
-    curve_figure("E6", layer_choice.value)
+    curve_figure("S3", layer_choice.value)
+    return
+
+
+@app.cell
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("S3", split_choice.value, layer_choice.value)
     return
 
 
@@ -1993,67 +1824,43 @@ def _(curve_figure, layer_choice):
 def _(mo):
     mo.md("""
     ---
-    # E7. Do adapters earn their cost?
+    # S4. The held-out test, once
 
-    **The question.** Every experiment so far trains a head on frozen,
-    cached activations. Letting the model itself adapt costs roughly ten
-    times as much. Is it worth it?
+    **The question.** Everything up to here was chosen on validation data. This
+    is the only number that says how the winner behaves on data nothing was
+    tuned against.
 
-    The winning recipe from E1 to E4, run both ways at three seeds.
+    **How it runs.** No training. The winning recipe is scored on the two test
+    splits using the thresholds already frozen on validation, applied
+    unchanged. The reporting tool refuses to produce a test report for a scorer
+    with no frozen thresholds, so the leak is structurally impossible rather
+    than merely discouraged.
 
-    **What to expect, and why.** Adapters should buy something, since they
-    can reshape the representation towards the task rather than merely
-    reading it. The question is whether the gain clears the seed-to-seed
-    noise. If it does not, that is the most useful negative result in the
-    whole plan: every future sweep stays cheap, and the claim becomes the
-    stronger one that the signal is already present in the unmodified
-    model rather than manufactured by fine-tuning.
+    **How it is read.** Held-out domains are reported per domain and never
+    pooled. Beside the frozen-threshold numbers sits the threshold-free ranking
+    for each domain, because the two together separate a calibration shift, in
+    which the ordering still works and the threshold no longer fits, from a
+    representation failure, in which the ordering itself does not transfer.
+    Those call for different fixes and one number cannot tell them apart.
 
-    **Depends on E1, E2, E3 and E4**, since "the winning recipe" is their
-    output. Commands appear once those are read.
+    Any per-domain cell backed by very few positive rollouts is marked
+    anecdotal rather than quoted as a rate.
+
+    **After this, nothing is tuned.** A second pass over the test splits with a
+    different recipe would make them a validation set with extra steps.
     """)
     return
 
 
 @app.cell
-def _(run_status):
-    run_status("E7")
+def _(show_commands):
+    show_commands("S4")
     return
 
 
 @app.cell
-def _(mo):
-    mo.md("""
-    ---
-    # E8. The held-out test, once
-
-    **The question.** Does any of this survive contact with data that
-    played no part in choosing it?
-
-    The single chosen recipe, scored on the in-domain test split and on
-    held-out domains, with thresholds frozen from validation and the
-    baselines carried through the identical protocol.
-
-    **What to expect, and why.** A drop from validation to held-out
-    domains, because held-out domains are the real test of whether the
-    probe learned degeneration or learned one domain's flavour of it.
-    Per-domain results must respect the minimum-positive guard: at least
-    one domain contributes almost no positive rollouts and cannot support
-    a rate at all.
-
-    **This runs once.** Every choice must already be frozen before it does,
-    which is what the whole validation-only threshold discipline exists to
-    protect. Re-running it after seeing the result would quietly turn the
-    test split into a second validation set.
-
-    **Depends on E7.**
-    """)
-    return
-
-
-@app.cell
-def _(run_status):
-    run_status("E8")
+def _(layer_choice, protocol_table, split_choice):
+    protocol_table("S4", split_choice.value, layer_choice.value)
     return
 
 
