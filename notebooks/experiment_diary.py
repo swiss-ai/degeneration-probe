@@ -1377,6 +1377,153 @@ def _(DEFAULT_LAYER, REPO, all_runs, missing, mo, pd):
 
 @app.cell
 def _(mo):
+    mo.md(r"""
+    ### Choosing the checkpoint after the fact
+
+    Selection during a run reads one number, and that number has to be
+    picked before any of this is known. Every checkpoint is kept and every
+    evaluation is recorded per depth, so the choice does not have to stand:
+    a rule can be applied to the recorded history afterwards and the
+    checkpoint it names loaded, without retraining anything.
+
+    Two limits are worth stating. Only what the monitor recorded can be
+    re-selected on, which is the rollout-level view and the loss; coverage
+    and distance from the frontier are not in it and need the scoring
+    pipeline run over checkpoints. And the monitor is a thinned split, so
+    what it supports is choosing a checkpoint, never reporting a result.
+
+    The table names, for one depth, the step each candidate rule would
+    choose. Where the rules disagree, the number carried into the results
+    is a consequence of the rule and not of the run.
+    """)
+    return
+
+
+@app.cell
+def _(Path, pd, re):
+    DEPTH_METRIC = re.compile(r"^val/layer(?P<layer>\d+)/(?P<metric>.+)$")
+
+    # Whether a larger value is better, for every metric worth selecting on.
+    DIRECTION = {
+        "recall_at_budget": True,
+        "rollout_auc": True,
+        "rollout_ap": True,
+        "loss": False,
+        "loss_unweighted": False,
+    }
+
+    def depth_curves(run_dir):
+        """One row per (step, depth) of what validation recorded."""
+        path = Path(run_dir) / "history.parquet"
+        if not path.is_file():
+            return pd.DataFrame()
+        frame = pd.read_parquet(path)
+        pieces = []
+        for column in frame.columns:
+            match = DEPTH_METRIC.match(column)
+            if match is None:
+                continue
+            pieces.append(
+                pd.DataFrame(
+                    {
+                        "step": frame["step"],
+                        "layer": int(match.group("layer")),
+                        "metric": match.group("metric"),
+                        "value": frame[column],
+                    }
+                )
+            )
+        if not pieces:
+            return pd.DataFrame()
+        tidy = pd.concat(pieces, ignore_index=True).dropna(subset=["value"])
+        return (
+            tidy.pivot_table(index=["step", "layer"], columns="metric", values="value")
+            .reset_index()
+            .rename_axis(columns=None)
+        )
+
+    def select_step(curves, metric, layer):
+        """The checkpoint a rule names for one depth. Ties go to the earliest.
+
+        Earliest rather than latest because a tie means the rule cannot tell
+        the two apart, and the cheaper of two indistinguishable checkpoints is
+        the one that spent less to get there.
+        """
+        if curves.empty or metric not in curves.columns:
+            return None
+        one = curves[curves["layer"] == layer].sort_values("step")
+        one = one.dropna(subset=[metric])
+        if one.empty:
+            return None
+        target = one[metric].max() if DIRECTION[metric] else one[metric].min()
+        return int(one.loc[one[metric] == target, "step"].iloc[0])
+
+    def selection_spread(curves, metric, layers=None):
+        """Where each depth peaks, which a single global choice has to ignore."""
+        if curves.empty or metric not in curves.columns:
+            return pd.DataFrame()
+        layers = sorted(curves["layer"].unique()) if layers is None else layers
+        return pd.DataFrame(
+            [
+                {
+                    "layer": layer,
+                    "selects at": select_step(curves, metric, layer),
+                    "value there": round(
+                        float(
+                            curves[
+                                (curves["layer"] == layer)
+                                & (curves["step"] == select_step(curves, metric, layer))
+                            ][metric].iloc[0]
+                        ),
+                        4,
+                    ),
+                    "distinct values": curves[curves["layer"] == layer][metric].nunique(),
+                }
+                for layer in layers
+                if select_step(curves, metric, layer) is not None
+            ]
+        )
+
+    return DIRECTION, depth_curves, select_step, selection_spread
+
+
+@app.cell
+def _(DEFAULT_LAYER, DIRECTION, all_runs, depth_curves, missing, mo, pd, select_step):
+    def reselection_table(layer=DEFAULT_LAYER):
+        if all_runs.empty:
+            return missing("No runs have been written yet.")
+        done = all_runs[all_runs["status"] == "finished"]
+        if done.empty:
+            return missing("No run has finished.")
+        rows = []
+        for run in done.itertuples():
+            curves = depth_curves(run.run_dir)
+            if curves.empty:
+                continue
+            row = {
+                "rule": run.selection,
+                "window": run.window,
+                "seed": run.seed,
+                "trained to": run.steps,
+                "recorded": run.selected_step,
+            }
+            for metric in DIRECTION:
+                row[metric] = select_step(curves, metric, layer)
+            rows.append(row)
+        if not rows:
+            return missing("No finished run has written a history yet.")
+        frame = pd.DataFrame(rows)
+        return mo.ui.table(
+            frame.sort_values(["rule", "window", "seed"], na_position="first"),
+            selection=None,
+        )
+
+    reselection_table()
+    return (reselection_table,)
+
+
+@app.cell
+def _(mo):
     mo.md("""
     Two things follow from this that are worth checking rather than
     assuming.
