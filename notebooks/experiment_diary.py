@@ -841,6 +841,12 @@ def _(EXPERIMENTS, mo, shlex):
 
 @app.cell
 def _(OUTPUTS, json, mo, pd):
+    def _checkpoint_step(path):
+        if not path:
+            return None
+        tail = str(path).rsplit("checkpoint-", 1)
+        return int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else None
+
     def load_all_runs():
         rows = []
         if not OUTPUTS.is_dir():
@@ -864,8 +870,18 @@ def _(OUTPUTS, json, mo, pd):
                     "status": info.get("status"),
                     "minutes": round((info.get("duration_seconds") or 0) / 60, 1),
                     "steps": training.get("global_step"),
+                    "epochs": training.get("epochs_completed"),
                     "best": training.get("best_metric"),
                     "selected_on": training.get("metric_for_best_model"),
+                    # The step the reported probe was taken from, which is not
+                    # the step the run reached.
+                    "selected_step": _checkpoint_step(training.get("best_checkpoint")),
+                    "tokens_per_step": (training.get("budget") or {}).get(
+                        "tokens_per_step_realized"
+                    ),
+                    "tokens_per_example": (training.get("budget") or {}).get(
+                        "tokens_per_example"
+                    ),
                     "seed": axes.get("seed"),
                     "layer": axes.get("layer"),
                     "selection": axes.get("selection"),
@@ -1175,11 +1191,28 @@ def _(mo):
     mo.md(r"""
     ### What the equal budget selects
 
-    Every recipe is given the same number of tokens per optimizer step and
-    the same number of steps, so the total gradient is held constant and
-    only the *choice* of tokens varies. Holding the total constant has a
-    consequence worth being explicit about: the rules produce very
-    different amounts of data, so a rule with a large pool never finishes a
+    Every recipe asks for the same number of tokens per optimizer step and
+    runs for the same number of steps, so no recipe can buy an advantage
+    with a longer run. Two things break the symmetry anyway, and both are
+    measured rather than assumed.
+
+    **The step budget is requested, not granted.** Accumulation is sized
+    from the tokens an example really contributes, and it has to be a whole
+    number, so a recipe whose micro-batch already sits near the budget
+    rounds to one accumulated batch and takes whatever that batch holds.
+    A wide window is the case that suffers: its windows are clipped by the
+    ends of the rollouts they sit in, so it carries fewer tokens than its
+    width suggests and lands furthest below the request. The table reports
+    the realized figure against the requested one, and a comparison across
+    windows is only as good as the gap between them is small.
+
+    **The reported probe is not the trained probe.** A run trains to the
+    cap, but what is carried forward is the checkpoint the selection metric
+    chose, and every step after it is discarded. So the training that
+    reaches the results is the prefix up to that checkpoint, which differs
+    between recipes and can be a small fraction of the run.
+
+    The pools differ as sharply: a rule with a large pool never finishes a
     pass over it, while a rule with a small pool goes round several times.
 
     That raises the obvious question, which is what decides *which* tokens
@@ -1192,8 +1225,8 @@ def _(mo):
        across the whole split, then consumed a fixed number per batch;
        negative windows are drawn per batch in proportion to each domain's
        share. This is what holds every batch at the same class mix.
-    3. **Training reads that order in sequence** and stops at the step
-       limit, taking a prefix of it.
+    3. **Training reads that order in sequence**, and the selected
+       checkpoint takes a prefix of it.
 
     Because the shuffle happens in stage 2 and the cut in stage 3, **a
     prefix is a uniform random sample**, not the first rollouts in file
@@ -1201,17 +1234,25 @@ def _(mo):
     tenth from everywhere, across every domain and every position within a
     rollout.
 
-    The table below reports what each rule actually receives. The column
-    to read alongside the unique-window count is the number of *rollouts*
-    touched: a rule can use a small share of its windows while still
-    seeing nearly every degeneration episode, which is a very different
-    situation from having seen only a small share of the episodes.
+    The table below is read from the finished runs rather than derived
+    from the settings, because the two disagree. It reports the tokens a
+    step really saw, how far the run trained, and how far it had got when
+    the checkpoint that gets reported was written. That last column is the
+    one that counts: a run trains to the cap, but the probe carried
+    forward is the selected checkpoint, and everything after it is
+    discarded.
+
+    The column to read alongside the unique-window count is the number of
+    *rollouts* touched: a rule can use a small share of its windows while
+    still seeing nearly every degeneration episode, which is a very
+    different situation from having seen only a small share of the
+    episodes.
     """)
     return
 
 
 @app.cell
-def _(BASE, DEFAULT_LAYER, REPO, missing, mo, pd):
+def _(DEFAULT_LAYER, REPO, all_runs, missing, mo, pd):
     def budget_coverage():
         import numpy as np
         from hydra import compose, initialize_config_dir
@@ -1222,9 +1263,19 @@ def _(BASE, DEFAULT_LAYER, REPO, missing, mo, pd):
             LabelConfig,
             SelectionConfig,
         )
-        from degeneration_probe.data.dataset import load_degeneration_records
+        from degeneration_probe.data.dataset import (
+            load_degeneration_records,
+            load_token_signal,
+        )
         from degeneration_probe.data.windowed_dataset import WindowedActivationDataset
-        from degeneration_probe.training.arguments import resolve_token_budget
+
+        if all_runs.empty:
+            return missing("No runs have been written yet.")
+        done = all_runs[
+            (all_runs["status"] == "finished") & all_runs["selected_step"].notna()
+        ]
+        if done.empty:
+            return missing("No run has finished, so nothing has been consumed yet.")
 
         try:
             with initialize_config_dir(
@@ -1243,41 +1294,42 @@ def _(BASE, DEFAULT_LAYER, REPO, missing, mo, pd):
         except Exception as error:
             return missing(f"Could not read the training split: {error}")
 
-        batch = int(BASE["training.runtime.per_device_train_batch_size"])
-        steps = int(BASE["training.runtime.max_steps"])
-        tokens_per_step = int(BASE["training.budget.tokens_per_step"])
         defaults = OmegaConf.to_container(composed.training.selection, resolve=True)
-        defaults.update(
-            window_size=BASE["training.selection.window_size"],
-            anchor=BASE["training.selection.anchor"],
-            positive_fraction=BASE["training.selection.positive_fraction"],
-        )
         positive_rollouts = sum(record.is_positive for record in records)
+        # Hard-negative placement reads where a rollout looks repetitive, which
+        # the other rules never ask for.
+        negatives = [
+            (index, record)
+            for index, record in enumerate(records)
+            if not record.is_positive
+        ]
+        hardness = {
+            negatives[position][0]: values
+            for position, values in load_token_signal(
+                experiment.dataset, [record for _, record in negatives]
+            ).items()
+        }
 
         rows = []
-        for strategy in (
-            "all_tokens",
-            "rollout_balanced",
-            "random_window",
-            "frontier_window",
+        for (rule, window), group in done.groupby(
+            ["selection", "window"], dropna=False
         ):
+            selection = {**defaults, "strategy": rule}
+            if pd.notna(window):
+                selection.update(window_size=int(window), anchor="centered")
             dataset = WindowedActivationDataset(
                 records,
                 build_root=experiment.dataset.build_root,
                 # Which depth is read does not change which windows the rule
                 # builds, and this table is about the windows.
                 probe_layer=DEFAULT_LAYER,
-                selection=SelectionConfig(**{**defaults, "strategy": strategy}),
-                batch_size=batch,
-                seed=BASE["training.runtime.seed"],
+                selection=SelectionConfig(**selection),
+                batch_size=8,
+                seed=42,
+                hardness=hardness
+                if rule == "frontier_window_hard_negative"
+                else None,
             )
-            resolved = resolve_token_budget(
-                tokens_per_step,
-                valid_tokens=dataset.summary()["valid_tokens"],
-                examples=len(dataset),
-                per_device_batch_size=batch,
-            )
-            consumed = steps * resolved["gradient_accumulation_steps"] * batch
             order = np.array(dataset.order)
             is_positive = np.array(
                 [
@@ -1285,15 +1337,29 @@ def _(BASE, DEFAULT_LAYER, REPO, missing, mo, pd):
                     for index in order
                 ]
             )
-            seen = order[:consumed]
-            seen_positive = seen[is_positive[:consumed]]
+
+            # A run's length in passes is recorded; the prefix that reached the
+            # selected checkpoint is that length scaled by where it sat.
+            passes = float(group["epochs"].median())
+            fraction = float(
+                (group["selected_step"] / group["steps"]).median()
+            )
+            consumed = int(round(passes * fraction * len(order)))
+            seen = order[: min(consumed, len(order))]
+            seen_positive = seen[is_positive[: len(seen)]]
             rows.append(
                 {
-                    "rule": strategy,
-                    "windows built": len(dataset.windows),
+                    "rule": rule,
+                    "window": None if pd.isna(window) else int(window),
+                    "runs": len(group),
+                    "tokens per step": int(group["tokens_per_step"].mean()),
+                    "of requested": f"{100 * group['tokens_per_step'].mean() / 4096:.0f}%",
                     "slots in one pass": len(order),
+                    "trained to": int(group["steps"].median()),
+                    "passes trained": round(passes, 2),
+                    "selected at": int(group["selected_step"].median()),
                     "slots consumed": min(consumed, len(order)),
-                    "passes": round(consumed / max(1, len(order)), 2),
+                    "passes consumed": round(passes * fraction, 3),
                     "positive windows used": len(set(seen_positive.tolist())),
                     "positive windows available": int(is_positive.sum()),
                     "positive rollouts touched": len(
@@ -1302,7 +1368,8 @@ def _(BASE, DEFAULT_LAYER, REPO, missing, mo, pd):
                     "of positive rollouts": positive_rollouts,
                 }
             )
-        return mo.ui.table(pd.DataFrame(rows), selection=None)
+        frame = pd.DataFrame(rows).sort_values(["rule", "window"], na_position="first")
+        return mo.ui.table(frame, selection=None)
 
     budget_coverage()
     return
@@ -1326,10 +1393,15 @@ def _(mo):
     small at these numbers, but it is real and it is not part of what the
     ladder sets out to measure.
 
-    The budget is only fair if it is not also starving anyone. The check is
-    the training curve: a run whose selection metric is still climbing at
-    the step limit was cut short rather than fairly constrained, and the
-    budget needs raising for every recipe together.
+    The budget is only fair if it is not also starving anyone, and the
+    check is the training curve. A selection metric still climbing at the
+    step limit means the run was cut short rather than fairly constrained,
+    and the budget needs raising for every recipe together. A metric that
+    reached its ceiling in the first few evaluations is the opposite
+    failure and the more dangerous one: nothing after that point can be
+    told apart, the selected checkpoint is whichever early evaluation
+    happened to touch the ceiling first, and the comparison is then between
+    arbitrary early probes rather than between recipes.
     """)
     return
 
