@@ -1,0 +1,24 @@
+short_name: mistral-7b-instruct-v0p1
+build_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-mistral-7b-instruct-v0p1
+build_config: configs/dataset/builds/degeneration-dataset-mistral-7b-instruct-v0p1.yaml
+
+splits:
+  train: train
+  validation: val
+  test_indomain: test_indomain
+  test_heldout_domains: test_heldout_domains
+
+tokenization:
+  max_length: 1536
+  max_completion_length: 1024
+  prompt_truncation_side: left
+
+sampling:
+  # Keep every rollout with a defined onset and sample EOS rollouts per domain.
+  train_negative_rollouts_per_positive: 4.0
+  # Final evaluation keeps every usable rollout.
+  evaluation_negative_rollouts_per_positive: null
+  domain_stratified: true
+  # Unset so the run's single seed drives sampling as well; set it only to pin
+  # the sampled population while varying the training seed.
+  seed: null

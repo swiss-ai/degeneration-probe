@@ -20,6 +20,18 @@ BUILD_CONFIG_DIR = REPO_ROOT / "configs" / "dataset" / "builds"
 APERTUS_INSTRUCT_YAML = BUILD_CONFIG_DIR / "degeneration-dataset-apertus-8b-instruct.yaml"
 ALL_DATASET_YAMLS = sorted(BUILD_CONFIG_DIR.glob("degeneration-dataset-*.yaml"))
 
+# The three directly-comparable dataset builds: same prompt sample, same
+# rollout budget, differing only in which model produced the completions (see
+# notebooks/inspect_dataset.ipynb Section 1). Named explicitly rather than
+# derived from ALL_DATASET_YAMLS so that other, unrelated build configs (e.g.
+# a smaller pilot-scale build for a cross-model probe-transfer check) can live
+# in the same directory without being swept into this family's comparison.
+COMPARABLE_FAMILY_YAMLS = [
+    APERTUS_INSTRUCT_YAML,
+    BUILD_CONFIG_DIR / "degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml",
+    BUILD_CONFIG_DIR / "degeneration-dataset-apertus1p5-sft256k-4200.yaml",
+]
+
 
 def _load_module(name: str, file_path: Path):
     spec = importlib.util.spec_from_file_location(name, file_path)
@@ -207,8 +219,8 @@ def test_every_dataset_build_config_loads_and_uses_its_own_roots(yaml_path):
 
 
 def test_all_dataset_builds_keep_identical_sampling_parameters():
-    assert len(ALL_DATASET_YAMLS) == 3
-    configs = [DatasetGenConfig.from_yaml(path) for path in ALL_DATASET_YAMLS]
+    assert len(COMPARABLE_FAMILY_YAMLS) == 3
+    configs = [DatasetGenConfig.from_yaml(path) for path in COMPARABLE_FAMILY_YAMLS]
     comparable_fields = [
         "in_domain_sources",
         "held_out_sources",

@@ -26,6 +26,10 @@ echo "Job: $SLURM_JOB_ID  CPUs: $SLURM_CPUS_PER_TASK  Config: $CONFIG"
 # as the login node this venv was built on).
 source .venv/bin/activate
 
+# Needed for digit_token_ids()'s tokenizer load when model_name/tokenizer_name
+# is a gated repo (e.g. meta-llama/*) -- public models never needed this.
+export HF_TOKEN="$(cat ~/keys/.hf_token)"
+
 python -m degeneration_probe.dataset_gen.label \
     --config "$CONFIG" \
     --window-size 256 \
