@@ -12,8 +12,10 @@ import pandas as pd
 import pytest
 
 from degeneration_probe.evaluation.protocol import (
+    WARNING_BANDS,
     Threshold,
     alarm_staircase,
+    coverage_window,
     choose_thresholds,
     evaluate,
     first_alarm,
@@ -21,6 +23,7 @@ from degeneration_probe.evaluation.protocol import (
     persistence_scores,
     rollout_score,
     threshold_for_budget,
+    token_coverage,
     view_a_detection,
     view_b_coverage,
     view_c_lead_time,
@@ -367,3 +370,108 @@ def test_a_well_spread_scorer_is_never_flagged_as_saturated():
     )
     for threshold in choose_thresholds(frame, [0.01, 0.05, 0.1]):
         assert not threshold.saturated
+
+
+# --- coverage of the approach --------------------------------------------------
+
+LONG = 600
+LATE_ONSET = 400
+
+
+def _late_rollout(name, scores, *, onset=LATE_ONSET):
+    """A rollout with enough run-up to tell one band width from another."""
+    return _rollout(name, scores, onset=onset)
+
+
+def _fires_from(token, length=LONG):
+    scores = np.zeros(length, dtype=np.float32)
+    scores[token:] = 1.0
+    return scores
+
+
+def test_a_band_counts_only_the_run_up_and_never_the_loop_itself():
+    # Fires from token 300, a hundred tokens before the frontier at 400.
+    frame = build_scores([_late_rollout("p", _fires_from(300))])
+    coverage = view_b_coverage(frame, [HALF]).iloc[0]
+    assert coverage.warning_tokens_128 == 128
+    assert coverage.warning_recall_128 == pytest.approx(100 / 128)
+    assert coverage.warning_tokens_256 == 256
+    assert coverage.warning_recall_256 == pytest.approx(100 / 256)
+    # The loop itself is the in-pattern number and is untouched by either band.
+    assert coverage.in_pattern_recall == 1.0
+
+
+def test_a_band_is_cut_short_by_the_start_of_the_rollout():
+    # The frontier at 60 leaves only 60 tokens of run-up, so both bands see the
+    # same window and neither may count tokens that do not exist.
+    coverage = view_b_coverage(_population([oracle(-20)], []), [HALF]).iloc[0]
+    assert coverage.warning_tokens_128 == ONSET
+    assert coverage.warning_tokens_256 == ONSET
+    assert coverage.warning_recall_128 == pytest.approx(20 / ONSET)
+
+
+def test_a_rollout_that_loops_from_its_first_token_contributes_no_run_up():
+    # Nothing precedes the frontier, so the rollout must not enter the total at
+    # all. Counting it as uncovered would punish a scorer for a warning that was
+    # never possible to give.
+    records = [_rollout("p0", np.ones(LENGTH, dtype=np.float32), onset=0)]
+    records += [_late_rollout("p1", _fires_from(300))]
+    coverage = view_b_coverage(build_scores(records), [HALF]).iloc[0]
+    assert coverage.warning_tokens_128 == 128
+    assert coverage.warning_recall_128 == pytest.approx(100 / 128)
+
+
+def test_run_up_coverage_penalises_a_scorer_that_drops_the_hard_rollouts():
+    """The property median lead time does not have.
+
+    One easy rollout warned about early, one hard rollout never fired on at all.
+    Lead time is a median over what fired, so the hard one leaves no trace and
+    the scorer reads as if it warned early about everything. Run-up coverage is
+    defined over both, so the miss lands in the total.
+    """
+    records = [
+        _late_rollout("easy", _fires_from(300)),
+        _late_rollout("hard", np.zeros(LONG, dtype=np.float32)),
+    ]
+    frame = build_scores(records)
+
+    lead = view_c_lead_time(per_rollout_table(frame, [HALF])).iloc[0]
+    assert lead.median_offset == -100.0
+    assert lead.never_fired_positives == 1
+
+    coverage = view_b_coverage(frame, [HALF]).iloc[0]
+    assert coverage.warning_tokens_128 == 256
+    assert coverage.warning_recall_128 == pytest.approx(100 / 256)
+
+
+def test_firing_far_ahead_of_the_loop_buys_nothing_outside_the_band():
+    # Fires from the very first token. Lead time rewards this without bound; the
+    # band caps what it is worth, since only tokens inside it are counted.
+    early = build_scores([_late_rollout("p", _fires_from(0))])
+    late = build_scores([_late_rollout("p", _fires_from(LATE_ONSET - 128))])
+    assert view_b_coverage(early, [HALF]).iloc[0].warning_recall_128 == 1.0
+    assert view_b_coverage(late, [HALF]).iloc[0].warning_recall_128 == 1.0
+
+    offsets = [
+        view_c_lead_time(per_rollout_table(f, [HALF])).iloc[0].median_offset
+        for f in (early, late)
+    ]
+    assert offsets == [-LATE_ONSET, -128.0]
+
+
+def test_the_helper_and_the_view_agree_on_every_band():
+    frame = build_scores(
+        [_late_rollout("a", _fires_from(300)), _late_rollout("b", _fires_from(380))]
+    )
+    coverage = view_b_coverage(frame, [HALF]).iloc[0]
+    for band in WARNING_BANDS:
+        hits, total = token_coverage(frame, HALF.tau, band=band)
+        assert total == coverage[f"warning_tokens_{band}"]
+        assert hits / total == pytest.approx(coverage[f"warning_recall_{band}"])
+    hits, total = token_coverage(frame, HALF.tau)
+    assert hits / total == pytest.approx(coverage.in_pattern_recall)
+
+
+def test_a_band_must_be_at_least_one_token():
+    with pytest.raises(ValueError, match="at least one token"):
+        coverage_window(LONG, LATE_ONSET, 0)

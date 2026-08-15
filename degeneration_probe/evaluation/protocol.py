@@ -36,6 +36,15 @@ import pandas as pd
 # an estimate of anything: at that count a single rollout moves every rate.
 MIN_POSITIVES_FOR_REPORTING = 10
 
+# How much run-up counts as a warning, in tokens. Coverage of the approach is
+# measured inside a band rather than over the whole pre-frontier region: a token
+# flagged two thousand positions ahead of the loop is a claim about the rollout,
+# not a warning about what is happening in it, and pooling the two would let the
+# long run-ups decide the number. Reported at more than one width because the
+# choice is a judgement about how much warning is worth having, and burying it
+# in a single column would hide that.
+WARNING_BANDS = (128, 256)
+
 
 # --- the first-alarm machinery -------------------------------------------------
 
@@ -81,6 +90,43 @@ def first_alarm(scores: np.ndarray, threshold: float, persistence: int = 1) -> O
     if index >= levels.size:
         return None
     return int(positions[index])
+
+
+def coverage_window(num_tokens: int, onset: int, band: Optional[int]) -> slice:
+    """The tokens one positive rollout contributes to a coverage number.
+
+    Without a band this is the in-pattern tail, every token at or after the
+    frontier. With a band of L it is the L tokens of run-up immediately before
+    the frontier, cut short by the start of the rollout, so a rollout whose loop
+    begins at token 0 contributes nothing to either the hits or the total rather
+    than counting as covered or as missed.
+    """
+    if band is None:
+        return slice(onset, num_tokens)
+    if band < 1:
+        raise ValueError(f"a warning band must be at least one token, got {band}")
+    return slice(max(0, onset - band), onset)
+
+
+def token_coverage(
+    frame: pd.DataFrame, threshold: float, *, band: Optional[int] = None
+) -> Tuple[int, int]:
+    """Flagged tokens and total tokens, pooled across every positive rollout.
+
+    Pooled rather than averaged rollout by rollout. The reason to measure
+    coverage at all is that it is an average over tens of thousands of tokens
+    and therefore moves smoothly between neighbouring checkpoints, which is
+    exactly what averaging a hundred per-rollout rates gives back.
+    """
+    hits = total = 0
+    for row in frame.itertuples(index=False):
+        if not row.is_positive:
+            continue
+        scores = np.asarray(row.scores, dtype=np.float64)
+        segment = scores[coverage_window(scores.size, int(row.onset_position), band)]
+        hits += int(np.count_nonzero(segment >= threshold))
+        total += int(segment.size)
+    return hits, total
 
 
 def rollout_score(scores: np.ndarray, persistence: int = 1) -> float:
@@ -289,10 +335,17 @@ def per_rollout_table(
                 record["in_pattern_tokens"] = int(in_pattern.size)
                 record["in_pattern_hits"] = int(np.count_nonzero(in_pattern))
                 record["in_pattern_misses"] = int(in_pattern.size - np.count_nonzero(in_pattern))
+                for band in WARNING_BANDS:
+                    run_up = above[coverage_window(above.size, onset, band)]
+                    record[f"warning_tokens_{band}"] = int(run_up.size)
+                    record[f"warning_hits_{band}"] = int(np.count_nonzero(run_up))
             else:
                 record["in_pattern_tokens"] = 0
                 record["in_pattern_hits"] = 0
                 record["in_pattern_misses"] = 0
+                for band in WARNING_BANDS:
+                    record[f"warning_tokens_{band}"] = 0
+                    record[f"warning_hits_{band}"] = 0
             rows.append(record)
     return pd.DataFrame(rows)
 
@@ -370,6 +423,8 @@ def view_b_coverage(frame: pd.DataFrame, thresholds: Sequence[Threshold]) -> pd.
         in_pattern_tokens = in_pattern_hits = 0
         pre_frontier_tokens = 0
         positive_rollouts = 0
+        warning_tokens = {band: 0 for band in WARNING_BANDS}
+        warning_hits = {band: 0 for band in WARNING_BANDS}
         for row in frame.itertuples(index=False):
             scores = np.asarray(row.scores, dtype=np.float64)
             above = scores >= threshold.tau
@@ -379,6 +434,10 @@ def view_b_coverage(frame: pd.DataFrame, thresholds: Sequence[Threshold]) -> pd.
                 pre_frontier_tokens += onset
                 in_pattern_tokens += int(above[onset:].size)
                 in_pattern_hits += int(np.count_nonzero(above[onset:]))
+                for band in WARNING_BANDS:
+                    run_up = above[coverage_window(above.size, onset, band)]
+                    warning_tokens[band] += int(run_up.size)
+                    warning_hits[band] += int(np.count_nonzero(run_up))
             else:
                 negative_rollouts += 1
                 negative_tokens += int(above.size)
@@ -399,6 +458,21 @@ def view_b_coverage(frame: pd.DataFrame, thresholds: Sequence[Threshold]) -> pd.
                 "in_pattern_tokens": in_pattern_tokens,
                 "in_pattern_recall": _safe_ratio(in_pattern_hits, in_pattern_tokens),
                 "pre_frontier_tokens": pre_frontier_tokens,
+                # Coverage of the approach, at each band width. This is the
+                # earliness number that survives being averaged: it is defined
+                # on every positive rollout, so one that never fires lowers it
+                # instead of dropping out of it, which is what a median over
+                # first-alarm positions cannot do.
+                **{
+                    f"warning_tokens_{band}": warning_tokens[band]
+                    for band in WARNING_BANDS
+                },
+                **{
+                    f"warning_recall_{band}": _safe_ratio(
+                        warning_hits[band], warning_tokens[band]
+                    )
+                    for band in WARNING_BANDS
+                },
             }
         )
     return pd.DataFrame(rows)
