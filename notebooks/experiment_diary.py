@@ -254,9 +254,13 @@ def _(mo):
     that decides which checkpoint counts, instead reads the **whole validation
     split**, written down in
     `configs/dataset/validation_rollouts_<dataset>.csv`. What evaluation during
-    *future* training will read is still open: the whole split costs about ten
-    minutes a pass against two for the sample, which is affordable only if heads
-    stop early enough, and the replay is what will say whether they do.
+    *future* training will read is still open, and the cost is the reason. A pass
+    over the whole split at every depth is bound by reading roughly a hundred
+    gigabytes of cached states off disk, which at the rate they come back cold is
+    hours rather than minutes. Timing it against states already in the page cache
+    flatters it by more than an order of magnitude, so the sample may turn out to
+    be the only affordable option during training even though it is the weaker
+    measurement.
 
     **The training answers are not the corpus.** Negatives outnumber positives
     by more than a hundred to one, so the training split is cut to four negative
@@ -488,9 +492,13 @@ def _(Path, all_runs, missing, mo, pd):
             [
                 mo.md(
                     f"At floor {rule.floor}, width {rule.band}, tolerance "
-                    f"{rule.tolerance}, patience {rule.patience}. A run ends when "
-                    "its **slowest** depth stops, so that column is what a future "
-                    "run's walltime has to cover."
+                    f"{rule.tolerance}, patience {rule.patience}. One row per "
+                    "replayed run: **never selectable** is how many of its 31 "
+                    "depths never cleared the in-loop-coverage floor at all, "
+                    "**earliest/median stop** is when its depths' patience ran out, "
+                    "**best depth** is the one the run would actually be reported "
+                    "at. A run ends when its **slowest** depth stops, so that "
+                    "column is what a future run's walltime has to cover."
                 ),
                 mo.ui.table(pd.DataFrame(rows), selection=None),
             ]
@@ -513,10 +521,16 @@ def _(Path, all_runs, missing, mo, pd):
         return mo.vstack(
             [
                 mo.md(
-                    f"Every combination, on `{name[:52]}`. The four numbers are "
-                    "chosen from this rather than assumed: what matters is that "
-                    "the depth chosen and the step reached are stable across a "
-                    "range of them, not that any one setting is optimal."
+                    f"Every combination of the four stopping-rule settings "
+                    f"(floor/band/tolerance/patience), applied to one replayed run, "
+                    f"`{name[:52]}`. **Depths eligible** cleared the in-loop-coverage "
+                    "floor at some point; **depths selectable** still count as "
+                    "selectable at the step the run stops; **run stops at** and "
+                    "**best depth/value** are what that setting would have reported. "
+                    "The four numbers used elsewhere in this notebook are read off "
+                    "this table rather than assumed: what matters is that the depth "
+                    "chosen and the step reached stay stable across a wide range of "
+                    "settings, not that any one setting is provably optimal."
                 ),
                 mo.ui.table(table, selection=None),
             ]
@@ -534,6 +548,917 @@ def _(stopping_outcomes):
 @app.cell
 def _(parameter_sweep):
     parameter_sweep()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## Did the heads finish, or did the budget run out?
+
+    Every number a run reports is read off a curve, and a curve that is still
+    rising when training stops reports the budget as much as the method. Before
+    any of these runs can be compared to each other, that has to be settled: a
+    rule that has converged and a rule that was cut off are not being measured on
+    the same footing, and the gap between them can be closed by nothing more
+    interesting than more steps.
+
+    Two readings answer it. **Where a depth peaked** says whether the best
+    checkpoint was anywhere near the end. **What the second half bought** compares
+    the best a depth ever reached against the best it had reached by half its
+    budget: a depth that gains nothing after that point had finished, and one that
+    gains a fifth was still learning when the cap arrived.
+    """)
+    return
+
+
+@app.cell
+def _(Path, all_runs, np, pd):
+    # The quantity selection runs on, so the quantity whose shape decides whether
+    # a longer run would have changed the answer.
+    SELECTION_METRIC = "warning_recall_256"
+
+    def replay_history():
+        """Every replayed checkpoint of every run, carrying the run's settings."""
+        if all_runs.empty:
+            return pd.DataFrame()
+        frames = []
+        for row in all_runs.itertuples():
+            path = Path(row.run_dir) / "checkpoint_replay.parquet"
+            if not path.is_file():
+                continue
+            frame = pd.read_parquet(path)
+            frame["run"] = Path(row.run_dir).parent.name
+            frame["rule"] = row.selection
+            frame["window"] = row.window
+            frame["seed"] = row.seed
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def head_peaks(history):
+        """One row per depth of per run: where it peaked, and what it gained late."""
+        if history.empty:
+            return pd.DataFrame()
+        rows = []
+        for (run, layer), group in history.groupby(["run", "layer"], sort=False):
+            ordered = group.sort_values("step")
+            values = ordered[SELECTION_METRIC].to_numpy(dtype=float)
+            steps = ordered["step"].to_numpy(dtype=int)
+            if values.size == 0 or not np.isfinite(values).any():
+                continue
+            first_half = values[steps <= steps.max() // 2]
+            best = float(np.nanmax(values))
+            early = float(np.nanmax(first_half)) if first_half.size else np.nan
+            rows.append(
+                {
+                    "run": run,
+                    "layer": int(layer),
+                    "rule": ordered["rule"].iloc[0],
+                    "window": ordered["window"].iloc[0],
+                    "seed": ordered["seed"].iloc[0],
+                    "cap": int(steps.max()),
+                    "peak_step": int(steps[int(np.nanargmax(values))]),
+                    "peak": best,
+                    "late_gain": (best / early - 1.0) if early and early > 0 else np.nan,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    replay_frame = replay_history()
+    head_summary = head_peaks(replay_frame)
+    return SELECTION_METRIC, head_summary, replay_frame
+
+
+@app.cell
+def _(mo, replay_frame):
+    replay_run_choice = mo.ui.dropdown(
+        options=sorted(replay_frame["run"].unique()) if not replay_frame.empty else ["none"],
+        value=(sorted(replay_frame["run"].unique())[0] if not replay_frame.empty else "none"),
+        label="run",
+    )
+    replay_run_choice
+    return (replay_run_choice,)
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_SOFT,
+    RAMP,
+    SELECTION_METRIC,
+    SERIES,
+    missing,
+    mo,
+    mpl,
+    plt,
+    replay_frame,
+    replay_run_choice,
+    save,
+    tidy,
+):
+    def trajectory_figure(run):
+        """One run's whole training history, at every depth it trained."""
+        panel = replay_frame[replay_frame["run"] == run] if not replay_frame.empty else None
+        if panel is None or panel.empty:
+            return missing("Nothing replayed yet, so there are no histories to draw.")
+        layers = sorted(panel["layer"].unique())
+        shades = mpl.colors.LinearSegmentedColormap.from_list("depth", RAMP)
+        scale = mpl.colors.Normalize(vmin=min(layers), vmax=max(layers))
+
+        fig, axis = plt.subplots(figsize=(6.4, 3.5))
+        for layer in layers:
+            line = panel[panel["layer"] == layer].sort_values("step")
+            axis.plot(
+                line["step"],
+                line[SELECTION_METRIC],
+                color=shades(scale(layer)),
+                linewidth=1.2,
+            )
+
+        # The depth that ends up being reported is the one whose shape matters, so
+        # it is drawn out of the band and its peak marked.
+        best_layer = int(panel.loc[panel[SELECTION_METRIC].idxmax(), "layer"])
+        chosen = panel[panel["layer"] == best_layer].sort_values("step")
+        # Contrasting hue rather than a step of the ramp, so the reported depth
+        # reads as a separate thing from the band it came out of.
+        axis.plot(chosen["step"], chosen[SELECTION_METRIC], color=SERIES[1], linewidth=2.2)
+        top = chosen.loc[chosen[SELECTION_METRIC].idxmax()]
+        axis.plot(top["step"], top[SELECTION_METRIC], "o", color=SERIES[1], zorder=5)
+        axis.annotate(
+            f"layer {best_layer}, step {int(top['step'])}",
+            xy=(top["step"], top[SELECTION_METRIC]),
+            xytext=(-8, 8),
+            textcoords="offset points",
+            ha="right",
+            color=SERIES[1],
+            fontsize=8,
+        )
+
+        axis.set_xlabel("training step")
+        axis.set_ylabel("coverage of the run-up, 256 tokens")
+        axis.set_title(
+            "each line is one depth; shade runs from the first layer to the last",
+            color=INK_SOFT,
+        )
+        tidy(axis, xgrid=False)
+        bar = fig.colorbar(
+            mpl.cm.ScalarMappable(norm=scale, cmap=shades), ax=axis, pad=0.02
+        )
+        bar.set_label("layer", color=INK_SOFT)
+        bar.outline.set_visible(False)
+        fig.suptitle(run[:72], x=0.005, ha="left", fontsize=10)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        return mo.vstack(
+            [
+                save(fig, "replay_trajectories", FIGURES),
+                mo.md(
+                    "_One run's whole training history, one line per depth it "
+                    "trained a head at. The depth this run would actually be "
+                    "reported at — the one with the best run-up coverage — is "
+                    "redrawn in colour with its peak checkpoint marked; every other "
+                    "depth is shown only as context for how much depth matters here._"
+                ),
+            ]
+        )
+
+    trajectory_figure(replay_run_choice.value)
+    return
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_MUTED,
+    INK_SOFT,
+    SERIES,
+    head_summary,
+    missing,
+    mo,
+    plt,
+    save,
+    tidy,
+):
+    WINDOWS_ON_AXIS = [64, 128, 256, 512]
+
+    def convergence_figure():
+        """Which rules had finished by the step cap and which were still climbing."""
+        if head_summary.empty:
+            return missing("Nothing replayed yet, so convergence cannot be read.")
+        grouped = (
+            head_summary.groupby(["rule", "window"], dropna=False)[["peak_step", "late_gain"]]
+            .median()
+            .reset_index()
+        )
+        windowed = sorted(
+            {
+                rule
+                for rule in grouped["rule"].dropna().unique()
+                if grouped[(grouped["rule"] == rule) & grouped["window"].notna()].shape[0] > 1
+            }
+        )
+        flat = sorted(set(grouped["rule"].dropna().unique()) - set(windowed))
+
+        fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.2))
+        panels = [
+            ("peak_step", "step of the best checkpoint", axes[0]),
+            ("late_gain", "gained in the second half", axes[1]),
+        ]
+        for column, label, axis in panels:
+            for colour, rule in zip(SERIES, windowed):
+                line = grouped[(grouped["rule"] == rule) & grouped["window"].notna()]
+                line = line.sort_values("window")
+                axis.plot(
+                    line["window"],
+                    line[column],
+                    "o-",
+                    color=colour,
+                    label=rule,
+                )
+            # Rules that are not parameterised by a window are one number each, so
+            # they are drawn as the level they sit at rather than as a curve.
+            for colour, rule in zip(SERIES[len(windowed) :], flat):
+                value = grouped.loc[grouped["rule"] == rule, column]
+                if value.empty:
+                    continue
+                axis.axhline(
+                    float(value.iloc[0]), color=colour, linestyle="--", linewidth=1.6, label=rule
+                )
+            axis.set_xscale("log", base=2)
+            axis.set_xticks(WINDOWS_ON_AXIS)
+            axis.set_xticklabels([str(w) for w in WINDOWS_ON_AXIS])
+            axis.set_xlabel("window size")
+            axis.set_title(label, color=INK_SOFT)
+            tidy(axis, xgrid=False)
+        axes[1].axhline(0.0, color=INK_MUTED, linewidth=0.8)
+        axes[1].yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+        handles, names = axes[0].get_legend_handles_labels()
+        fig.legend(
+            handles, names, loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=3
+        )
+        fig.suptitle(
+            "Convergence is a property of the selection rule, not of the budget",
+            x=0.005,
+            ha="left",
+            fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return mo.vstack(
+            [
+                save(fig, "replay_convergence", FIGURES),
+                mo.md(
+                    "_Whether a rule had settled by the step cap, per window size. "
+                    "Left: how late into the 2000-step budget the best checkpoint "
+                    "showed up — a rule still peaking near the cap was probably "
+                    "still learning when training stopped. Right: how much a rule's "
+                    "best score improved between the halfway point and the end — "
+                    "near zero means it had already finished; a real gain means the "
+                    "cap may have cut it short._"
+                ),
+            ]
+        )
+
+    convergence_figure()
+    return
+
+
+@app.cell
+def _(head_summary, missing, mo, pd):
+    def convergence_table():
+        """The same reading as a number per configuration."""
+        if head_summary.empty:
+            return missing("Nothing replayed yet.")
+        grouped = head_summary.groupby(["rule", "window"], dropna=False)
+        frame = pd.DataFrame(
+            {
+                "depths": grouped.size(),
+                "median peak step": grouped["peak_step"].median(),
+                "peaked in the last tenth": grouped.apply(
+                    lambda g: (g["peak_step"] >= 0.9 * g["cap"]).mean(), include_groups=False
+                ),
+                "median late gain": grouped["late_gain"].median(),
+            }
+        ).reset_index()
+        frame["peaked in the last tenth"] = frame["peaked in the last tenth"].map(
+            lambda v: f"{v:.0%}"
+        )
+        frame["median late gain"] = frame["median late gain"].map(lambda v: f"{v:.1%}")
+        return mo.vstack(
+            [
+                mo.md(
+                    "One row per rule/window combination, median over its depths: "
+                    "**median peak step** is when the best checkpoint typically "
+                    "showed up, **peaked in the last tenth** is the share of depths "
+                    "still improving right at the step cap, **median late gain** is "
+                    "how much a depth's score rose between the halfway point and "
+                    "its peak. A configuration whose depths peak early and gain "
+                    "nothing late had finished training. One still gaining at the "
+                    "cap is being reported on a curve that had not stopped rising."
+                ),
+                mo.ui.table(frame.sort_values("median peak step"), selection=None),
+            ]
+        )
+
+    convergence_table()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Opening the automatic pick back up
+
+    The rule above reports one number per run: a depth, a checkpoint. The three
+    plots below exist so that pick can be checked by eye rather than trusted on
+    the strength of one column in a table — for whichever run is selected above,
+    reusing that same picker.
+    """)
+    return
+
+
+@app.cell
+def _(replay_frame):
+    # `StoppingRule`/`apply_rule_to_run` are already imported (unreturned, but
+    # marimo still counts a plain import as a global definition) in the cell
+    # above that builds `stopping_outcomes`/`parameter_sweep`. Importing under
+    # a private, underscore-prefixed alias and wrapping it in a differently
+    # named function avoids colliding with that cell while still sharing one
+    # rule instance across every plot below.
+    from degeneration_probe.evaluation.head_selection import (
+        StoppingRule as _StoppingRuleImpl,
+        apply_rule_to_run as _apply_rule_to_run_impl,
+    )
+
+    DEFAULT_RULE = _StoppingRuleImpl()
+
+    def apply_stopping_rule(history):
+        """The shared stopping rule, applied to one run's replayed checkpoints."""
+        return _apply_rule_to_run_impl(history, DEFAULT_RULE)
+
+    def run_outcomes(run):
+        """What the rule decides for every depth of one replayed run."""
+        panel = replay_frame[replay_frame["run"] == run] if not replay_frame.empty else None
+        if panel is None or panel.empty:
+            return None
+        return apply_stopping_rule(panel)
+
+    def best_layer_of(outcomes):
+        """The depth the rule would actually report, or None if none qualified."""
+        if outcomes is None or outcomes.empty or outcomes["selected_value"].isna().all():
+            return None
+        return int(outcomes.loc[outcomes["selected_value"].idxmax(), "layer"])
+
+    return (
+        DEFAULT_RULE,
+        apply_stopping_rule,
+        best_layer_of,
+        run_outcomes,
+    )
+
+
+@app.cell
+def _(
+    FIGURES,
+    DEFAULT_RULE,
+    INK_SOFT,
+    RAMP,
+    SERIES,
+    best_layer_of,
+    missing,
+    mo,
+    mpl,
+    pd,
+    plt,
+    replay_frame,
+    replay_run_choice,
+    run_outcomes,
+    save,
+    tidy,
+):
+    def in_pattern_trajectory_figure(run):
+        """Every depth's coverage inside the loop, across training.
+
+        This is the half of the objective the rule watches first: a depth has
+        to clear the floor here before its warning coverage counts for
+        anything, so whether a depth is comfortably above the floor or barely
+        scraping it changes how much the pick should be trusted.
+        """
+        panel = replay_frame[replay_frame["run"] == run] if not replay_frame.empty else None
+        if panel is None or panel.empty:
+            return missing("Nothing replayed yet, so there is no trajectory to draw.")
+
+        layers = sorted(panel["layer"].unique())
+        shades = mpl.colors.LinearSegmentedColormap.from_list("depth", RAMP)
+        scale = mpl.colors.Normalize(vmin=min(layers), vmax=max(layers))
+
+        fig, axis = plt.subplots(figsize=(6.4, 3.5))
+        for layer in layers:
+            line = panel[panel["layer"] == layer].sort_values("step")
+            axis.plot(
+                line["step"],
+                line["in_pattern_recall"],
+                color=shades(scale(layer)),
+                linewidth=1.2,
+            )
+
+        outcomes = run_outcomes(run)
+        best_layer = best_layer_of(outcomes)
+        if best_layer is not None:
+            chosen = panel[panel["layer"] == best_layer].sort_values("step")
+            axis.plot(
+                chosen["step"], chosen["in_pattern_recall"], color=SERIES[1], linewidth=2.2
+            )
+            picked = outcomes.loc[outcomes["layer"] == best_layer].iloc[0]
+            selected_step = picked["selected_step"]
+            if pd.notna(selected_step):
+                at_step = chosen[chosen["step"] == int(selected_step)]
+                if not at_step.empty:
+                    y = float(at_step["in_pattern_recall"].iloc[0])
+                    axis.plot(int(selected_step), y, "o", color=SERIES[1], zorder=5)
+                    axis.annotate(
+                        f"layer {best_layer}, step {int(selected_step)}",
+                        xy=(int(selected_step), y),
+                        xytext=(-8, 8),
+                        textcoords="offset points",
+                        ha="right",
+                        color=SERIES[1],
+                        fontsize=8,
+                    )
+
+        axis.axhline(DEFAULT_RULE.floor, color=INK_SOFT, linestyle="--", linewidth=1)
+        axis.annotate(
+            f"floor to become selectable, {DEFAULT_RULE.floor:g}",
+            xy=(panel["step"].max(), DEFAULT_RULE.floor),
+            xytext=(-4, 4),
+            textcoords="offset points",
+            ha="right",
+            fontsize=7.5,
+            color=INK_SOFT,
+        )
+
+        axis.set_xlabel("training step")
+        axis.set_ylabel("coverage inside the loop")
+        axis.set_title(
+            "each line is one depth; the dashed line is the eligibility floor",
+            color=INK_SOFT,
+        )
+        tidy(axis, xgrid=False)
+        bar = fig.colorbar(
+            mpl.cm.ScalarMappable(norm=scale, cmap=shades), ax=axis, pad=0.02
+        )
+        bar.set_label("layer", color=INK_SOFT)
+        bar.outline.set_visible(False)
+        fig.suptitle(run[:72], x=0.005, ha="left", fontsize=10)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        return mo.vstack(
+            [
+                save(fig, "replay_in_pattern_trajectory", FIGURES),
+                mo.md(
+                    "_Same reading as the trajectory plot above, but for coverage "
+                    "**inside** the loop rather than the run-up before it — this is "
+                    "the gate a depth must clear before its run-up coverage is "
+                    "trusted at all. A depth flat for the second half has "
+                    "converged; one still rising was not given enough budget; one "
+                    "that falls after an early peak is a third, worse failure mode "
+                    "distinct from both. Some real picks in this data sit only a "
+                    "few points above the floor — a margin this plot shows "
+                    "directly, not just as an eligible/not-eligible flag._"
+                ),
+            ]
+        )
+
+    in_pattern_trajectory_figure(replay_run_choice.value)
+    return
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_MUTED,
+    INK_SOFT,
+    RAMP,
+    SERIES,
+    apply_stopping_rule,
+    best_layer_of,
+    missing,
+    mo,
+    mpl,
+    pd,
+    plt,
+    replay_frame,
+    replay_run_choice,
+    run_outcomes,
+    save,
+    tidy,
+):
+    def _depth_tradeoff(run):
+        """Both metrics at each depth's own pick, averaged over the seeds of the
+        same configuration as the selected run."""
+        panel = replay_frame[replay_frame["run"] == run] if not replay_frame.empty else None
+        if panel is None or panel.empty:
+            return None
+        rule_name, window = panel["rule"].iloc[0], panel["window"].iloc[0]
+        # `all_tokens` and `rollout_balanced` don't vary by window, so it is
+        # recorded as NaN for them — and NaN never equals NaN, so a plain `==`
+        # would silently find zero siblings for exactly those two rules.
+        same_window = (
+            replay_frame["window"].isna()
+            if pd.isna(window)
+            else replay_frame["window"] == window
+        )
+        siblings = replay_frame[(replay_frame["rule"] == rule_name) & same_window]
+        rows = []
+        for seed, seed_panel in siblings.groupby("seed"):
+            outcomes = apply_stopping_rule(seed_panel)
+            for picked in outcomes.itertuples():
+                if pd.isna(picked.selected_step):
+                    continue
+                at_step = seed_panel[
+                    (seed_panel["layer"] == picked.layer)
+                    & (seed_panel["step"] == picked.selected_step)
+                ]
+                if at_step.empty:
+                    continue
+                rows.append(
+                    {
+                        "seed": seed,
+                        "layer": picked.layer,
+                        "warning_recall_256": float(at_step["warning_recall_256"].iloc[0]),
+                        "in_pattern_recall": float(at_step["in_pattern_recall"].iloc[0]),
+                    }
+                )
+        return pd.DataFrame(rows) if rows else None
+
+    def coverage_tradeoff_figure(run):
+        long = _depth_tradeoff(run)
+        if long is None:
+            return missing(
+                "No depth of this run's configuration has become selectable yet."
+            )
+        best_layer = best_layer_of(run_outcomes(run))
+
+        grouped = (
+            long.groupby("layer")
+            .agg(
+                warning_mean=("warning_recall_256", "mean"),
+                warning_min=("warning_recall_256", "min"),
+                warning_max=("warning_recall_256", "max"),
+                in_pattern_mean=("in_pattern_recall", "mean"),
+                in_pattern_min=("in_pattern_recall", "min"),
+                in_pattern_max=("in_pattern_recall", "max"),
+            )
+            .reset_index()
+            .sort_values("layer")
+        )
+
+        fig, axes = plt.subplots(1, 2, figsize=(10.2, 3.6))
+
+        left = axes[0]
+        left.fill_between(
+            grouped["layer"], grouped["warning_min"], grouped["warning_max"],
+            color=SERIES[0], alpha=0.15, linewidth=0,
+        )
+        left.plot(
+            grouped["layer"], grouped["warning_mean"], color=SERIES[0],
+            label="warning coverage, 256",
+        )
+        left.fill_between(
+            grouped["layer"], grouped["in_pattern_min"], grouped["in_pattern_max"],
+            color=SERIES[1], alpha=0.15, linewidth=0,
+        )
+        left.plot(
+            grouped["layer"], grouped["in_pattern_mean"], color=SERIES[1],
+            label="in-pattern coverage",
+        )
+        if best_layer is not None:
+            left.axvline(best_layer, color=INK_MUTED, linewidth=1, linestyle="--")
+        left.set_xlabel("layer")
+        left.set_ylabel("coverage, at each depth's own pick")
+        left.set_title("both metrics, by depth", color=INK_SOFT)
+        left.legend(loc="best")
+        tidy(left, xgrid=False)
+
+        right = axes[1]
+        ordered = grouped.sort_values("layer")
+        shades = mpl.colors.LinearSegmentedColormap.from_list("depth", RAMP)
+        scale = mpl.colors.Normalize(vmin=ordered["layer"].min(), vmax=ordered["layer"].max())
+        right.plot(
+            ordered["in_pattern_mean"], ordered["warning_mean"],
+            color=INK_MUTED, linewidth=0.8, zorder=1,
+        )
+        right.scatter(
+            ordered["in_pattern_mean"], ordered["warning_mean"],
+            c=ordered["layer"], cmap=shades, norm=scale, zorder=2, s=30,
+            edgecolors="white", linewidths=0.6,
+        )
+        if best_layer is not None and best_layer in set(ordered["layer"]):
+            top = ordered[ordered["layer"] == best_layer].iloc[0]
+            right.plot(
+                top["in_pattern_mean"], top["warning_mean"], "o",
+                color=SERIES[1], markersize=12, markerfacecolor="none",
+                markeredgewidth=2, zorder=3,
+            )
+            right.annotate(
+                f"layer {best_layer}",
+                xy=(top["in_pattern_mean"], top["warning_mean"]),
+                xytext=(6, 6), textcoords="offset points", fontsize=8, color=SERIES[1],
+            )
+        right.set_xlabel("in-pattern coverage")
+        right.set_ylabel("warning coverage, 256")
+        right.set_title("the trade-off itself, one point per depth", color=INK_SOFT)
+        bar = fig.colorbar(
+            mpl.cm.ScalarMappable(norm=scale, cmap=shades), ax=right, pad=0.02
+        )
+        bar.set_label("layer", color=INK_SOFT)
+        bar.outline.set_visible(False)
+        tidy(right, xgrid=False)
+
+        fig.suptitle(
+            f"{run[:60]}: would giving up coverage buy a more trustworthy pick?",
+            x=0.005, ha="left", fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.9))
+        return mo.vstack(
+            [
+                save(fig, "replay_coverage_tradeoff", FIGURES),
+                mo.md(
+                    "_Every depth of this configuration, each read at its own "
+                    "selected checkpoint rather than only the winning depth's — "
+                    "mean across the configuration's seeds, with the seed range "
+                    "shaded. Left puts both metrics against layer directly; right "
+                    "is the same numbers as a trade-off, one point per depth, "
+                    "connected in depth order and coloured by the same depth ramp "
+                    "so the direction is legible. A depth up and to the right of "
+                    "another is strictly better on both counts; the automated pick "
+                    "is ringed — if a nearby depth sits close on warning coverage "
+                    "but well above it on in-pattern coverage, that is the "
+                    "trustworthier neighbour this plot exists to surface._"
+                ),
+            ]
+        )
+
+    coverage_tradeoff_figure(replay_run_choice.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Is the trade-off just depth?
+
+    The plot above reads one configuration at a time. Pooling every replayed
+    run answers a blunter question: across everything replayed so far, does
+    in-pattern coverage simply rise with depth while warning coverage simply
+    falls — the two moving in lockstep against depth rather than against each
+    other for any more interesting reason?
+    """)
+    return
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_MUTED,
+    INK_SOFT,
+    RAMP,
+    SERIES,
+    apply_stopping_rule,
+    missing,
+    mo,
+    mpl,
+    pd,
+    plt,
+    replay_frame,
+    save,
+    tidy,
+):
+    def _every_depth_pick():
+        """Every (run, layer) with a selectable checkpoint, read at that
+        checkpoint's own warning coverage and in-pattern coverage."""
+        if replay_frame.empty:
+            return pd.DataFrame()
+        rows = []
+        for run, panel in replay_frame.groupby("run"):
+            outcomes = apply_stopping_rule(panel)
+            for picked in outcomes.itertuples():
+                if pd.isna(picked.selected_step):
+                    continue
+                at_step = panel[
+                    (panel["layer"] == picked.layer) & (panel["step"] == picked.selected_step)
+                ]
+                if at_step.empty:
+                    continue
+                rows.append(
+                    {
+                        "run": run,
+                        "layer": picked.layer,
+                        "warning_recall_256": float(at_step["warning_recall_256"].iloc[0]),
+                        "in_pattern_recall": float(at_step["in_pattern_recall"].iloc[0]),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def depth_correlation_figure():
+        from scipy.stats import spearmanr
+
+        points = _every_depth_pick()
+        if points.empty:
+            return missing("Nothing replayed yet, so no depth trend can be read.")
+
+        rho_layer_in_pattern, _ = spearmanr(points["layer"], points["in_pattern_recall"])
+        rho_layer_warning, _ = spearmanr(points["layer"], points["warning_recall_256"])
+        rho_between, _ = spearmanr(points["in_pattern_recall"], points["warning_recall_256"])
+
+        grouped = (
+            points.groupby("layer")
+            .agg(
+                in_pattern_median=("in_pattern_recall", "median"),
+                in_pattern_min=("in_pattern_recall", "min"),
+                in_pattern_max=("in_pattern_recall", "max"),
+                warning_median=("warning_recall_256", "median"),
+                warning_min=("warning_recall_256", "min"),
+                warning_max=("warning_recall_256", "max"),
+            )
+            .reset_index()
+            .sort_values("layer")
+        )
+
+        fig, axes = plt.subplots(1, 2, figsize=(10.2, 3.6))
+
+        left = axes[0]
+        left.fill_between(
+            grouped["layer"], grouped["in_pattern_min"], grouped["in_pattern_max"],
+            color=SERIES[1], alpha=0.15, linewidth=0,
+        )
+        left.plot(
+            grouped["layer"], grouped["in_pattern_median"], color=SERIES[1],
+            label=f"in-pattern coverage (ρ vs. layer = {rho_layer_in_pattern:+.2f})",
+        )
+        left.fill_between(
+            grouped["layer"], grouped["warning_min"], grouped["warning_max"],
+            color=SERIES[0], alpha=0.15, linewidth=0,
+        )
+        left.plot(
+            grouped["layer"], grouped["warning_median"], color=SERIES[0],
+            label=f"warning coverage, 256 (ρ vs. layer = {rho_layer_warning:+.2f})",
+        )
+        left.set_xlabel("layer")
+        left.set_ylabel("coverage, at each pick's own checkpoint")
+        n_runs = points["run"].nunique()
+        left.set_title(f"median across {n_runs} replayed runs, range shaded", color=INK_SOFT)
+        left.legend(loc="center left", fontsize=7.5)
+        tidy(left, xgrid=False)
+
+        right = axes[1]
+        shades = mpl.colors.LinearSegmentedColormap.from_list("depth", RAMP)
+        scale = mpl.colors.Normalize(vmin=points["layer"].min(), vmax=points["layer"].max())
+        right.scatter(
+            points["in_pattern_recall"], points["warning_recall_256"],
+            c=points["layer"], cmap=shades, norm=scale, s=16, alpha=0.55, edgecolors="none",
+        )
+        right.set_xlabel("in-pattern coverage")
+        right.set_ylabel("warning coverage, 256")
+        right.set_title(
+            f"every depth of every run: ρ = {rho_between:+.2f} between the two",
+            color=INK_SOFT,
+        )
+        bar = fig.colorbar(
+            mpl.cm.ScalarMappable(norm=scale, cmap=shades), ax=right, pad=0.02
+        )
+        bar.set_label("layer", color=INK_SOFT)
+        bar.outline.set_visible(False)
+        right.axhline(0, color=INK_MUTED, linewidth=0.6, zorder=0)
+        tidy(right, xgrid=False)
+
+        fig.suptitle(
+            "Depth moves both, but not in lockstep with each other",
+            x=0.005, ha="left", fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.9))
+        return mo.vstack(
+            [
+                save(fig, "replay_depth_correlation", FIGURES),
+                mo.md(
+                    "_Left: both metrics against layer, pooled over every replayed "
+                    "run, each read at that (run, layer)'s own selected checkpoint "
+                    "— median with the full range shaded. Right: the same points "
+                    "as a scatter, in-pattern coverage against warning coverage "
+                    "directly, coloured by depth. Spearman's ρ (reported in the "
+                    "legend and the right panel's title) is a rank correlation: "
+                    "+1 means one metric rises exactly when the other does, −1 "
+                    "means one falls exactly when the other rises, 0 means no "
+                    "monotonic relationship at all. If depth alone explained the "
+                    "trade-off, in-pattern coverage would be strongly positively "
+                    "correlated with layer, warning coverage strongly negatively, "
+                    "and the two strongly negatively correlated with each other; "
+                    "how close the three ρ values come to ±1, rather than sitting "
+                    "near zero, is the honest read of whether they are inverse "
+                    "proportional or the resemblance is weaker than it looks by eye._"
+                ),
+            ]
+        )
+
+    depth_correlation_figure()
+    return
+
+
+@app.cell
+def _(
+    FIGURES,
+    Path,
+    RAMP,
+    all_runs,
+    best_layer_of,
+    missing,
+    mo,
+    pd,
+    plt,
+    replay_run_choice,
+    run_outcomes,
+    save,
+    tidy,
+):
+    def checkpoint_health_figure(run):
+        """Validation loss and score spread at the depth this run would be
+        reported at, with the run's training loss alongside for divergence."""
+        best_layer = best_layer_of(run_outcomes(run))
+        if best_layer is None:
+            return missing(
+                "No depth of this run has become selectable yet, so there is no "
+                "single depth's health to check."
+            )
+        match = all_runs[all_runs["run_dir"].apply(lambda p: Path(p).parent.name == run)]
+        if match.empty:
+            return missing("Could not find this run's directory.")
+        history_path = Path(match.iloc[0]["run_dir"]) / "history.parquet"
+        if not history_path.is_file():
+            return missing("No history.parquet recorded for this run.")
+        history = pd.read_parquet(history_path)
+
+        val_col = f"val/layer{best_layer:02d}/loss_unweighted"
+        std_col = f"val/layer{best_layer:02d}/prediction_std"
+        if val_col not in history.columns:
+            return missing(f"No logged validation curve for layer {best_layer}.")
+
+        val = history[["step", val_col]].dropna()
+        spread = (
+            history[["step", std_col]].dropna() if std_col in history.columns else pd.DataFrame()
+        )
+        # Logged once per training step, summed across all 31 heads together —
+        # not this depth's own training loss, since heads share no parameters
+        # but their losses are added before the backward pass. Useful only for
+        # its shape (still falling, flat, or rising), never for its scale
+        # against a single depth's validation loss.
+        train = history[["step", "loss"]].dropna() if "loss" in history.columns else pd.DataFrame()
+
+        fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.2))
+
+        left = axes[0]
+        left.plot(val["step"], val[val_col], color=RAMP[3], label=f"val loss, layer {best_layer}")
+        left.set_ylabel(f"validation loss, layer {best_layer}", color=RAMP[3])
+        left.tick_params(axis="y", colors=RAMP[3])
+        if not train.empty:
+            twin = left.twinx()
+            twin.plot(
+                train["step"], train["loss"], color="#8a8880", linewidth=1, alpha=0.85,
+            )
+            twin.set_ylabel("training loss, all 31 heads summed", color="#8a8880")
+            twin.tick_params(axis="y", colors="#8a8880")
+        left.set_xlabel("step")
+        left.set_title("validation loss against training loss", color="#52514e")
+        tidy(left, xgrid=False)
+
+        right = axes[1]
+        if not spread.empty:
+            right.plot(spread["step"], spread[std_col], color=RAMP[3])
+            right.axhline(0.01, color="#e34948", linestyle="--", linewidth=1)
+        right.set_xlabel("step")
+        right.set_title("spread of the scores, layer " + str(best_layer), color="#52514e")
+        tidy(right, xgrid=False)
+
+        fig.suptitle(
+            f"{run[:56]}: layer {best_layer}, the depth this run would be reported at",
+            x=0.005, ha="left", fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.9))
+        return mo.vstack(
+            [
+                save(fig, "replay_checkpoint_health", FIGURES),
+                mo.md(
+                    "_Left: this depth's validation loss (left axis) against the "
+                    "run's training loss (right axis, dashed grey) — the two are "
+                    "on axes that cannot be compared in scale, since the training "
+                    "curve sums the loss of all 31 heads while the validation "
+                    "curve is one depth, unweighted; read this for **shape**, not "
+                    "magnitude, and watch for training loss still falling once "
+                    "validation has flattened or turned upward. Right: the spread "
+                    "of this depth's own scores, unchanged from the collapse-guard "
+                    "check elsewhere — the dashed red line is the threshold below "
+                    "which a probe is emitting close to a constant score._"
+                ),
+            ]
+        )
+
+    checkpoint_health_figure(replay_run_choice.value)
     return
 
 
@@ -976,6 +1901,9 @@ def _(BY_ID, mo):
             lines.append("| | nothing varies but the seed |")
         body = "\n".join(lines)
         return mo.md(
+            "Only the settings this stage actually changes are listed below, "
+            "with every value it takes; a setting that's fixed within this stage "
+            "isn't shown, even if it differs from the shared default.\n\n"
             "| setting | values |\n|---|---|\n"
             + body
             + "\n\nEverything else is the shared setup above."
@@ -1201,7 +2129,36 @@ def _(BASELINE_ROOT, Path, finished_rows, missing, pd):
             "itself; scoring is a separate job."
         )
 
-    return load_baseline_view, load_view, nothing_scored, scored_depths
+    def _has_any_scoring(run_dir, own_layer, split):
+        root = Path(run_dir)
+        if any(root.glob(f"layers/layer_*/evaluation/{split}")):
+            return True
+        own = own_depth(own_layer)
+        return own is not None and (root / "evaluation" / split).is_dir()
+
+    def scoring_progress(exp_id, split):
+        """How many of this stage's finished runs have any scoring at all on this split.
+
+        Deliberately coarser than ``scored_depths``: this counts a run once it
+        has been scored at any depth, so a table or figure showing only a
+        handful of rows can say plainly how much of the stage that is, rather
+        than leaving a reader to wonder whether the rest never trained.
+        """
+        rows = finished_rows(exp_id)
+        if rows.empty:
+            return 0, 0
+        scored = sum(
+            _has_any_scoring(row.run_dir, row.layer, split) for row in rows.itertuples()
+        )
+        return scored, len(rows)
+
+    return (
+        load_baseline_view,
+        load_view,
+        nothing_scored,
+        scored_depths,
+        scoring_progress,
+    )
 
 
 @app.cell
@@ -1281,14 +2238,15 @@ def _(BY_ID, config_of, finished_rows, load_baseline_view, load_view, pd):
     def scorecard_long(exp_id, split, layer, budget):
         """Every view of every configuration, one row per measurement.
 
-        The model-free scorers ride along as reference rows, so a probe is never
-        read except beside them. They are only added once the experiment has
-        something of its own to compare, since a table holding nothing but the
-        baselines would read as a result for a stage that has none. S0 is the
-        exception, because there the baselines are the result.
+        Model-free scorers ride along only in S0, where they are the whole
+        result, and in S4, the one place a probe is measured against the floor
+        again on data nothing was tuned on. Every stage in between compares
+        probe configurations against each other; S0 already settled how they
+        compare to the floor, so repeating that comparison in every stage would
+        only add rows without adding a question.
         """
         records = _probe_records(exp_id, split, layer, budget)
-        if records or exp_id == "S0":
+        if exp_id == "S0" or (records and exp_id == "S4"):
             records = records + _baseline_records(split, budget)
         return pd.DataFrame(records)
 
@@ -1305,7 +2263,15 @@ def _(BY_ID, config_of, finished_rows, load_baseline_view, load_view, pd):
 
 
 @app.cell
-def _(METRIC_ORDER, is_baseline, mo, nothing_scored, scorecard_long):
+def _(
+    METRIC_ORDER,
+    finished_rows,
+    is_baseline,
+    mo,
+    nothing_scored,
+    scorecard_long,
+    scoring_progress,
+):
     def scorecard(exp_id, split, layer, budget):
         """The four views of every configuration, seeds collapsed to a spread."""
         long = scorecard_long(exp_id, split, layer, budget)
@@ -1343,12 +2309,33 @@ def _(METRIC_ORDER, is_baseline, mo, nothing_scored, scorecard_long):
             lambda name: (0 if is_baseline(name) else 1, name)
         )
         table = table.sort_values("_order").drop(columns="_order")
+
+        # A depth only means something once a probe is in the picture: the
+        # model-free scorers read no layer at all, so a table of nothing but
+        # baselines should never claim to be read "at layer N".
+        only_baselines = all(is_baseline(name) for name in table["configuration"])
+        where = f"`{split}`" if only_baselines else f"`{split}`, layer {layer}"
+        has_baseline = any(is_baseline(name) for name in table["configuration"])
+        baseline_note = (
+            " Model-free scorers are the first rows, shown here for reference."
+            if has_baseline and not only_baselines
+            else ""
+        )
+        scored, finished = scoring_progress(exp_id, split)
+        progress_note = (
+            f" **{scored} of {finished}** finished runs of this stage have been "
+            "through the evaluator on this split so far — the rest are trained "
+            "but not yet scored, and simply have no row here yet."
+            if finished and scored < finished
+            else ""
+        )
         return mo.vstack(
             [
                 mo.md(
-                    f"At a **{budget:.0%} false-alarm budget** on `{split}`, layer "
-                    f"{layer}. Median across seeds, with the range across seeds in "
-                    "brackets. Model-free scorers are the first rows."
+                    "One row per configuration: the median across seeds, with the "
+                    "seed-to-seed range in brackets where it varies. At a "
+                    f"**{budget:.0%} false-alarm budget** on {where}."
+                    f"{baseline_note}{progress_note}"
                 ),
                 mo.ui.table(table, selection=None),
             ]
@@ -1424,6 +2411,7 @@ def _(
     INK_SOFT,
     SERIES,
     is_baseline,
+    mo,
     nothing_scored,
     plt,
     save,
@@ -1520,13 +2508,28 @@ def _(
             fontsize=10,
         )
         fig.tight_layout(rect=(0, 0.04, 1, 0.93))
-        return save(fig, f"{exp_id}_{split}_L{int(layer):02d}_views", FIGURES)
+        return mo.vstack(
+            [
+                save(fig, f"{exp_id}_{split}_L{int(layer):02d}_views", FIGURES),
+                mo.md(
+                    "_Four panels, one per view: **A** is whether it fires on the "
+                    "right answers at all (recall, precision); **B** is what share "
+                    "of tokens it flags, split between the easy tokens already "
+                    "inside the loop and the harder run-up just before it; **C** is "
+                    "how early or late the alarm lands relative to the true onset "
+                    "(negative is early, the vertical line marks zero); **D** is "
+                    "how long the first alarm holds once it fires. Each row is one "
+                    "configuration; the dot is the median across seeds and the bar "
+                    "is the seed-to-seed range._"
+                ),
+            ]
+        )
 
     return (views_figure,)
 
 
 @app.cell
-def _(FIGURES, Path, RAMP, finished_rows, missing, pd, plt, save, tidy):
+def _(FIGURES, Path, RAMP, finished_rows, missing, mo, pd, plt, save, tidy):
     def curve_figure(exp_id, layer):
         """Is the run healthy, and did it have enough budget to settle?"""
         rows = finished_rows(exp_id)
@@ -1577,7 +2580,21 @@ def _(FIGURES, Path, RAMP, finished_rows, missing, pd, plt, save, tidy):
             fontsize=10,
         )
         fig.tight_layout(rect=(0, 0, 1, 0.9))
-        return save(fig, f"{exp_id}_L{int(layer):02d}_curves", FIGURES)
+        return mo.vstack(
+            [
+                save(fig, f"{exp_id}_L{int(layer):02d}_curves", FIGURES),
+                mo.md(
+                    "_Not a result, a health check: does the run look like it "
+                    "trained properly. Left is validation loss with the class "
+                    "weight removed, so different recipes sit on the same scale. "
+                    "Right is the spread (standard deviation) of the probe's own "
+                    "scores; the dashed red line is the collapse threshold — a run "
+                    "that falls to it is emitting close to a constant score for "
+                    "every token, which can still show a plausible loss while "
+                    "telling positives and negatives apart not at all._"
+                ),
+            ]
+        )
 
     return (curve_figure,)
 
@@ -1689,14 +2706,24 @@ def _(show_commands):
 
 
 @app.cell
-def _(budget_choice, layer_choice, scorecard, split_choice):
-    scorecard("S0", split_choice.value, layer_choice.value, budget_choice.value)
+def _(mo):
+    mo.md("""
+    **Before the table:** `repetition` is the only one of these three that can
+    actually spend a false-alarm budget. `lrs` and `entropy` both score an
+    answer by its single highest-scoring token, and almost every answer has
+    one: 81% of healthy answers tie at the top of `lrs`'s range, 98.6% for
+    `entropy`. A 1% budget cannot break a tie that size, so both scorers get
+    pushed to a threshold above their whole range and fire on nothing,
+    positives included. Their rows below read zero everywhere on purpose —
+    that is not a bug and not a sign they are secretly flawless, it means they
+    need a different aggregation before they can compete on this table at all.
+    """)
     return
 
 
 @app.cell
-def _(budget_choice, layer_choice, split_choice, views_figure):
-    views_figure("S0", split_choice.value, layer_choice.value, budget_choice.value)
+def _(budget_choice, layer_choice, scorecard, split_choice):
+    scorecard("S0", split_choice.value, layer_choice.value, budget_choice.value)
     return
 
 
@@ -1710,6 +2737,7 @@ def _(
     SERIES,
     load_baseline_view,
     missing,
+    mo,
     np,
     pd,
     plt,
@@ -1802,7 +2830,20 @@ def _(
             "S0: the repetition counter on validation", x=0.005, ha="left", fontsize=10
         )
         fig.tight_layout(rect=(0, 0, 1, 0.9))
-        return save(fig, "S0_val_repetition", FIGURES)
+        return mo.vstack(
+            [
+                save(fig, "S0_val_repetition", FIGURES),
+                mo.md(
+                    "_Left: of the degenerate answers a given budget catches, when "
+                    "the alarm fires relative to the true onset — where a curve "
+                    "flattens is how many were caught at all, and the gap up to 1.0 "
+                    "is the share never flagged. Right: the same recall/coverage "
+                    "numbers as the table above, read across every budget instead "
+                    "of one, to show how much of the gain is the easy in-loop "
+                    "tokens versus the harder run-up before it._"
+                ),
+            ]
+        )
 
     baseline_story()
     return
@@ -1824,16 +2865,6 @@ def _(mo):
     median of 66 tokens before the frontier. It does not. That figure comes
     from a score that is allowed to read the text that follows the token it is
     scoring, which nothing generating an answer live could do.
-
-    **The other two baselines do not produce a usable operating point**, and the
-    reason is in how they are defined rather than in the signals themselves.
-    Because an answer's score is the highest score any of its tokens reaches,
-    `lrs` puts 81% of healthy answers at the ceiling, since almost every answer
-    contains some repeated substring, and `entropy` puts 98.6% there, since
-    almost every answer contains one fully confident token. No threshold can
-    spend a 1% budget against a tie that large, so both are reported at a
-    threshold above their whole range, and both fire on nothing. They need a
-    different aggregation before they can be compared with anything.
     """)
     return
 
@@ -2042,6 +3073,7 @@ def _(
     finished_rows,
     load_view,
     missing,
+    mo,
     pd,
     plt,
     save,
@@ -2103,7 +3135,21 @@ def _(
             fontsize=10,
         )
         fig.tight_layout(rect=(0, 0, 1, 0.9))
-        return save(fig, f"{exp_id}_{split}_depth", FIGURES)
+        return mo.vstack(
+            [
+                save(fig, f"{exp_id}_{split}_depth", FIGURES),
+                mo.md(
+                    "_Where in the network the approach becomes visible: warning "
+                    "coverage over the 256 tokens before the frontier, at every "
+                    "scored depth, one line per selection rule, one panel per "
+                    "window size. This is the depth profile the rest of the "
+                    "notebook's single-layer numbers should be read against — only "
+                    "the rules and window sizes that have been scored so far can "
+                    "appear here, so a thin-looking plot means little has been "
+                    "scored yet, not that the other rules have nothing to show._"
+                ),
+            ]
+        )
 
     depth_figure("S1", split_choice.value, budget_choice.value)
     return
@@ -2177,6 +3223,7 @@ def _(
     layer_choice,
     load_view,
     missing,
+    mo,
     pd,
     plt,
     save,
@@ -2241,7 +3288,20 @@ def _(
             fontsize=10,
         )
         fig.tight_layout(rect=(0, 0, 1, 0.9))
-        return save(fig, f"S2a_{split}_L{int(layer):02d}_horizon", FIGURES)
+        return mo.vstack(
+            [
+                save(fig, f"S2a_{split}_L{int(layer):02d}_horizon", FIGURES),
+                mo.md(
+                    "_What moving the label boundary earlier actually buys, against "
+                    "the horizon length in tokens: warning coverage (left), median "
+                    "lead time with zero marking the true onset (middle), and how "
+                    "many degenerate answers are never flagged at all (right). If a "
+                    "longer horizon doesn't move these, the probe isn't being "
+                    "taught to fire earlier, whatever the label says it should be "
+                    "doing._"
+                ),
+            ]
+        )
 
     horizon_figure(split_choice.value, layer_choice.value, budget_choice.value)
     return
