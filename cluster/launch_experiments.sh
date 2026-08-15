@@ -2,7 +2,7 @@
 set -euo pipefail
 cd /iopsstor/scratch/cscs/mdenegri/degeneration-probe
 
-# --- S0: Baselines through the same protocol
+# --- S0: How far do model-free signals get?
 sbatch cluster/baselines.sbatch
 
 # --- 93 training runs
