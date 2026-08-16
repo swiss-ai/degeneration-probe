@@ -23,6 +23,16 @@ echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
 
 export HF_TOKEN="$(cat ~/keys/.hf_token)"
 
+# Optional: restrict caching to an explicit prompt_id allowlist (one per
+# line), for a build too large to cache in full when only some of it is
+# needed -- e.g. --export=ALL,CONFIG=...,PROMPT_IDS_FILE=/path/to/ids.txt.
+PROMPT_IDS_ARGS=()
+if [[ -n "${PROMPT_IDS_FILE:-}" ]]; then
+    mapfile -t PROMPT_IDS < "$PROMPT_IDS_FILE"
+    echo "Restricting to ${#PROMPT_IDS[@]} prompt_ids from $PROMPT_IDS_FILE"
+    PROMPT_IDS_ARGS=(--prompt-ids "${PROMPT_IDS[@]}")
+fi
+
 # All 6 domains run sequentially in ONE process (no --domains filter) --
 # activations/manifest.parquet is a single file shared across all domains
 # (unlike generate.py/label.py's per-domain shards), so running domains as
@@ -31,6 +41,6 @@ export HF_TOKEN="$(cat ~/keys/.hf_token)"
 # rollout_idx) already recorded with status "ok".
 srun --environment=$REPO/cluster/env.toml \
     python -m degeneration_probe.dataset_gen.cache_activations \
-        --config "$CONFIG"
+        --config "$CONFIG" "${PROMPT_IDS_ARGS[@]}"
 
 echo "Activation caching done."

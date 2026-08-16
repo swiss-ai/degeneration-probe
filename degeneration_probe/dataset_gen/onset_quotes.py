@@ -217,7 +217,7 @@ def resolve_quote_positions(
 
     domains = domains or sorted(paths.configured_domain_names(config))
     if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.model_name)
 
     from degeneration_probe.dataset_gen.onset_labels import _load_prompt_id_to_split
 

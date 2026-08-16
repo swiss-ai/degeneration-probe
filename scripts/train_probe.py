@@ -367,8 +367,10 @@ def _train(
 
     recorder = RunRecorder(run_dir)
     callbacks = [recorder, CollapseGuard(config.training.budget.collapse_threshold)]
-    if config.training.selection.resample_each_epoch and hasattr(
-        datasets[splits.train], "resample"
+    if (
+        config.training.selection.resample_each_epoch
+        and hasattr(datasets[splits.train], "resample")
+        and getattr(datasets[splits.train], "selection", None) is not None
     ):
         callbacks.append(ResampleWindows(datasets[splits.train]))
     if config.training.budget.patience:
