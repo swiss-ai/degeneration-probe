@@ -3467,6 +3467,419 @@ def _(budget_choice, layer_choice, scorecard, split_choice):
 def _(mo):
     mo.md("""
     ---
+    # Where things stand: the leading candidate from each stage
+
+    Every stage above compares its own recipes against each other. This section
+    is the first place results from different stages sit side by side: the
+    leading candidate out of S1, out of S2a, out of S2b and out of S2d, each
+    scored by the full protocol rather than read off the cheaper estimate that
+    picked them. S2c is not represented — it was ruled out earlier without a
+    full scoring pass, so there is no candidate from it to compare here.
+
+    Twelve configurations, three seeds each, all scored at the single depth
+    each was picked at. These twelve are also what S3's adapted runs are built
+    from, one adapter per stage's winner, which is why this section comes
+    before S3 rather than after it.
+    """)
+    return
+
+
+@app.cell
+def _():
+    # The final list, from a selection process that ran outside this notebook.
+    # Not re-derived here: only read and displayed. Depth is the layer each
+    # configuration was actually scored at, confirmed against the run
+    # directories themselves rather than assumed from the stage.
+    LEADING_CANDIDATES = [
+        {
+            "stage": "S1",
+            "label": "S1 #1",
+            "group": "apertus-8b-instruct_L1-31_rollout_balanced128_hard_bce_lora-none_e1fc6f1f",
+            "depth": 15,
+            "summary": "rollout_balanced, W=128",
+        },
+        {
+            "stage": "S1",
+            "label": "S1 #2",
+            "group": "apertus-8b-instruct_L1-31_frontier256_hard_bce_lora-none_2d96b95c",
+            "depth": 15,
+            "summary": "frontier_window, W=256, centered",
+        },
+        {
+            "stage": "S1",
+            "label": "S1 #3",
+            "group": "apertus-8b-instruct_L1-31_frontier_hard_negative128_hard_bce_lora-none_710358df",
+            "depth": 4,
+            "summary": "frontier_window_hard_negative, W=128, centered",
+        },
+        {
+            "stage": "S2a",
+            "label": "S2a #1",
+            "group": "apertus-8b-instruct_L1-31_frontier512_hard256_bce_lora-none_c1b8cca1",
+            "depth": 15,
+            "summary": "frontier_window, W=512, centered, horizon=256",
+        },
+        {
+            "stage": "S2a",
+            "label": "S2a #2",
+            "group": "apertus-8b-instruct_L1-31_all_tokens_hard1024_bce_lora-none_d212fbad",
+            "depth": 15,
+            "summary": "all_tokens, horizon=1024",
+        },
+        {
+            "stage": "S2a",
+            "label": "S2a #3",
+            "group": "apertus-8b-instruct_L1-31_frontier512_hard512_bce_lora-none_03e606bc",
+            "depth": 15,
+            "summary": "frontier_window, W=512, trailing, horizon=512",
+        },
+        {
+            "stage": "S2b",
+            "label": "S2b #1",
+            "group": "apertus-8b-instruct_L1-31_frontier512_soft_bce_lora-none_ca252971",
+            "depth": 15,
+            "summary": "soft label, exponential decay/256",
+        },
+        {
+            "stage": "S2b",
+            "label": "S2b #2",
+            "group": "apertus-8b-instruct_L1-31_frontier512_soft_bce_lora-none_1a539f5c",
+            "depth": 15,
+            "summary": "soft label, linear decay/256",
+        },
+        {
+            "stage": "S2b",
+            "label": "S2b #3",
+            "group": "apertus-8b-instruct_L1-31_frontier512_soft_bce_lora-none_53163d18",
+            "depth": 15,
+            "summary": "soft label, exponential decay/128",
+        },
+        {
+            "stage": "S2d",
+            "label": "S2d #1",
+            "group": "apertus-8b-instruct_L1-31_frontier128_hard_bce_lora-none_641cb829",
+            "depth": 4,
+            "summary": "base recipe, pos_weight=on",
+        },
+        {
+            "stage": "S2d",
+            "label": "S2d #2",
+            "group": "apertus-8b-instruct_L1-31_frontier128_hard_bce_lora-none_17e0fada",
+            "depth": 4,
+            "summary": "base recipe, pos_weight=off",
+        },
+        {
+            "stage": "S2d",
+            "label": "S2d #3",
+            "group": "apertus-8b-instruct_L1-31_frontier128_hard_bce_lora-none_465e7640",
+            "depth": 4,
+            "summary": "base recipe, pos_weight=on, positive_fraction=0.5",
+        },
+    ]
+    STAGE_ORDER = ["S1", "S2a", "S2b", "S2d"]
+    return LEADING_CANDIDATES, STAGE_ORDER
+
+
+@app.cell
+def _(LEADING_CANDIDATES, METRIC_ORDER, Path, all_runs, pd):
+    # Mirrors load_view()/scorecard_long()'s shape, but keyed by the hardcoded
+    # list above rather than by an `exp:` tag: these runs are not tagged for
+    # this section and should not be, since run_info.json is written once by
+    # the training script and nothing else should rewrite it after the fact.
+    _CANDIDATE_VIEWS = [
+        ("A", "recall", "view_a_detection", "recall"),
+        ("A", "precision", "view_a_detection", "precision"),
+        ("B", "in-pattern coverage", "view_b_coverage", "in_pattern_recall"),
+        ("B", "warning coverage 128", "view_b_coverage", "warning_recall_128"),
+        ("B", "warning coverage 256", "view_b_coverage", "warning_recall_256"),
+        ("B", "healthy token rate", "view_b_coverage", "token_false_positive_rate"),
+        ("C", "median lead", "view_c_lead_time", "median_offset"),
+        ("C", "never fired", "view_c_lead_time", "never_fired_positives"),
+    ]
+    _CANDIDATE_PERSISTENCE = [
+        ("D", "alarm length, degenerate", "positive"),
+        ("D", "alarm length, healthy", "negative"),
+    ]
+
+    def _candidate_run_dirs(group):
+        if all_runs.empty:
+            return []
+        matches = all_runs[(all_runs["group"] == group) & (all_runs["status"] == "finished")]
+        return matches["run_dir"].tolist()
+
+    def _load_candidate_view(run_dirs, depth, view_file):
+        frames = []
+        for run_dir in run_dirs:
+            path = (
+                Path(run_dir) / "layers" / f"layer_{depth:02d}" / "evaluation" / "val"
+                / f"{view_file}.csv"
+            )
+            if not path.is_file():
+                continue
+            frame = pd.read_csv(path)
+            frame["run_dir"] = run_dir
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def candidate_scored_seeds():
+        """How many of the 36 (12 configs x 3 seeds) already have all four
+        views on disk, so a scoring job still in flight is stated rather than
+        silently read as zero rows."""
+        total = scored = 0
+        for candidate in LEADING_CANDIDATES:
+            run_dirs = _candidate_run_dirs(candidate["group"])
+            total += 3
+            for run_dir in run_dirs:
+                base = (
+                    Path(run_dir) / "layers" / f"layer_{candidate['depth']:02d}"
+                    / "evaluation" / "val"
+                )
+                views = ["view_a_detection", "view_b_coverage", "view_c_lead_time", "view_d_persistence"]
+                if all((base / f"{v}.csv").is_file() for v in views):
+                    scored += 1
+        return scored, total
+
+    def candidate_records(budget):
+        """Every view of every leading candidate, one row per seed per metric."""
+        records = []
+        for candidate in LEADING_CANDIDATES:
+            run_dirs = _candidate_run_dirs(candidate["group"])
+            if not run_dirs:
+                continue
+            for view, metric, view_file, column in _CANDIDATE_VIEWS:
+                frame = _load_candidate_view(run_dirs, candidate["depth"], view_file)
+                if frame.empty or column not in frame.columns:
+                    continue
+                rows = frame[frame["target_negative_fpr"] == budget]
+                for _, row in rows.iterrows():
+                    records.append(
+                        {
+                            "stage": candidate["stage"],
+                            "label": candidate["label"],
+                            "summary": candidate["summary"],
+                            "depth": candidate["depth"],
+                            "view": view,
+                            "metric": metric,
+                            "value": row[column],
+                        }
+                    )
+            persistence = _load_candidate_view(run_dirs, candidate["depth"], "view_d_persistence")
+            if persistence.empty:
+                continue
+            for view, metric, population in _CANDIDATE_PERSISTENCE:
+                sub = persistence[persistence["population"] == population]
+                rows = sub[sub["target_negative_fpr"] == budget]
+                for _, row in rows.iterrows():
+                    records.append(
+                        {
+                            "stage": candidate["stage"],
+                            "label": candidate["label"],
+                            "summary": candidate["summary"],
+                            "depth": candidate["depth"],
+                            "view": view,
+                            "metric": metric,
+                            "value": row["median_first_run_length"],
+                        }
+                    )
+        return pd.DataFrame(records)
+
+    _ = METRIC_ORDER  # re-exported unchanged; the metric set is identical to scorecard()'s
+    return candidate_records, candidate_scored_seeds
+
+
+@app.cell
+def _(
+    METRIC_ORDER,
+    STAGE_ORDER,
+    budget_choice,
+    candidate_records,
+    candidate_scored_seeds,
+    missing,
+    mo,
+    pd,
+):
+    def candidate_scorecard(budget):
+        long = candidate_records(budget)
+        if long.empty:
+            return missing(
+                "None of the twelve leading candidates have been through the "
+                "evaluator yet on this depth."
+            )
+
+        def summarise(values):
+            values = values.dropna()
+            if values.empty:
+                return ""
+            middle = values.median()
+            text = f"{middle:.3f}" if abs(middle) < 100 else f"{middle:.0f}"
+            if len(values) > 1 and values.min() != values.max():
+                low, high = values.min(), values.max()
+                span = (
+                    f"{low:.3f}–{high:.3f}" if abs(middle) < 100 else f"{low:.0f}–{high:.0f}"
+                )
+                return f"{text} [{span}]"
+            return text
+
+        meta = (
+            long[["stage", "label", "summary", "depth"]]
+            .drop_duplicates()
+            .set_index("label")
+        )
+        pivoted = long.pivot_table(
+            index="label", columns="metric", values="value", aggfunc=summarise
+        ).reindex(columns=[m for m in METRIC_ORDER if m in set(long["metric"])])
+        table = meta.join(pivoted).reset_index()
+        stage_rank = {stage: i for i, stage in enumerate(STAGE_ORDER)}
+        table["_order"] = table["stage"].map(stage_rank)
+        table = table.sort_values(["_order", "label"]).drop(columns="_order")
+        table = table.rename(columns={"summary": "recipe", "depth": "scored at layer"})
+
+        scored, total = candidate_scored_seeds()
+        progress = (
+            f" **{scored} of {total}** seed runs have been scored so far; the "
+            "rest are queued or still running, and simply have no row here yet."
+            if scored < total
+            else ""
+        )
+        return mo.vstack(
+            [
+                mo.md(
+                    "One row per candidate, grouped by the stage it came from. "
+                    "Median across its 3 seeds, with the seed-to-seed range in "
+                    "brackets where it varies. Each was scored at the single "
+                    "layer it was picked at (**scored at layer**), not the "
+                    "automatic per-run checkpoint the rest of the notebook uses "
+                    "— these are hand-picked checkpoints, chosen outside this "
+                    f"notebook. At a **{budget:.0%} false-alarm budget** on "
+                    f"`val`.{progress}"
+                ),
+                mo.ui.table(table, selection=None),
+            ]
+        )
+
+    candidate_scorecard(budget_choice.value)
+    return (candidate_scorecard,)
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_MUTED,
+    INK_SOFT,
+    LEADING_CANDIDATES,
+    SERIES,
+    STAGE_ORDER,
+    budget_choice,
+    candidate_records,
+    missing,
+    mo,
+    plt,
+    save,
+    tidy,
+):
+    def candidate_views_figure(budget):
+        long = candidate_records(budget)
+        if long.empty:
+            return missing(
+                "None of the twelve leading candidates have been through the "
+                "evaluator yet on this depth."
+            )
+
+        stage_colors = dict(zip(STAGE_ORDER, SERIES[: len(STAGE_ORDER)]))
+        stage_of = {c["label"]: c["stage"] for c in LEADING_CANDIDATES}
+        ordered_labels = [c["label"] for c in LEADING_CANDIDATES]
+        positions = {label: index for index, label in enumerate(ordered_labels)}
+
+        panels = [
+            (
+                "A. does it fire on the right answers (○ recall, △ precision)",
+                [("recall", "o"), ("precision", "^")],
+                None,
+            ),
+            (
+                "B. what share of tokens does it flag (○ in-pattern, △ warning 256)",
+                [("in-pattern coverage", "o"), ("warning coverage 256", "^")],
+                None,
+            ),
+            ("C. how early, in tokens", [("median lead", "o")], 0.0),
+            ("D. how long the first alarm holds", [("alarm length, degenerate", "o")], None),
+        ]
+
+        fig, axes = plt.subplots(
+            1, len(panels), figsize=(3.5 * len(panels), 0.34 * len(ordered_labels) + 2.8)
+        )
+        for axis, (title, metrics, reference) in zip(axes, panels):
+            for metric, marker in metrics:
+                subset = long[long["metric"] == metric]
+                if subset.empty:
+                    continue
+                for label, values in subset.groupby("label")["value"]:
+                    y = positions[label]
+                    colour = stage_colors[stage_of[label]]
+                    if values.min() != values.max():
+                        axis.plot(
+                            [values.min(), values.max()], [y, y],
+                            color=colour, alpha=0.35, linewidth=3, solid_capstyle="round",
+                        )
+                    axis.plot(
+                        values.median(), y, marker, color=colour,
+                        markeredgecolor="white", markeredgewidth=0.8,
+                        markersize=7 if marker == "o" else 6.5,
+                    )
+            if reference is not None:
+                axis.axvline(reference, color=INK_MUTED, linewidth=1, zorder=0)
+            # Boundaries between stages, so the grouping reads without counting rows.
+            for boundary in range(3, len(ordered_labels), 3):
+                axis.axhline(boundary - 0.5, color=INK_MUTED, alpha=0.4, linewidth=0.8)
+            axis.set_yticks(range(len(ordered_labels)))
+            axis.set_yticklabels(ordered_labels)
+            axis.set_ylim(-0.7, len(ordered_labels) - 0.3)
+            axis.invert_yaxis()
+            axis.set_title(title, color=INK_SOFT, fontsize=8.5)
+            tidy(axis)
+        for axis in axes[1:]:
+            axis.set_yticklabels([])
+
+        handles = [
+            plt.Line2D([0], [0], marker="o", linestyle="", color=stage_colors[stage], label=stage)
+            for stage in STAGE_ORDER
+        ]
+        fig.legend(
+            handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.03),
+            ncol=len(STAGE_ORDER), fontsize=8, title="stage", title_fontsize=8,
+        )
+        fig.suptitle(
+            f"The leading candidates on val, layer noted per row, at a {budget:.0%} "
+            "false-alarm budget",
+            x=0.005, y=0.985, ha="left", fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0.02, 1, 0.86))
+        return mo.vstack(
+            [
+                save(fig, "leading_candidates_views", FIGURES),
+                mo.md(
+                    "_Same four views as every per-stage plot in this notebook, "
+                    "but with all twelve leading candidates on one set of axes, "
+                    "coloured by the stage that produced them rather than by "
+                    "metric — circles and triangles distinguish the two metrics "
+                    "that share a panel, and the dividing lines mark where one "
+                    "stage's three picks end and the next stage's begin. Reading "
+                    "across a divider: if one stage's cluster sits clearly apart "
+                    "from another's on a panel, that stage's axis moved the "
+                    "result; if the clusters overlap, this comparison alone "
+                    "cannot tell the stages apart on that view._"
+                ),
+            ]
+        )
+
+    candidate_views_figure(budget_choice.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
     # S3. Do adapters earn their cost?
 
     Everything so far reads a frozen representation. If the run-up carries a
@@ -3712,6 +4125,196 @@ def _(EXPERIMENTS, PLAN, REPO, mo, render):
         It is regenerated whenever this cell runs, so the register above stays
         the single source of truth.
         """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # Cross-model probe transfer
+
+    Every run above trains and scores against Apertus's own activations.
+    This section asks a different question of the same checkpoints: does
+    a head learned on Apertus still separate degenerating rollouts on a
+    model it never saw, with no retraining?
+
+    `scripts/evaluate_cross_model_transfer.py` scores a checkpoint
+    against a different model's own dataset build -- same per-token
+    scoring and the same four-view evaluator as scoring it on Apertus,
+    just pointed at cached activations from
+    `meta-llama/Llama-3.1-8B-Instruct` or
+    `mistralai/Mistral-7B-Instruct-v0.1` instead -- and writes to
+    `<run_dir>/cross_model/<dataset short_name>/layer_NN/`, which is an
+    ordinary run directory as far as the evaluator is concerned. Both
+    models share Apertus's hidden size (4096) and layer count (32), so a
+    saved linear head is shape-compatible; what this section reports is
+    whether it is also *useful* there.
+
+    Only `lora-none` checkpoints are ever scored this way: a LoRA
+    adapter is fit to Apertus's own decoder weights and has no meaning
+    against a different model's.
+
+    Ground truth (`onset_labels.parquet`) comes from the LLM judge, same
+    as for every other split in this notebook -- a row below is only as
+    trustworthy as that judge run.
+    """)
+    return
+
+
+@app.cell
+def _(OUTPUTS, pd):
+    def find_cross_model_results():
+        """Every (run, dataset, layer, split) this notebook can find a scored cross-model result for.
+
+        Walked from the CSVs themselves rather than from a manifest, so a
+        result shows up here the moment `evaluate_scores.py` has written it,
+        with no bookkeeping step to keep in sync.
+        """
+        rows = []
+        for eval_dir in sorted(OUTPUTS.glob("*/*/cross_model/*/layer_*/evaluation/*")):
+            if not (eval_dir / "view_a_detection.csv").is_file():
+                continue
+            layer_dir = eval_dir.parent.parent
+            dataset_dir = layer_dir.parent
+            run_dir = dataset_dir.parent.parent
+            rows.append(
+                {
+                    "run_name": run_dir.parent.name,
+                    "attempt": run_dir.name,
+                    "dataset": dataset_dir.name,
+                    "layer": int(layer_dir.name.split("_")[-1]),
+                    "split": eval_dir.name,
+                    "run_dir": str(run_dir),
+                    "eval_dir": str(eval_dir),
+                }
+            )
+        return pd.DataFrame(rows)
+
+    cross_model_results = find_cross_model_results()
+    return (cross_model_results,)
+
+
+@app.cell
+def _(cross_model_results, missing, mo):
+    mo.stop(
+        cross_model_results.empty,
+        missing(
+            "No cross-model scores written yet. They land under "
+            "`<run_dir>/cross_model/<dataset>/layer_NN/evaluation/<split>/` once "
+            "`scripts/evaluate_cross_model_transfer.py` + `scripts/evaluate_scores.py` "
+            "have run for a checkpoint -- see `/tmp/score-driver/score_checkpoints.sbatch`, "
+            "queued to follow the LLM-judge run."
+        ),
+    )
+    mo.vstack(
+        [
+            mo.md(f"**{len(cross_model_results)} scored (run, dataset, layer, split) combination(s) found.**"),
+            mo.ui.table(
+                cross_model_results.drop(columns=["run_dir", "eval_dir"]), selection=None
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(cross_model_results, mo):
+    mo.stop(cross_model_results.empty)
+    cross_model_dataset_choice = mo.ui.dropdown(
+        options=sorted(cross_model_results["dataset"].unique()),
+        value=sorted(cross_model_results["dataset"].unique())[0],
+        label="scored against",
+    )
+    cross_model_split_choice = mo.ui.dropdown(
+        options=sorted(cross_model_results["split"].unique()),
+        value=(
+            "val"
+            if "val" in cross_model_results["split"].unique()
+            else sorted(cross_model_results["split"].unique())[0]
+        ),
+        label="split",
+    )
+    mo.hstack([cross_model_dataset_choice, cross_model_split_choice], justify="start", gap=2)
+    return cross_model_dataset_choice, cross_model_split_choice
+
+
+@app.cell
+def _(
+    Path,
+    cross_model_dataset_choice,
+    cross_model_results,
+    cross_model_split_choice,
+    mo,
+    pd,
+):
+    mo.stop(cross_model_results.empty)
+
+    def native_evaluation_dir(run_dir, layer, split):
+        """The same checkpoint's own Apertus-side evaluation, for comparison.
+
+        Every checkpoint scored here trained several depths at once, so its
+        native evaluation lives under `layers/layer_NN/`, never at the run
+        root (see Section "Where a run lands" above).
+        """
+        scoped = Path(run_dir) / "layers" / f"layer_{int(layer):02d}" / "evaluation" / split
+        return scoped if scoped.is_dir() else None
+
+    def load_budget_row(eval_dir, budget=0.01):
+        detection = pd.read_csv(eval_dir / "view_a_detection.csv")
+        coverage = pd.read_csv(eval_dir / "view_b_coverage.csv")
+        lead = pd.read_csv(eval_dir / "view_c_lead_time.csv")
+        row = detection[detection["target_negative_fpr"] == budget].iloc[0]
+        cov_row = coverage[coverage["target_negative_fpr"] == budget].iloc[0]
+        lead_row = lead[lead["target_negative_fpr"] == budget].iloc[0]
+        return {
+            "recall": row["recall"],
+            "precision": row["precision"],
+            "in_pattern_recall": cov_row["in_pattern_recall"],
+            "warning_recall_256": cov_row["warning_recall_256"],
+            "median_offset": lead_row["median_offset"],
+            "never_fired_positives": lead_row["never_fired_positives"],
+        }
+
+    def transfer_comparison_table():
+        selected = cross_model_results[
+            (cross_model_results["dataset"] == cross_model_dataset_choice.value)
+            & (cross_model_results["split"] == cross_model_split_choice.value)
+        ]
+        rows = []
+        for record in selected.itertuples(index=False):
+            transferred = load_budget_row(Path(record.eval_dir))
+            native_dir = native_evaluation_dir(
+                record.run_dir, record.layer, cross_model_split_choice.value
+            )
+            native = load_budget_row(native_dir) if native_dir else None
+            rows.append(
+                {
+                    "run": record.run_name,
+                    "layer": record.layer,
+                    "native recall": native["recall"] if native else None,
+                    f"{cross_model_dataset_choice.value} recall": transferred["recall"],
+                    "native precision": native["precision"] if native else None,
+                    f"{cross_model_dataset_choice.value} precision": transferred["precision"],
+                    "native in-pattern recall": native["in_pattern_recall"] if native else None,
+                    f"{cross_model_dataset_choice.value} in-pattern recall": transferred[
+                        "in_pattern_recall"
+                    ],
+                }
+            )
+        return pd.DataFrame(rows)
+
+    mo.vstack(
+        [
+            mo.md(
+                "Recall/precision/in-pattern-recall at the 1% false-alarm budget, "
+                "native Apertus-side vs. scored on the chosen dataset with no "
+                "retraining. `native` columns are blank when that checkpoint hasn't "
+                "been scored on its own split yet."
+            ),
+            mo.ui.table(transfer_comparison_table(), selection=None),
+        ]
     )
     return
 
