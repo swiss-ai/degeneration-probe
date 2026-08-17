@@ -234,9 +234,12 @@ def process_task(
     failures are captured so one bad rollout doesn't abort the whole run).
     """
     out_path = paths.rollout_activation_path(config, domain, prompt_id, rollout_idx)
-    # Recorded relative to the dataset root: an absolute path stops being true
-    # the moment the build directory is renamed or moved.
-    relative_path = str(out_path.relative_to(paths.dataset_root(config)))
+    # Recorded relative to the activations root rather than as an absolute path,
+    # which stops being true the moment the cache is moved. The activations root
+    # is the anchor because it is the one the cache tree actually hangs off; a
+    # build whose hidden states live on their own filesystem has no relative
+    # path to the build directory at all.
+    relative_path = str(out_path.relative_to(paths.activations_root(config)))
     try:
         input_ids, prompt_len = build_completion_input_ids(tokenizer, prompt_text, generated_token_ids)
         completion_len = len(generated_token_ids)

@@ -1,6 +1,10 @@
 short_name: mistral-7b-instruct-v0p1
 build_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-mistral-7b-instruct-v0p1
 build_config: configs/dataset/builds/degeneration-dataset-mistral-7b-instruct-v0p1.yaml
+# This build's hidden states are too large to sit beside the rest of it; they
+# live on scratch and must be treated as regenerable. Mirrors the same key in
+# the build config above.
+activations_root: /capstor/scratch/cscs/mdenegri/degeneration-probe/degeneration-dataset-mistral-7b-instruct-v0p1_activations
 
 splits:
   train: train
@@ -9,8 +13,8 @@ splits:
   test_heldout_domains: test_heldout_domains
 
 tokenization:
-  max_length: 1536
-  max_completion_length: 1024
+  max_length: 4608
+  max_completion_length: 4096
   prompt_truncation_side: left
 
 sampling:

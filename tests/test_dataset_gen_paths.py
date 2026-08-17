@@ -20,16 +20,23 @@ BUILD_CONFIG_DIR = REPO_ROOT / "configs" / "dataset" / "builds"
 APERTUS_INSTRUCT_YAML = BUILD_CONFIG_DIR / "degeneration-dataset-apertus-8b-instruct.yaml"
 ALL_DATASET_YAMLS = sorted(BUILD_CONFIG_DIR.glob("degeneration-dataset-*.yaml"))
 
-# The three directly-comparable dataset builds: same prompt sample, same
-# rollout budget, differing only in which model produced the completions (see
-# notebooks/inspect_dataset.ipynb Section 1). Named explicitly rather than
-# derived from ALL_DATASET_YAMLS so that other, unrelated build configs (e.g.
-# a smaller pilot-scale build for a cross-model probe-transfer check) can live
-# in the same directory without being swept into this family's comparison.
+# The directly-comparable dataset builds: same prompt sample, same rollout
+# budget, differing only in which model produced the completions (see
+# notebooks/inspect_dataset.ipynb Section 1). The token budget in particular
+# has to match across the family, because a rollout stopped by the cap is what
+# the degeneration label keys off -- a build generated to a shorter budget hits
+# the cap far more often and for a different reason, so its rates cannot be
+# read against the others'.
+#
+# Named explicitly rather than derived from ALL_DATASET_YAMLS so that an
+# unrelated build config can live in the same directory without being swept
+# into this family's comparison.
 COMPARABLE_FAMILY_YAMLS = [
     APERTUS_INSTRUCT_YAML,
     BUILD_CONFIG_DIR / "degeneration-dataset-apertus1p5-capfilter-linear-it8816.yaml",
     BUILD_CONFIG_DIR / "degeneration-dataset-apertus1p5-sft256k-4200.yaml",
+    BUILD_CONFIG_DIR / "degeneration-dataset-llama3p1-8b-instruct.yaml",
+    BUILD_CONFIG_DIR / "degeneration-dataset-mistral-7b-instruct-v0p1.yaml",
 ]
 
 
@@ -216,10 +223,55 @@ def test_every_dataset_build_config_loads_and_uses_its_own_roots(yaml_path):
     loaded = DatasetGenConfig.from_yaml(yaml_path)
     assert loaded.output_root.name == yaml_path.stem
     assert loaded.work_root.name == f"{yaml_path.stem}_work"
+    if loaded.activations_root is not None:
+        assert loaded.activations_root.name.startswith(yaml_path.stem)
+
+
+def test_activations_default_to_living_inside_the_build():
+    config = DatasetGenConfig(output_root="/somewhere/a-build")
+    assert paths_module.activations_root(config) == Path("/somewhere/a-build/activations")
+    assert paths_module.activations_manifest_path(config) == Path(
+        "/somewhere/a-build/activations/manifest.parquet"
+    )
+
+
+def test_a_relocated_activations_root_moves_the_whole_cache_tree_and_nothing_else():
+    """Hidden states can outgrow the filesystem holding the rest of a build."""
+    config = DatasetGenConfig(output_root="/somewhere/a-build", activations_root="/elsewhere/cache")
+
+    assert paths_module.activations_root(config) == Path("/elsewhere/cache")
+    assert paths_module.activations_manifest_path(config) == Path("/elsewhere/cache/manifest.parquet")
+    assert paths_module.rollout_activation_path(config, "aime_2025", "aime_2025_00000", 3) == Path(
+        "/elsewhere/cache/aime_2025/aime_2025_00000/rollout_3.safetensors"
+    )
+
+    # Everything that is small and durable stays with the build itself.
+    assert paths_module.prompts_path(config) == Path("/somewhere/a-build/prompts/prompts.parquet")
+    assert paths_module.llm_judge_dir(config) == Path("/somewhere/a-build/llm_judge")
+    assert paths_module.generations_shard_path(config, "aime_2025", 0) == Path(
+        "/somewhere/a-build/generations/aime_2025/shard_00000.parquet"
+    )
+
+
+@pytest.mark.parametrize(
+    "activations_root", [None, "/elsewhere/cache"], ids=["in-build", "relocated"]
+)
+def test_a_cached_rollout_always_sits_under_the_activations_root(activations_root):
+    """The activations manifest records each rollout relative to that root.
+
+    Anchoring anywhere else has no answer for a build whose hidden states are
+    on a different filesystem than the build directory.
+    """
+    config = DatasetGenConfig(
+        output_root="/somewhere/a-build", activations_root=activations_root
+    )
+    rollout = paths_module.rollout_activation_path(config, "aime_2025", "aime_2025_00000", 3)
+    relative = rollout.relative_to(paths_module.activations_root(config))
+    assert relative == Path("aime_2025/aime_2025_00000/rollout_3.safetensors")
 
 
 def test_all_dataset_builds_keep_identical_sampling_parameters():
-    assert len(COMPARABLE_FAMILY_YAMLS) == 3
+    assert len(COMPARABLE_FAMILY_YAMLS) == 5
     configs = [DatasetGenConfig.from_yaml(path) for path in COMPARABLE_FAMILY_YAMLS]
     comparable_fields = [
         "in_domain_sources",
@@ -234,7 +286,7 @@ def test_all_dataset_builds_keep_identical_sampling_parameters():
     for other in configs[1:]:
         for field_name in comparable_fields:
             assert getattr(other, field_name) == getattr(configs[0], field_name), field_name
-    assert len({config.model_name for config in configs}) == 3
+    assert len({config.model_name for config in configs}) == 5
 
 
 def test_source_missing_required_key_raises():

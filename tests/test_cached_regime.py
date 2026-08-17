@@ -136,7 +136,7 @@ def test_the_dataset_pairs_the_probed_layer_with_its_targets(tmp_path):
     )
     tokenization = SimpleNamespace(max_completion_length=4096)
     dataset = CachedActivationDataset(
-        [record], build_root=str(tmp_path), probe_layer=LAYER, tokenization=tokenization
+        [record], activations_root=str(tmp_path), probe_layer=LAYER, tokenization=tokenization
     )
     item = dataset[0]
     assert item["features"].shape == (TOKENS, HIDDEN)
@@ -163,7 +163,7 @@ def test_batches_pad_to_the_longest_rollout_and_mask_what_was_added(tmp_path):
     ]
     tokenization = SimpleNamespace(max_completion_length=4096)
     dataset = CachedActivationDataset(
-        records, build_root=str(tmp_path), probe_layer=LAYER, tokenization=tokenization
+        records, activations_root=str(tmp_path), probe_layer=LAYER, tokenization=tokenization
     )
     batch = cached_collate_fn([dataset[0], dataset[1]])
     assert batch["features"].shape == (2, 6, HIDDEN)

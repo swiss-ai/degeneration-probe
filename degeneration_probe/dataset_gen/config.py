@@ -152,9 +152,16 @@ class DatasetGenConfig:
     top_p: float = 0.9
     seed: int = 42
 
-    # Storage roots.
+    # Storage roots. ``activations_root`` is optional and defaults to
+    # ``output_root / "activations"``. Set it when the cached hidden states are
+    # too large to sit next to the rest of the build: they dominate a build's
+    # footprint by two orders of magnitude, so they sometimes have to live on a
+    # filesystem with room for them while the small, durable artifacts
+    # (prompts, generations, labels, judge verdicts) stay put. Anything pointed
+    # at a purgeable filesystem must be treated as regenerable.
     output_root: Union[str, Path] = DEFAULT_OUTPUT_ROOT
     work_root: Union[str, Path] = DEFAULT_WORK_ROOT
+    activations_root: Optional[Union[str, Path]] = None
 
     # How the in-domain prompt pool is split. Held-out sources are not split
     # further -- they are entirely reserved for out-of-distribution eval.
@@ -163,6 +170,8 @@ class DatasetGenConfig:
     def __post_init__(self) -> None:
         self.output_root = Path(self.output_root)
         self.work_root = Path(self.work_root)
+        if self.activations_root is not None:
+            self.activations_root = Path(self.activations_root)
 
         for group_name in ("in_domain_sources", "held_out_sources"):
             sources = getattr(self, group_name)
@@ -195,6 +204,8 @@ class DatasetGenConfig:
         raw = asdict(self)
         raw["output_root"] = str(self.output_root)
         raw["work_root"] = str(self.work_root)
+        if self.activations_root is not None:
+            raw["activations_root"] = str(self.activations_root)
         return raw
 
     @classmethod

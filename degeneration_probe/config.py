@@ -435,6 +435,23 @@ class DatasetConfig:
     splits: SplitConfig = field(default_factory=SplitConfig)
     tokenization: TokenizationConfig = field(default_factory=TokenizationConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    # Where the build's cached hidden states live. Defaults to the
+    # ``activations/`` subtree of the build itself; set it only for a build
+    # whose activations were written elsewhere because they were too large to
+    # sit beside it. Must agree with the same key in the build's own
+    # generation config, which is what put them there.
+    activations_root: Optional[str] = None
+
+    @property
+    def activations_dir(self) -> Path:
+        """The directory holding ``<domain>/<prompt_id>/rollout_<k>.safetensors``."""
+        if self.activations_root is not None:
+            return Path(self.activations_root)
+        return Path(self.build_root) / "activations"
+
+    @property
+    def activations_manifest_path(self) -> Path:
+        return self.activations_dir / "manifest.parquet"
 
     def __post_init__(self) -> None:
         for name, cls in {

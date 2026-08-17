@@ -98,7 +98,7 @@ def run(
     hidden_size = int(
         list(
             pd.read_parquet(
-                Path(config.dataset.build_root) / "activations" / "manifest.parquet",
+                config.dataset.activations_manifest_path,
                 columns=["shape"],
             )["shape"].iloc[0]
         )[-1]

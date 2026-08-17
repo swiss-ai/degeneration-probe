@@ -6,25 +6,25 @@ in_domain_sources:
     hf_subset: null
     hf_split: train
     prompt_field: question
-    n_prompts: 100
+    n_prompts: 600
   - name: numinamath_1_5
     hf_repo: AI-MO/NuminaMath-1.5
     hf_subset: null
     hf_split: train
     prompt_field: problem
-    n_prompts: 100
+    n_prompts: 600
   - name: if_sft_data_verified
     hf_repo: allenai/IF_sft_data_verified
     hf_subset: null
     hf_split: train
     prompt_field: messages
-    n_prompts: 100
+    n_prompts: 600
   - name: llama_nemotron
     hf_repo: nvidia/Llama-Nemotron-Post-Training-Dataset
     hf_subset: SFT
     hf_split: code
     prompt_field: input
-    n_prompts: 100
+    n_prompts: 600
   - name: aime_2025
     hf_repo: MathArena/aime_2025
     hf_subset: null
@@ -38,24 +38,25 @@ held_out_sources:
     hf_subset: null
     hf_split: train
     prompt_field: Open-ended Verifiable Question
-    n_prompts: 100
+    n_prompts: 600
   - name: codeforces
     hf_repo: open-r1/codeforces
     hf_subset: verifiable-prompts
     hf_split: train
     prompt_field: prompt
-    n_prompts: 100
+    n_prompts: 600
     filter_field: rating
     min_value: 2000
 
 n_rollouts_per_prompt: 10
-max_new_tokens: 1024
+max_new_tokens: 4096
 temperature: 0.7
 top_p: 0.9
 seed: 42
 
 output_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-llama3p1-8b-instruct
 work_root: /capstor/scratch/cscs/mdenegri/degeneration-probe/degeneration-dataset-llama3p1-8b-instruct_work
+activations_root: /capstor/scratch/cscs/mdenegri/degeneration-probe/degeneration-dataset-llama3p1-8b-instruct_activations
 
 split_fractions:
   train: 0.70

@@ -46,12 +46,17 @@ def probe_layer_for_cached_slot(slot: int) -> int:
 
 
 def activation_path(
-    build_root: Union[str, Path], domain: str, prompt_id: str, rollout_idx: int
+    activations_root: Union[str, Path], domain: str, prompt_id: str, rollout_idx: int
 ) -> Path:
-    """Rebuild a rollout's location from its identity, not from a stored path."""
+    """Rebuild a rollout's location from its identity, not from a stored path.
+
+    ``activations_root`` is the directory the cache tree hangs off. For most
+    builds that is ``activations/`` inside the build, but a build large enough
+    to need its hidden states on another filesystem passes that location here
+    instead; the tree below it is identical either way.
+    """
     return (
-        Path(build_root)
-        / "activations"
+        Path(activations_root)
         / str(domain)
         / str(prompt_id)
         / f"rollout_{int(rollout_idx)}.safetensors"
@@ -59,7 +64,7 @@ def activation_path(
 
 
 def load_probe_layer(
-    build_root: Union[str, Path],
+    activations_root: Union[str, Path],
     domain: str,
     prompt_id: str,
     rollout_idx: int,
@@ -69,7 +74,7 @@ def load_probe_layer(
 ) -> torch.Tensor:
     """Return ``[num_tokens, hidden_size]`` for one probed layer of one rollout."""
     return load_probe_layers(
-        build_root,
+        activations_root,
         domain,
         prompt_id,
         rollout_idx,
@@ -79,7 +84,7 @@ def load_probe_layer(
 
 
 def load_probe_layers(
-    build_root: Union[str, Path],
+    activations_root: Union[str, Path],
     domain: str,
     prompt_id: str,
     rollout_idx: int,
@@ -94,7 +99,7 @@ def load_probe_layers(
     probe per layer affordable: the depths can be trained together in a single
     pass over the data rather than one pass each.
     """
-    path = activation_path(build_root, domain, prompt_id, rollout_idx)
+    path = activation_path(activations_root, domain, prompt_id, rollout_idx)
     if not path.is_file():
         raise FileNotFoundError(f"No cached activations for {domain}/{prompt_id}/{rollout_idx}: {path}")
     requested = [int(layer) for layer in probe_layers]

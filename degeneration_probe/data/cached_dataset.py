@@ -37,14 +37,14 @@ class CachedActivationDataset(Dataset):
         self,
         records: List[DegenerationRecord],
         *,
-        build_root: str,
+        activations_root: str,
         probe_layer: int,
         tokenization: TokenizationConfig,
         shuffle: bool = False,
         seed: int = 42,
     ) -> None:
         self.records = list(records)
-        self.build_root = str(build_root)
+        self.activations_root = str(activations_root)
         # One depth or many: a sequence trains a head per layer from a single
         # read, since the seek dominates the cost of the file.
         self.probe_layers = (
@@ -67,7 +67,7 @@ class CachedActivationDataset(Dataset):
             record.targets[: self.tokenization.max_completion_length], dtype=np.float32
         )
         features = load_probe_layers(
-            self.build_root,
+            self.activations_root,
             record.domain,
             record.prompt_id,
             record.rollout_idx,
@@ -170,7 +170,7 @@ def create_cached_dataset(
     )
     return CachedActivationDataset(
         records,
-        build_root=config.build_root,
+        activations_root=str(config.activations_dir),
         probe_layer=probe_layer,
         tokenization=config.tokenization,
         shuffle=training,

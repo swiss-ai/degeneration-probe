@@ -60,7 +60,7 @@ def _records():
 def _dataset(cache, strategy="frontier_window", anchor="centered", **kwargs):
     selection = SelectionConfig(strategy=strategy, window_size=W, anchor=anchor, **kwargs)
     return WindowedActivationDataset(
-        _records(), build_root=str(cache), probe_layer=LAYER,
+        _records(), activations_root=str(cache), probe_layer=LAYER,
         selection=selection, batch_size=4, seed=7,
     )
 
@@ -130,7 +130,7 @@ def test_a_rule_that_excludes_the_positive_class_is_refused(cache):
         targets[ONSET - 4 :] = 1.0  # a horizon of four tokens
         records[index] = record.__class__(**{**record.__dict__, "targets": targets})
     dataset = WindowedActivationDataset(
-        records, build_root=str(cache), probe_layer=LAYER,
+        records, activations_root=str(cache), probe_layer=LAYER,
         selection=SelectionConfig(strategy="frontier_window", window_size=W, anchor="trailing"),
         batch_size=4, seed=7,
     )

@@ -62,7 +62,7 @@ def activation_hidden_size(config: ExperimentConfig) -> int:
     import pandas as pd
 
     manifest = pd.read_parquet(
-        Path(config.dataset.build_root) / "activations" / "manifest.parquet",
+        config.dataset.activations_manifest_path,
         columns=["shape"],
     )
     return int(list(manifest["shape"].iloc[0])[-1])
@@ -259,7 +259,7 @@ def _train(
                 }
             return WindowedActivationDataset(
                 dataset.records,
-                build_root=config.dataset.build_root,
+                activations_root=str(config.dataset.activations_dir),
                 probe_layer=config.training.probe.probed_layers,
                 selection=config.training.selection,
                 batch_size=config.training.runtime.per_device_train_batch_size,

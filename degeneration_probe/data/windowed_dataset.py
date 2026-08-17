@@ -35,7 +35,7 @@ class WindowedActivationDataset(Dataset):
         self,
         records: Sequence,
         *,
-        build_root: str,
+        activations_root: str,
         probe_layer: int,
         selection,
         batch_size: int,
@@ -44,7 +44,7 @@ class WindowedActivationDataset(Dataset):
         hardness: Optional[Dict[int, np.ndarray]] = None,
     ) -> None:
         self.records = list(records)
-        self.build_root = str(build_root)
+        self.activations_root = str(activations_root)
         # One depth or many: a sequence trains a head per layer from a single
         # read, since the seek dominates the cost of the file.
         self.probe_layers = (
@@ -123,7 +123,7 @@ class WindowedActivationDataset(Dataset):
         record = self.records[window.record_index]
         positions = window.positions
         features = load_probe_layers(
-            self.build_root,
+            self.activations_root,
             record.domain,
             record.prompt_id,
             record.rollout_idx,

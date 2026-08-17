@@ -60,6 +60,7 @@ import pandas as pd
 
 from degeneration_probe.dataset_gen import paths
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
+from degeneration_probe.dataset_gen.manifest import write_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "dataset" / "builds" / "degeneration-dataset-apertus-8b-instruct.yaml"
@@ -405,9 +406,16 @@ def main() -> None:
     prompts_out_path = write_prompts_parquet(config, prompts_df)
     split_out_paths = write_splits_jsonl(config, splits)
 
+    # Provenance for the build, recorded by the stage that opens it: the commit,
+    # the full resolved config, and the model's own config. Every later stage
+    # reads the prompt pool written here, so a build that got this far is a
+    # build worth being able to identify afterwards.
+    manifest_out_path = write_manifest(config)
+
     print(f"\nWrote {len(prompts_df)} prompts to {prompts_out_path}")
     for name, out_path in split_out_paths.items():
         print(f"Wrote split {name!r} ({len(splits[name])} prompt_ids) to {out_path}")
+    print(f"Wrote build manifest to {manifest_out_path}")
 
 
 if __name__ == "__main__":

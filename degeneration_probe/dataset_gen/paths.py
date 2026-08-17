@@ -28,6 +28,11 @@ Layout under ``config.output_root`` (e.g.
     llm_judge/
     splits/<split_name>.jsonl
     notebooks/
+
+The ``activations/`` subtree is the one part of this layout that may live
+elsewhere: a build can set its own activations root, in which case the tree
+below it keeps exactly the structure shown above, just under a different
+parent. See ``activations_root``.
 """
 
 from __future__ import annotations
@@ -131,6 +136,17 @@ def prompt_stats_path(config: DatasetGenConfig) -> Path:
 # --- activations -----------------------------------------------------------------
 
 def activations_root(config: DatasetGenConfig) -> Path:
+    """Where cached hidden states live.
+
+    Defaults to ``activations/`` inside the build, but a config may point this
+    at a different filesystem. Cached activations are two orders of magnitude
+    larger than everything else a build produces, so they are the one artifact
+    that sometimes cannot be stored alongside the rest of it. Every activation
+    path below is derived from here, so a build that relocates them keeps the
+    same internal layout either way.
+    """
+    if config.activations_root is not None:
+        return Path(config.activations_root)
     return dataset_root(config) / "activations"
 
 
@@ -218,10 +234,12 @@ def work_root(config: DatasetGenConfig) -> Path:
 
 
 def all_output_dirs(config: DatasetGenConfig) -> list[Path]:
-    """All directories that should exist (possibly empty) under output_root.
+    """All directories a build should have (possibly empty) before it runs.
 
     One subfolder per configured source name under generations/, labels/,
-    and activations/ (not per in_domain/held_out split).
+    and activations/ (not per in_domain/held_out split). These sit under
+    output_root except for the activation directories, which follow
+    ``activations_root`` wherever a build points it.
     """
     dirs = [
         dataset_root(config),

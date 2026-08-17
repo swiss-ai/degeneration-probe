@@ -1,7 +1,9 @@
 #!/bin/bash
-# Submits cluster/utils/dataset/generate.sbatch as 6 INDEPENDENT per-domain
-# wave chains, so no single domain is blocked by the `normal` partition's 12h
-# MaxTime, and no domain has to wait on any other domain's progress.
+# Submits cluster/utils/dataset/generate.sbatch as one INDEPENDENT wave chain
+# per configured domain, so no single domain is blocked by the `normal`
+# partition's 12h MaxTime, and no domain has to wait on any other domain's
+# progress. Every domain in the build config needs an entry in WAVES below:
+# a domain missing from the map is silently never generated.
 #
 # Each domain gets its own chain of N waves (N sized to that domain's
 # worst-case GPU-hour estimate at 4096 tokens / 600 prompts, +1 safety
@@ -41,7 +43,24 @@ declare -A WAVES=(
     [llama_nemotron]=5
     [medical_o1]=2
     [aime_2025]=2
+    [codeforces]=4
 )
+
+# Fail loudly rather than quietly skipping a domain the build config asks for.
+mapfile -t CONFIGURED_DOMAINS < <(
+    python - "$CONFIG" <<'PY'
+import sys, yaml
+config = yaml.safe_load(open(sys.argv[1]))
+for source in config["in_domain_sources"] + config["held_out_sources"]:
+    print(source["name"])
+PY
+)
+for domain in "${CONFIGURED_DOMAINS[@]}"; do
+    if [[ -z "${WAVES[$domain]:-}" ]]; then
+        echo "ERROR: $CONFIG configures domain '$domain', which has no wave count in WAVES." >&2
+        exit 1
+    fi
+done
 
 for domain in "${!WAVES[@]}"; do
     n_waves=${WAVES[$domain]}
