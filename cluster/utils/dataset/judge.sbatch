@@ -32,6 +32,14 @@ echo "Commit: $(git rev-parse HEAD)"
 echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Job: $SLURM_JOB_ID  Config: $CONFIG  Backend: $BACKEND"
 
+# Generation runs as wall-clock-limited waves and can stop with a domain part
+# done. This stage would not fail on that, it would succeed on partial input --
+# so check first and refuse rather than produce a quietly wrong result.
+# Explicit exit: this script deliberately runs without `set -e` so an exhausted
+# account does not abort the rotation, which also means a failing check here
+# would otherwise be ignored.
+.venv/bin/python scripts/assert_generation_complete.py --config "$CONFIG" || exit 1
+
 if [[ "$BACKEND" != "claude_agent_sdk" ]]; then
     python -m degeneration_probe.dataset_gen.llm_judge \
         --config "$CONFIG" \

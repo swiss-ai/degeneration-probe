@@ -23,6 +23,11 @@ echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
 
 export HF_TOKEN="$(cat ~/keys/.hf_token)"
 
+# Generation runs as wall-clock-limited waves and can stop with a domain part
+# done. This stage would not fail on that, it would succeed on partial input --
+# so check first and refuse rather than produce a quietly wrong result.
+.venv/bin/python scripts/assert_generation_complete.py --config "$CONFIG"
+
 # Optional: restrict caching to an explicit prompt_id allowlist (one per
 # line), for a build too large to cache in full when only some of it is
 # needed -- e.g. --export=ALL,CONFIG=...,PROMPT_IDS_FILE=/path/to/ids.txt.

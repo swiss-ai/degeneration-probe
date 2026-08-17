@@ -28,6 +28,11 @@ echo "Job: $SLURM_JOB_ID  Config: $CONFIG"
 source .venv/bin/activate
 export HF_TOKEN="$(cat ~/keys/.hf_token)"
 
+# Generation runs as wall-clock-limited waves and can stop with a domain part
+# done. This stage would not fail on that, it would succeed on partial input --
+# so check first and refuse rather than produce a quietly wrong result.
+.venv/bin/python scripts/assert_generation_complete.py --config "$CONFIG"
+
 python -m degeneration_probe.dataset_gen.onset_quotes --config "$CONFIG"
 python -m degeneration_probe.dataset_gen.onset_labels --config "$CONFIG"
 
