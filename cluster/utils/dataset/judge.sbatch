@@ -47,7 +47,7 @@ fi
 # Override the rotation order with e.g. --export=ALL,TOKEN_ORDER="lorenzobaggi moritzreihs marcodenegri lucasartori"
 # -- lets two judge jobs for different datasets run concurrently without both
 # starting from the same account and colliding on its usage window.
-TOKEN_NAMES=(${TOKEN_ORDER:-marcodenegri lucasartori lorenzobaggi moritzreihs})
+TOKEN_NAMES=(${TOKEN_ORDER:-marcodenegri moritzreihs lucasartori lorenzobaggi})
 
 remaining() {
     python3 - <<PY
