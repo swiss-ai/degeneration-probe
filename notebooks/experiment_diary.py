@@ -415,6 +415,39 @@ def _(mo):
     keeps the median an honest statement about the answers it describes, and
     makes the population it was taken over visible.
 
+    **fired_before_frontier**, the share of the answers that fired whose alarm
+    landed before the loop, is the third number of the view and the one that
+    makes the other two readable. The offsets are not a single population with
+    a centre: an answer is either caught in the run-up, typically a couple of
+    hundred tokens ahead, or it is caught shortly after the loop has started,
+    and almost nothing sits in between. A median over both halves reports a
+    point where few answers actually are, so it should never be read without
+    the share it was taken over.
+
+    #### Warning coverage and median lead describe different answers
+
+    Read side by side these two look inconsistent: warning coverage says a
+    fair number of tokens before the frontier get flagged, while the median
+    lead says the typical alarm arrives after it. They are not in conflict,
+    and the reason is worth stating once because it is easy to lose.
+
+    An alarm is the *first* flagged token. So if any token inside the warning
+    band is flagged, the alarm is at or before that token, hence before the
+    frontier. The converse is what matters: an answer whose alarm lands after
+    the frontier has, by construction, nothing flagged in its band and
+    contributes exactly zero to warning coverage. Warning coverage is
+    therefore produced entirely by the answers that fire early, while the
+    median lead is taken over every answer that fired at all.
+
+    The two numbers are related by the share above. Pooled warning coverage is
+    roughly `fired_before_frontier` times the coverage those early answers
+    achieve inside their own bands, and that second factor is several times
+    the pooled figure. A pooled warning coverage of 0.20 is not a probe that
+    flags a fifth of every run-up; it is a probe that flags close to half the
+    run-up on the two fifths of answers it sees coming, and none of it on the
+    rest. Reporting the three numbers together, coverage, share fired early,
+    and median lead, is what makes that shape visible.
+
     #### View D. Persistence: having fired, does it stay convinced?
 
     *Why.* To separate a scorer that saw something from one that twitched. The
@@ -1889,13 +1922,7 @@ def _(BASELINE_ROOT, Path, finished_rows, missing, pd):
         )
         return scored, len(rows)
 
-    return (
-        load_baseline_view,
-        load_view,
-        nothing_scored,
-        scored_depths,
-        scoring_progress,
-    )
+    return load_baseline_view, load_view, nothing_scored, scoring_progress
 
 
 @app.cell
@@ -1910,6 +1937,7 @@ def _(BY_ID, config_of, finished_rows, load_baseline_view, load_view, pd):
         ("B", "warning coverage 256", "view_b_coverage", "warning_recall_256", "tokens flagged in the 256 before it"),
         ("B", "healthy token rate", "view_b_coverage", "token_false_positive_rate", "healthy tokens flagged"),
         ("C", "median lead", "view_c_lead_time", "median_offset", "tokens from alarm to loop, negative is early"),
+        ("C", "fired before the loop", "view_c_lead_time", "fired_before_frontier", "share of caught answers flagged early"),
         ("C", "never fired", "view_c_lead_time", "never_fired_positives", "degenerate answers never flagged"),
     ]
     # View D reports the two populations as separate rows, so it is picked out by
@@ -2486,13 +2514,7 @@ def _(DEFAULT_LAYER, PROBED_LAYERS, mo):
             }
         )
 
-    return (
-        budget_control,
-        layer_control,
-        split_control,
-        test_view_controls,
-        view_controls,
-    )
+    return budget_control, layer_control, test_view_controls, view_controls
 
 
 @app.cell
@@ -2531,6 +2553,232 @@ def _(BY_ID, Path, all_runs, config_of, mo, pd, replay_frame):
         return mo.ui.dropdown(options=options, value=options[0], label="configuration")
 
     return config_control, stage_replay
+
+
+@app.cell
+def _(BUILD_ROOT, REPO, pd):
+    def evaluation_population():
+        """How many answers the pinned validation population holds, by class.
+
+        The replay records rates, and turning a rate back into a count is what
+        precision needs. Read from the pinned file itself rather than written
+        down here, so it cannot drift from what the runs actually measured.
+        """
+        pinned = sorted((REPO / "configs" / "dataset").glob("validation_rollouts_*.csv"))
+        labels_path = BUILD_ROOT / "onset_labels" / "onset_labels.parquet"
+        if not pinned or not labels_path.is_file():
+            return 0, 0
+        chosen = pd.read_csv(pinned[0])
+        labels = pd.read_parquet(
+            labels_path, columns=["domain", "prompt_id", "rollout_idx", "is_positive"]
+        )
+        merged = chosen.merge(
+            labels, on=["domain", "prompt_id", "rollout_idx"], how="left"
+        )
+        flags = merged["is_positive"].fillna(False).astype(bool)
+        return int(flags.sum()), int((~flags).sum())
+
+    EVAL_POSITIVES, EVAL_NEGATIVES = evaluation_population()
+    return EVAL_NEGATIVES, EVAL_POSITIVES
+
+
+@app.cell
+def _(
+    EVAL_NEGATIVES,
+    EVAL_POSITIVES,
+    apply_stopping_rule,
+    missing,
+    mo,
+    pd,
+    stage_replay,
+):
+    # The replay measured one operating point, so this table is fixed at it.
+    # Everything a different budget would need from the degenerate answers was
+    # reduced to these numbers and not kept, so 5% and 10% are not a filter away.
+    REPLAY_BUDGET = 0.01
+    RULE_STEP = "the step the rule picks"
+    BEST_DEPTH = "the best depth"
+
+    def replay_controls(exp_id):
+        """One stage's own step and depth pickers for the table below it."""
+        panel = stage_replay(exp_id)
+        steps = (
+            {str(int(s)): int(s) for s in sorted(panel["step"].unique())}
+            if not panel.empty
+            else {}
+        )
+        depths = (
+            {str(int(d)): int(d) for d in sorted(panel["layer"].unique())}
+            if not panel.empty
+            else {}
+        )
+        return mo.ui.dictionary(
+            {
+                "step": mo.ui.dropdown(
+                    options={RULE_STEP: RULE_STEP, **steps},
+                    value=RULE_STEP,
+                    label="checkpoint",
+                ),
+                "depth": mo.ui.dropdown(
+                    options={BEST_DEPTH: BEST_DEPTH, **depths},
+                    value=BEST_DEPTH,
+                    label="depth",
+                ),
+            }
+        )
+
+    def _one_run(block, step_choice, depth_choice):
+        """The (depth, step) one run is read at, given the two choices."""
+        if step_choice == RULE_STEP:
+            outcomes = apply_stopping_rule(block)
+            eligible = outcomes[outcomes["selected_value"].notna()]
+            if eligible.empty:
+                return None
+            if depth_choice == BEST_DEPTH:
+                pick = eligible.loc[eligible["selected_value"].idxmax()]
+                return int(pick["layer"]), int(pick["selected_step"])
+            at_depth = eligible[eligible["layer"] == depth_choice]
+            if at_depth.empty:
+                return None
+            return int(depth_choice), int(at_depth.iloc[0]["selected_step"])
+        at_step = block[block["step"] == step_choice]
+        if at_step.empty:
+            return None
+        if depth_choice == BEST_DEPTH:
+            best = at_step.loc[at_step["warning_recall_256"].idxmax()]
+            return int(best["layer"]), int(step_choice)
+        return int(depth_choice), int(step_choice)
+
+    def replay_records(exp_id, step_choice, depth_choice):
+        """One row per seed run: where it was read, and what it scored there."""
+        panel = stage_replay(exp_id)
+        if panel.empty:
+            return pd.DataFrame()
+        rows = []
+        for (configuration, run), block in panel.groupby(["configuration", "run"]):
+            where = _one_run(block, step_choice, depth_choice)
+            if where is None:
+                continue
+            layer, step = where
+            found = block[(block["layer"] == layer) & (block["step"] == step)]
+            if found.empty:
+                continue
+            record = found.iloc[0]
+            caught = float(record["recall_at_budget"]) * EVAL_POSITIVES
+            false_alarms = float(record["budget_realized_fpr"]) * EVAL_NEGATIVES
+            flagged = caught + false_alarms
+            rows.append(
+                {
+                    "configuration": configuration,
+                    "run": run,
+                    "depth": layer,
+                    "step": step,
+                    "recall": float(record["recall_at_budget"]),
+                    # Not stored by the replay, but implied by it: the healthy
+                    # answers that fired are the realised false-alarm rate times
+                    # their number, and the degenerate ones that fired are the
+                    # recall times theirs.
+                    "precision": (caught / flagged) if flagged else float("nan"),
+                    "in-pattern coverage": float(record["in_pattern_recall"]),
+                    "warning coverage 128": float(record["warning_recall_128"]),
+                    "warning coverage 256": float(record["warning_recall_256"]),
+                    "never fired": float(record["never_fired_positives"]),
+                    "median lead": float(record["median_offset"]),
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def _spread(values, digits=3):
+        """The median across seeds, with the seed-to-seed range beside it."""
+        values = values.dropna()
+        if values.empty:
+            return ""
+        middle = values.median()
+        text = f"{middle:.{digits}f}"
+        if len(values) > 1 and values.min() != values.max():
+            return f"{text} [{values.min():.{digits}f}–{values.max():.{digits}f}]"
+        return text
+
+    def _whole(values):
+        return _spread(values, digits=0)
+
+    REPLAY_COLUMNS = [
+        "recall",
+        "precision",
+        "in-pattern coverage",
+        "warning coverage 128",
+        "warning coverage 256",
+        "never fired",
+        "median lead",
+    ]
+
+    def replay_scorecard(exp_id, step_choice, depth_choice):
+        """Every configuration of a stage, from its replayed checkpoints."""
+        long = replay_records(exp_id, step_choice, depth_choice)
+        if long.empty:
+            return missing(
+                f"No run of {exp_id} has had its checkpoints replayed, so there "
+                "is nothing to read here. Adapted runs cannot be replayed "
+                "cheaply, which is why S3 is empty."
+            )
+        rounding = {name: _whole if name in {"never fired", "median lead"} else _spread
+                    for name in REPLAY_COLUMNS}
+        table = (
+            long.groupby("configuration")
+            .agg(
+                seeds=("run", "nunique"),
+                depth=("depth", _whole),
+                step=("step", _whole),
+                **{name: (name, rounding[name]) for name in REPLAY_COLUMNS},
+            )
+            .reset_index()
+        )
+        order = (
+            long.groupby("configuration")["warning coverage 256"].median().sort_values(
+                ascending=False
+            )
+        )
+        table = table.set_index("configuration").loc[order.index].reset_index()
+        where = (
+            "each run at the checkpoint its stopping rule selects"
+            if step_choice == RULE_STEP
+            else f"every run at step {step_choice}"
+        )
+        depth_note = (
+            "each read at whichever depth scores best there"
+            if depth_choice == BEST_DEPTH
+            else f"all read at layer {depth_choice}"
+        )
+        return mo.vstack(
+            [
+                mo.md(
+                    f"**Every configuration of {exp_id}, including the ones that "
+                    "were not carried forward.** One row per configuration, "
+                    f"{where}, {depth_note}. Each cell is the median across the "
+                    "configuration's seeds with the seed-to-seed range in "
+                    "brackets, so a column whose brackets all overlap is not "
+                    "ranking anything. Sorted by warning coverage over 256 "
+                    "tokens, the quantity the project selects on."
+                ),
+                mo.ui.table(table, selection=None),
+                mo.md(
+                    f"_Read from `checkpoint_replay.parquet`, so this covers every "
+                    f"configuration rather than only the few that have been "
+                    f"through a full scoring pass. The price is that the replay "
+                    f"measured a single operating point: everything here is at a "
+                    f"**{REPLAY_BUDGET:.0%} false-alarm budget** and cannot be "
+                    "moved to another one, because the per-token scores it was "
+                    "computed from were not kept. **Precision** is derived from "
+                    "the recorded recall and realised false-alarm rate against "
+                    f"the pinned population of {EVAL_POSITIVES} degenerate and "
+                    f"{EVAL_NEGATIVES} healthy answers. The healthy token rate "
+                    "and the persistence view are absent for the same reason, "
+                    "and appear only in the full-protocol table below._"
+                ),
+            ]
+        )
+
+    return replay_controls, replay_scorecard
 
 
 @app.cell
@@ -3013,6 +3261,23 @@ def _(curve_figure, s1_loss_config, s1_loss_depth):
 
 
 @app.cell
+def _(replay_controls):
+    s1_replay_controls = replay_controls("S1")
+    s1_replay_controls
+    return (s1_replay_controls,)
+
+
+@app.cell
+def _(replay_scorecard, s1_replay_controls):
+    replay_scorecard(
+        "S1",
+        s1_replay_controls.value["step"],
+        s1_replay_controls.value["depth"],
+    )
+    return
+
+
+@app.cell
 def _(view_controls):
     s1_card_controls = view_controls()
     s1_card_controls
@@ -3057,108 +3322,144 @@ def _(s1_views_controls, views_figure):
 
 
 @app.cell
-def _(budget_control, mo, split_control):
-    s1_depth_split = split_control()
-    s1_depth_budget = budget_control()
-    mo.hstack([s1_depth_split, s1_depth_budget], justify="start", gap=2)
-    return s1_depth_budget, s1_depth_split
-
-
-@app.cell
 def _(
     FIGURES,
     INK_SOFT,
-    SERIES,
-    finished_rows,
-    load_view,
+    RAMP,
+    apply_stopping_rule,
     missing,
     mo,
+    mpl,
     pd,
     plt,
-    s1_depth_budget,
-    s1_depth_split,
     save,
-    scored_depths,
+    stage_replay,
     tidy,
 ):
-    def depth_figure(exp_id, split, budget):
-        """Where in the network the signal lives, per selection rule."""
-        depths = scored_depths(exp_id, split)
-        rows = finished_rows(exp_id)
-        if not depths or rows.empty:
+    def depth_profile_figure(exp_id):
+        """Where in the network the approach becomes visible, per selection rule.
+
+        Read from the replayed checkpoints rather than from full scoring passes.
+        Full scoring exists at one depth per run, which cannot answer a question
+        asked about depth; the replay carries every depth of every run.
+        """
+        panel = stage_replay(exp_id)
+        if panel.empty:
             return missing(
-                f"{exp_id} has no depth through the evaluator on `{split}` yet. "
-                "This is the figure the stage exists to produce."
+                f"No run of {exp_id} has had its checkpoints replayed, so there "
+                "is no depth profile to draw."
             )
-        naming = {r.run_dir: (r.selection, r.window) for r in rows.itertuples()}
-        records = []
-        for depth in depths:
-            frame = load_view(exp_id, split, "view_b_coverage", depth)
-            if frame.empty:
-                continue
-            frame = frame[frame["target_negative_fpr"] == budget]
-            for _, row in frame.iterrows():
-                rule, window = naming.get(row["run_dir"], ("unknown", None))
-                records.append(
+        rows = []
+        for _, block in panel.groupby("run"):
+            outcomes = apply_stopping_rule(block)
+            rule = block["rule"].iloc[0]
+            width = block["window"].iloc[0]
+            for picked in outcomes.itertuples():
+                if pd.isna(picked.selected_step):
+                    continue
+                at_step = block[
+                    (block["layer"] == picked.layer)
+                    & (block["step"] == picked.selected_step)
+                ]
+                if at_step.empty:
+                    continue
+                rows.append(
                     {
-                        "layer": depth,
                         "rule": rule,
-                        "window": window,
-                        "warning": row.get("warning_recall_256"),
-                        "in_pattern": row.get("in_pattern_recall"),
+                        "width": width,
+                        "layer": int(picked.layer),
+                        "warning": float(at_step["warning_recall_256"].iloc[0]),
                     }
                 )
-        if not records:
-            return missing(f"No coverage recorded for {exp_id} on `{split}`.")
-        frame = pd.DataFrame(records)
-        windows = sorted(w for w in frame["window"].dropna().unique())
-        fig, axes = plt.subplots(
-            1, max(len(windows), 1), figsize=(3.3 * max(len(windows), 1), 3.2), squeeze=False
-        )
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            return missing("No depth of this stage ever became selectable.")
+
         rules = sorted(frame["rule"].dropna().unique())
-        for axis, window in zip(axes[0], windows):
-            panel = frame[frame["window"] == window]
-            for colour, rule in zip(SERIES, rules):
-                line = panel[panel["rule"] == rule].groupby("layer")["warning"].median()
+        widths = sorted(int(w) for w in frame["width"].dropna().unique())
+        shades = mpl.colors.LinearSegmentedColormap.from_list("width", RAMP)
+        scale = mpl.colors.Normalize(
+            vmin=min(widths), vmax=max(widths)
+        ) if len(widths) > 1 else None
+
+        fig, axes = plt.subplots(
+            1, len(rules), figsize=(2.9 * len(rules), 3.4), squeeze=False, sharey=True
+        )
+        for axis, rule in zip(axes[0], rules):
+            block = frame[frame["rule"] == rule]
+            for width, group in block.groupby("width", dropna=False):
+                line = group.groupby("layer")["warning"].median().sort_index()
                 if line.empty:
                     continue
-                # Markers, not a bare line: a rule scored at a single depth is
-                # one point, and a line through one point draws nothing at all.
+                if pd.isna(width):
+                    # Two of the rules tile or sample instead of placing a
+                    # window, so they have one line and no width to encode.
+                    colour, label = RAMP[2], "no window"
+                else:
+                    colour = shades(scale(int(width))) if scale else RAMP[2]
+                    label = f"trained on {int(width)}-token windows"
                 axis.plot(
-                    line.index, line.to_numpy(), "o-", color=colour, label=rule,
-                    markersize=4,
+                    line.index, line.to_numpy(), "o-", color=colour,
+                    markersize=3, linewidth=1.4, label=label,
                 )
-            axis.set_title(f"window {int(window)}", color=INK_SOFT)
+            axis.set_title(rule, color=INK_SOFT, fontsize=8)
             axis.set_xlabel("layer")
             tidy(axis, xgrid=False)
-        axes[0][0].set_ylabel("warning coverage, 256 tokens")
-        axes[0][-1].legend(loc="best")
-        fig.suptitle(
-            f"{exp_id}: where the approach is visible, {split}, {budget:.0%} budget",
-            x=0.005,
-            ha="left",
-            fontsize=10,
+        # The vertical axis is a width too, which is exactly the confusion this
+        # figure has to avoid: the panels vary the window a probe was *trained*
+        # on, the axis counts the tokens it is *scored* over.
+        axes[0][0].set_ylabel("warning coverage\n(256 tokens before the loop)")
+
+        seen, handles, names = set(), [], []
+        for axis in axes[0]:
+            for handle, name in zip(*axis.get_legend_handles_labels()):
+                if name not in seen:
+                    seen.add(name)
+                    handles.append(handle)
+                    names.append(name)
+        fig.legend(
+            handles, names, loc="upper center", bbox_to_anchor=(0.5, 0.02),
+            ncol=min(len(names), 5),
         )
-        fig.tight_layout(rect=(0, 0, 1, 0.9))
+        fig.suptitle(
+            f"{exp_id}: where the approach is visible, by depth "
+            "(validation, 1% false-alarm budget)",
+            x=0.005, ha="left", fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0.08, 1, 0.92))
         return mo.vstack(
             [
-                save(fig, f"{exp_id}_{split}_depth", FIGURES),
+                save(fig, f"{exp_id}_depth_profile", FIGURES),
                 mo.md(
-                    "_Where in the network the approach becomes visible: warning "
-                    "coverage over the 256 tokens before the frontier, at every "
-                    "**fully scored** depth, one line per selection rule, one "
-                    "panel per window size. Only runs that have been through the "
-                    "evaluator can appear, and most have been scored at a single "
-                    "depth, so a panel showing isolated dots rather than curves "
-                    "means exactly one depth was scored for that rule. The W=256 "
-                    "panel is the extreme case: `frontier_window` at that width "
-                    "was scored at layer 15 and nowhere else, so it is one dot "
-                    "and there is no profile to draw yet._"
+                    "_**Two different token counts meet in this figure, so they "
+                    "are named apart.** The panels split the rules by the window "
+                    "size each probe was *trained* on; the vertical axis is "
+                    "warning coverage, which is always measured over the 256 "
+                    "tokens immediately before the loop, whatever a run was "
+                    "trained on. One line per training width, one point per "
+                    "depth, median across the three seeds._\n\n"
+                    "_A line stops where its depths stop clearing the "
+                    "in-loop-coverage floor, so a short line is a result rather "
+                    "than missing data. It is the **anchored** rules that lose "
+                    "depths to a narrow window: at 64 tokens `frontier_window` "
+                    "and its hard-negative variant leave only 11 and 12 of the "
+                    "31 depths ever selectable, all between layers 6 and 18, "
+                    "rising to 20 depths at 128 and 27 at 256 and above. "
+                    "`random_window` at the same 64 tokens keeps 29, because its "
+                    "windows are scattered through the answer rather than spent "
+                    "around the frontier. Note that the width means different "
+                    "things across panels: for the anchored rules it is a window "
+                    "placed on the frontier, for `rollout_balanced` it is how "
+                    "many tokens each answer contributes._\n\n"
+                    "_Drawn from the replayed checkpoints, each depth read at "
+                    "the checkpoint its own stopping rule selects, which is why "
+                    "every configuration has a full profile rather than the "
+                    "single scored depth a full protocol pass can afford._"
                 ),
             ]
         )
 
-    depth_figure("S1", s1_depth_split.value, s1_depth_budget.value)
+    depth_profile_figure("S1")
     return
 
 
@@ -3261,6 +3562,23 @@ def _(mo):
     mo.md(r"""
     [here as above: why are we only showing the checkpoints that got scored? can't we show in a table all of them and then on a separate part only the three that got scored? otherwise we are loosing the results of all the other runs. this apply also for the following experimental sections]
     """)
+    return
+
+
+@app.cell
+def _(replay_controls):
+    s2a_replay_controls = replay_controls("S2a")
+    s2a_replay_controls
+    return (s2a_replay_controls,)
+
+
+@app.cell
+def _(replay_scorecard, s2a_replay_controls):
+    replay_scorecard(
+        "S2a",
+        s2a_replay_controls.value["step"],
+        s2a_replay_controls.value["depth"],
+    )
     return
 
 
@@ -3475,6 +3793,23 @@ def _(curve_figure, s2b_loss_config, s2b_loss_depth):
 
 
 @app.cell
+def _(replay_controls):
+    s2b_replay_controls = replay_controls("S2b")
+    s2b_replay_controls
+    return (s2b_replay_controls,)
+
+
+@app.cell
+def _(replay_scorecard, s2b_replay_controls):
+    replay_scorecard(
+        "S2b",
+        s2b_replay_controls.value["step"],
+        s2b_replay_controls.value["depth"],
+    )
+    return
+
+
+@app.cell
 def _(view_controls):
     s2b_card_controls = view_controls()
     s2b_card_controls
@@ -3594,6 +3929,23 @@ def _(curve_figure, s2c_loss_config, s2c_loss_depth):
 
 
 @app.cell
+def _(replay_controls):
+    s2c_replay_controls = replay_controls("S2c")
+    s2c_replay_controls
+    return (s2c_replay_controls,)
+
+
+@app.cell
+def _(replay_scorecard, s2c_replay_controls):
+    replay_scorecard(
+        "S2c",
+        s2c_replay_controls.value["step"],
+        s2c_replay_controls.value["depth"],
+    )
+    return
+
+
+@app.cell
 def _(view_controls):
     s2c_card_controls = view_controls()
     s2c_card_controls
@@ -3696,6 +4048,23 @@ def _(curve_figure, s2d_loss_config, s2d_loss_depth):
 
 
 @app.cell
+def _(replay_controls):
+    s2d_replay_controls = replay_controls("S2d")
+    s2d_replay_controls
+    return (s2d_replay_controls,)
+
+
+@app.cell
+def _(replay_scorecard, s2d_replay_controls):
+    replay_scorecard(
+        "S2d",
+        s2d_replay_controls.value["step"],
+        s2d_replay_controls.value["depth"],
+    )
+    return
+
+
+@app.cell
 def _(view_controls):
     s2d_card_controls = view_controls()
     s2d_card_controls
@@ -3769,6 +4138,14 @@ def _():
     # Not re-derived here: only read and displayed. Depth is the layer each
     # configuration was actually scored at, confirmed against the run
     # directories themselves rather than assumed from the stage.
+    #
+    # Both halves of that pick are hand-made, and neither is recorded in the run
+    # directories, which is what the table two cells below exists to show. The
+    # depth is written out here by hand; the checkpoint that filled
+    # `layers/layer_NN/` is not written down at all. Scoring records its own
+    # provenance now, so directories written from here on can say what produced
+    # them, and `scripts/audit_score_provenance.py` reports which of the
+    # existing ones cannot.
     LEADING_CANDIDATES = [
         {
             "stage": "S1",
@@ -3873,6 +4250,7 @@ def _(LEADING_CANDIDATES, METRIC_ORDER, Path, all_runs, pd):
         ("B", "warning coverage 256", "view_b_coverage", "warning_recall_256"),
         ("B", "healthy token rate", "view_b_coverage", "token_false_positive_rate"),
         ("C", "median lead", "view_c_lead_time", "median_offset"),
+        ("C", "fired before the loop", "view_c_lead_time", "fired_before_frontier"),
         ("C", "never fired", "view_c_lead_time", "never_fired_positives"),
     ]
     _CANDIDATE_PERSISTENCE = [
@@ -4033,16 +4411,120 @@ def _(
                     "Median across its 3 seeds, with the seed-to-seed range in "
                     "brackets where it varies. Each was scored at the single "
                     "layer it was picked at (**scored at layer**), not the "
-                    "automatic per-run checkpoint the rest of the notebook uses "
-                    "— these are hand-picked checkpoints, chosen outside this "
-                    f"notebook. At a **{budget:.0%} false-alarm budget** on "
-                    f"`val`.{progress}"
+                    "automatic per-run checkpoint the rest of the notebook uses. "
+                    "Both the depth and the checkpoint here are hand-picked, and "
+                    "the table below says how far each sits from what the rule "
+                    f"would have chosen. At a **{budget:.0%} false-alarm budget** "
+                    f"on `val`.{progress}"
                 ),
                 mo.ui.table(table, selection=None),
             ]
         )
 
     candidate_scorecard(candidates_card_budget.value)
+    return
+
+
+@app.cell
+def _(
+    DEFAULT_RULE,
+    LEADING_CANDIDATES,
+    Path,
+    all_runs,
+    apply_stopping_rule,
+    missing,
+    mo,
+    pd,
+    replay_frame,
+):
+    def hand_pick_against_rule():
+        """Where each candidate was read, beside where the rule would read it.
+
+        Two choices decide what a candidate's row says: the depth, and the
+        checkpoint within that depth. The rule owns the second and, applied
+        across depths, implies the first. The list above sets both by hand, so
+        the two can disagree, and a disagreement is worth seeing rather than
+        assuming away.
+        """
+        if replay_frame.empty or all_runs.empty:
+            return missing("No run has had its checkpoints replayed yet.")
+        rows = []
+        for candidate in LEADING_CANDIDATES:
+            matches = all_runs[
+                (all_runs["group"] == candidate["group"])
+                & (all_runs["status"] == "finished")
+            ]
+            for run in matches.itertuples():
+                panel = replay_frame[
+                    replay_frame["run"] == Path(run.run_dir).parent.name
+                ]
+                if panel.empty:
+                    continue
+                outcomes = apply_stopping_rule(panel)
+                eligible = outcomes[outcomes["selected_value"].notna()]
+                if eligible.empty:
+                    continue
+                best = eligible.loc[eligible["selected_value"].idxmax()]
+                chosen = eligible[eligible["layer"] == candidate["depth"]]
+                at_hand_pick = (
+                    float(chosen.iloc[0]["selected_value"]) if not chosen.empty else None
+                )
+                rows.append(
+                    {
+                        "candidate": candidate["label"],
+                        "seed": run.seed,
+                        "depth, hand-picked": candidate["depth"],
+                        "depth, by the rule": int(best["layer"]),
+                        "step, by the rule": int(best["selected_step"]),
+                        "warning coverage at the rule's depth": round(
+                            float(best["selected_value"]), 4
+                        ),
+                        "warning coverage at the hand-picked depth": (
+                            round(at_hand_pick, 4) if at_hand_pick is not None else None
+                        ),
+                    }
+                )
+        if not rows:
+            return missing("No candidate has a replayed run to compare against.")
+        frame = pd.DataFrame(rows)
+        frame["depths agree"] = (
+            frame["depth, hand-picked"] == frame["depth, by the rule"]
+        )
+        agreed = int(frame["depths agree"].sum())
+        return mo.vstack(
+            [
+                mo.md(
+                    f"One row per candidate per seed. The rule of "
+                    f"`head_selection.py` (floor {DEFAULT_RULE.floor}, band "
+                    f"{DEFAULT_RULE.band}, tolerance {DEFAULT_RULE.tolerance}, "
+                    f"patience {DEFAULT_RULE.patience}) keeps the best checkpoint "
+                    "of each depth; the depth it implies is then the one whose "
+                    "kept checkpoint has the highest warning coverage. "
+                    f"**The two agree on {agreed} of {len(frame)} runs.**"
+                ),
+                mo.ui.table(frame, selection=None),
+                mo.md(
+                    "Where they disagree the cost is small: the largest gap in "
+                    "warning coverage is under a hundredth, and all but one of the "
+                    "disagreements stay inside layers 12 to 16, the band the depth "
+                    "profile already marks out. The exception is worth naming, "
+                    "since it is the case the rest of the table would hide: on one "
+                    "seed of `frontier_window` at W=256 the rule prefers layer 5 "
+                    "over layer 15 outright. So the depth is not knife-edge in "
+                    "general, and a hand-pick near the top of the band usually "
+                    "loses little, but not on every run. What none of this "
+                    "licenses is calling the pick reproducible. Neither the depth above nor the checkpoint "
+                    "behind the scores is recorded anywhere, and the checkpoint "
+                    "cannot be recovered from the stored numbers, because "
+                    "neighbouring steps of one depth differ by less than the "
+                    "precision the replay carries. Before the held-out test is "
+                    "read, the rule should choose both, once, and the choice "
+                    "should be written down with the scores it produced."
+                ),
+            ]
+        )
+
+    hand_pick_against_rule()
     return
 
 
@@ -4310,6 +4792,589 @@ def _(
 def _(mo):
     mo.md("""
     ---
+    ### Aside: which domain is this, and how much of the warning is that?
+
+    The table above reports one warning coverage per candidate, pooled over
+    every degenerate answer in the validation split. Pooling treats the five
+    in-domain sources as five samples of one population. They are not, and the
+    gap between them is wide enough that the pooled figure describes none of
+    them.
+
+    Three readings follow. The first splits the same twelve candidates by the
+    domain their prompt came from. The second asks whether that split is really
+    about the domain, or only about how far into an answer each domain's loops
+    happen to begin, since a probe's score climbs with position on its own. The
+    third asks the same question of the false alarms, where the confound to
+    rule out is answer length rather than position.
+    """)
+    return
+
+
+@app.cell
+def _(LEADING_CANDIDATES, Path, all_runs, pd):
+    # Below this many degenerate answers a domain's rates are reported and
+    # marked anecdotal, never drawn as a point on a curve, since one answer
+    # moving decides the whole cell.
+    DOMAIN_MINIMUM = 10
+
+    def domain_rollouts(label, budget):
+        """Every scored answer of one candidate, at every seed it was run at."""
+        candidate = next(c for c in LEADING_CANDIDATES if c["label"] == label)
+        if all_runs.empty:
+            return pd.DataFrame()
+        matches = all_runs[
+            (all_runs["group"] == candidate["group"])
+            & (all_runs["status"] == "finished")
+        ]
+        frames = []
+        for run in matches.itertuples():
+            path = (
+                Path(run.run_dir)
+                / "layers"
+                / f"layer_{candidate['depth']:02d}"
+                / "evaluation"
+                / "val"
+                / "rollout_table.csv"
+            )
+            if not path.is_file():
+                continue
+            frame = pd.read_csv(path)
+            frame = frame[frame["target_negative_fpr"] == budget].copy()
+            frame["seed"] = run.seed
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def domain_rates(table):
+        """One row per domain: how much run-up is flagged, how early, how often wrongly.
+
+        Coverage is pooled over tokens rather than averaged over answers, the
+        same way the protocol computes it, so a long answer carries the weight
+        its token count earns. Answer counts are divided by the number of seeds,
+        since each seed contributes the same answers over again.
+        """
+        if table.empty:
+            return pd.DataFrame()
+        positives = table[table["is_positive"]]
+        negatives = table[~table["is_positive"]]
+        seeds = max(int(table["seed"].nunique()), 1)
+        all_warning_hits = positives["warning_hits_256"].sum()
+        rows = []
+        for domain in sorted(table["domain"].unique()):
+            degenerate = positives[positives["domain"] == domain]
+            healthy = negatives[negatives["domain"] == domain]
+            fired = degenerate[degenerate["fired"].astype(bool)]
+            warning_tokens = degenerate["warning_tokens_256"].sum()
+            in_pattern_tokens = degenerate["in_pattern_tokens"].sum()
+            rows.append(
+                {
+                    "domain": domain,
+                    "degenerate answers": len(degenerate) // seeds,
+                    "healthy answers": len(healthy) // seeds,
+                    "median onset": degenerate["onset_position"].median(),
+                    "warning coverage 256": (
+                        degenerate["warning_hits_256"].sum() / warning_tokens
+                        if warning_tokens
+                        else None
+                    ),
+                    "share of all warning hits": (
+                        degenerate["warning_hits_256"].sum() / all_warning_hits
+                        if all_warning_hits
+                        else None
+                    ),
+                    "in-pattern coverage": (
+                        degenerate["in_pattern_hits"].sum() / in_pattern_tokens
+                        if in_pattern_tokens
+                        else None
+                    ),
+                    "median lead": (
+                        fired["offset"].median() if len(fired) else None
+                    ),
+                    "fired before the loop": (
+                        float((fired["offset"] < 0).mean()) if len(fired) else None
+                    ),
+                    "false alarms": int(healthy["fired"].astype(bool).sum()) // seeds,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    return DOMAIN_MINIMUM, domain_rates, domain_rollouts
+
+
+@app.cell
+def _(budget_control, candidate_control, mo):
+    domain_pick = candidate_control()
+    domain_budget = budget_control()
+    mo.hstack([domain_pick, domain_budget], justify="start", gap=2)
+    return domain_budget, domain_pick
+
+
+@app.cell
+def _(domain_budget, domain_pick, domain_rates, domain_rollouts, missing, mo):
+    def domain_table(label, budget):
+        rates = domain_rates(domain_rollouts(label, budget))
+        if rates.empty:
+            return missing("This candidate has not been scored on `val` yet.")
+        return mo.vstack(
+            [
+                mo.md(
+                    f"**{label}**, pooled over its three seeds, at a "
+                    f"**{budget:.0%} false-alarm budget** on `val`. One row per "
+                    "in-domain source. **Share of all warning hits** is what "
+                    "fraction of every flagged run-up token in the whole split "
+                    "came from this domain, which is the number that says how "
+                    "much of the headline figure one domain is carrying. "
+                    "`aime_2025` has a single degenerate answer and is "
+                    "anecdotal in every column."
+                ),
+                mo.ui.table(rates, selection=None),
+            ]
+        )
+
+    domain_table(domain_pick.value, domain_budget.value)
+    return
+
+
+@app.cell
+def _(
+    DOMAIN_MINIMUM,
+    FIGURES,
+    INK_MUTED,
+    INK_SOFT,
+    LEADING_CANDIDATES,
+    SERIES,
+    STAGE_ORDER,
+    domain_budget,
+    domain_rates,
+    domain_rollouts,
+    missing,
+    mo,
+    pd,
+    plt,
+    save,
+    tidy,
+):
+    def domain_profile_figure(budget):
+        """Every candidate's two coverages, against the domain, on one axis.
+
+        One candidate could put its warning coverage anywhere by chance. Twelve
+        of them, from four stages, agreeing on the order of the domains is a
+        statement about the corpus instead.
+        """
+        frames = []
+        for candidate in LEADING_CANDIDATES:
+            rates = domain_rates(domain_rollouts(candidate["label"], budget))
+            if rates.empty:
+                continue
+            rates["label"] = candidate["label"]
+            rates["stage"] = candidate["stage"]
+            frames.append(rates)
+        if not frames:
+            return missing("No candidate has been scored on `val` yet.")
+        long = pd.concat(frames, ignore_index=True)
+        long = long[long["degenerate answers"] >= DOMAIN_MINIMUM]
+        if long.empty:
+            return missing("No domain has enough degenerate answers to plot.")
+
+        # Domains are ordered by where their loops start, so the figure can be
+        # read against the position confound the next figure tests.
+        order = (
+            long.groupby("domain")["median onset"].median().sort_values().index.tolist()
+        )
+        position = {domain: index for index, domain in enumerate(order)}
+        colors = dict(zip(STAGE_ORDER, SERIES[: len(STAGE_ORDER)]))
+
+        fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.8))
+        panels = [
+            ("warning coverage 256", "coverage of the 256 before the loop"),
+            ("in-pattern coverage", "coverage inside the loop"),
+        ]
+        for axis, (column, ylabel) in zip(axes, panels):
+            for label, block in long.groupby("label"):
+                block = block.dropna(subset=[column])
+                if block.empty:
+                    continue
+                block = block.assign(x=block["domain"].map(position)).sort_values("x")
+                axis.plot(
+                    block["x"],
+                    block[column],
+                    "o-",
+                    color=colors[block["stage"].iloc[0]],
+                    linewidth=1.1,
+                    markersize=4,
+                    alpha=0.85,
+                )
+            axis.set_xticks(range(len(order)))
+            axis.set_xticklabels(order, rotation=30, ha="right", fontsize=7.5)
+            axis.set_ylabel(ylabel)
+            axis.set_ylim(bottom=0)
+            tidy(axis, xgrid=False)
+        axes[0].set_xlabel("domain, ordered by where its loops begin", color=INK_SOFT)
+        axes[1].set_xlabel("domain, ordered by where its loops begin", color=INK_SOFT)
+
+        handles = [
+            plt.Line2D([0], [0], marker="o", linestyle="", color=colors[stage], label=stage)
+            for stage in STAGE_ORDER
+        ]
+        fig.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.965),
+            ncol=len(STAGE_ORDER),
+            fontsize=8,
+            title="stage",
+            title_fontsize=8,
+        )
+        fig.suptitle(
+            f"The same twelve candidates, split by domain, at a {budget:.0%} "
+            "false-alarm budget",
+            x=0.005,
+            ha="left",
+            fontsize=10,
+            color=INK_MUTED,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.88))
+        return mo.vstack(
+            [
+                save(fig, "candidate_domain_profile", FIGURES),
+                mo.md(
+                    "_One line per leading candidate, coloured by the stage it "
+                    "came from. **The two panels rank the domains differently, "
+                    "and that is the whole point.** Left, coverage of the run-up: "
+                    "`llama_nemotron` is the highest domain in every one of the "
+                    "twelve candidates and `deepmath_103k` sits near zero, a "
+                    "spread of twenty to sixty fold within a single candidate. "
+                    "Code carries between a half and seven eighths of every "
+                    "flagged run-up token in the split while being a fifth of the "
+                    "degenerate answers. Right, coverage inside the loop: code is "
+                    "the **lowest** domain in nine of the twelve, the exceptions "
+                    "being the three candidates read at layer 4, and the whole "
+                    "spread is under a factor of two. So the domain whose loops "
+                    "are easiest to see coming is the one whose loops are hardest "
+                    "to see once they have arrived, which no single notion of a "
+                    "domain being easy accounts for._\n\n"
+                    "_Domains are ordered left to right by the median position at "
+                    "which their loops start. The left panel rises with that "
+                    "order, which is what the next figure exists to rule in or "
+                    "out as the cause. `aime_2025` has a single degenerate "
+                    "answer and is left out of both panels; it is still "
+                    "reported in the table above._"
+                ),
+            ]
+        )
+
+    domain_profile_figure(domain_budget.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    A probe's score climbs with position regardless of what the answer is doing,
+    and the domains do not put their loops in the same place: code answers begin
+    looping around token 1434 on median, instruction-following ones around token
+    326. So the ordering above is exactly what a pure position effect would
+    produce, and separating the two needs a null.
+
+    The null is the healthy answers of the same domain, read at the same
+    absolute positions. Those answers never degenerate, so any flagging they
+    attract at a given position is what position alone buys there. The figure
+    below puts the two side by side: the run-up tokens of degenerate answers,
+    against healthy tokens at matched position, one panel per domain.
+    """)
+    return
+
+
+@app.cell
+def _(DOMAIN_MINIMUM, LEADING_CANDIDATES, Path, all_runs, np, pd):
+    DOMAIN_BANDS = [0, 500, 1000, 1500, 4096]
+
+    def domain_position_null(label, budget):
+        """Flag rate against absolute position, for run-up and for healthy tokens.
+
+        Both populations are read from one seed's stored scores at the threshold
+        that spends the budget on that seed. A run-up token is any of the 256
+        before the loop; a healthy token is any token of an answer that finished
+        on its own.
+        """
+        from degeneration_probe.evaluation.protocol import choose_thresholds
+
+        candidate = next(c for c in LEADING_CANDIDATES if c["label"] == label)
+        if all_runs.empty:
+            return pd.DataFrame()
+        matches = all_runs[
+            (all_runs["group"] == candidate["group"])
+            & (all_runs["status"] == "finished")
+        ].sort_values("seed")
+        scores = None
+        for run in matches.itertuples():
+            path = (
+                Path(run.run_dir)
+                / "layers"
+                / f"layer_{candidate['depth']:02d}"
+                / "scores"
+                / "val.parquet"
+            )
+            if path.is_file():
+                scores = pd.read_parquet(path)
+                break
+        if scores is None:
+            return pd.DataFrame()
+
+        tau = choose_thresholds(scores, [budget], persistence=1)[0].tau
+        bands = np.asarray(DOMAIN_BANDS)
+        counts = {}
+
+        def accumulate(domain, population, values, start):
+            hits, total = counts.setdefault((domain, population), (np.zeros(len(bands) - 1), np.zeros(len(bands) - 1)))
+            index = np.digitize(np.arange(start, start + values.size), bands) - 1
+            for band in range(len(bands) - 1):
+                chosen = index == band
+                total[band] += chosen.sum()
+                hits[band] += (values[chosen] >= tau).sum()
+
+        for row in scores.itertuples():
+            values = np.asarray(row.scores, dtype=np.float64)
+            if row.is_positive:
+                onset = int(row.onset_position)
+                start = max(0, onset - 256)
+                if onset > start:
+                    accumulate(row.domain, "run-up of a degenerate answer", values[start:onset], start)
+            elif row.stop_reason == "eos":
+                accumulate(row.domain, "healthy answer", values, 0)
+
+        big_enough = {
+            domain
+            for domain, size in scores[scores["is_positive"]]
+            .groupby("domain")
+            .size()
+            .items()
+            if size >= DOMAIN_MINIMUM
+        }
+        rows = []
+        for (domain, population), (hits, total) in counts.items():
+            if domain not in big_enough:
+                continue
+            for band in range(len(bands) - 1):
+                if not total[band]:
+                    continue
+                rows.append(
+                    {
+                        "domain": domain,
+                        "population": population,
+                        "band": f"{bands[band]}-{bands[band + 1]}",
+                        "tokens": int(total[band]),
+                        "flag rate": hits[band] / total[band],
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    return DOMAIN_BANDS, domain_position_null
+
+
+@app.cell
+def _(
+    DOMAIN_BANDS,
+    FIGURES,
+    INK_MUTED,
+    SERIES,
+    domain_budget,
+    domain_pick,
+    domain_position_null,
+    missing,
+    mo,
+    plt,
+    save,
+    tidy,
+):
+    def domain_position_figure(label, budget):
+        frame = domain_position_null(label, budget)
+        if frame.empty:
+            return missing("This candidate has no stored scores on `val` yet.")
+        order = [
+            f"{DOMAIN_BANDS[i]}-{DOMAIN_BANDS[i + 1]}"
+            for i in range(len(DOMAIN_BANDS) - 1)
+        ]
+        domains = sorted(frame["domain"].unique())
+        fig, axes = plt.subplots(
+            1, len(domains), figsize=(2.5 * len(domains), 3.4), squeeze=False, sharey=True
+        )
+        for axis, domain in zip(axes[0], domains):
+            block = frame[frame["domain"] == domain]
+            for colour, population in zip(SERIES, sorted(block["population"].unique())):
+                line = block[block["population"] == population].set_index("band")
+                line = line.reindex(order).dropna(subset=["flag rate"])
+                if line.empty:
+                    continue
+                axis.plot(
+                    range(len(line)),
+                    line["flag rate"].to_numpy(),
+                    "o-",
+                    color=colour,
+                    markersize=4,
+                    linewidth=1.4,
+                    label=population,
+                )
+                axis.set_xticks(range(len(line)))
+                axis.set_xticklabels(line.index, rotation=40, ha="right", fontsize=7)
+            axis.set_yscale("symlog", linthresh=1e-4)
+            axis.set_title(domain, fontsize=8, color=INK_MUTED)
+            tidy(axis, xgrid=False)
+        axes[0][0].set_ylabel("share of tokens flagged")
+        seen, handles, names = set(), [], []
+        for axis in axes[0]:
+            for handle, name in zip(*axis.get_legend_handles_labels()):
+                if name not in seen:
+                    seen.add(name)
+                    handles.append(handle)
+                    names.append(name)
+        fig.legend(
+            handles, names, loc="upper center", bbox_to_anchor=(0.5, 0.03), ncol=2
+        )
+        fig.suptitle(
+            f"{label}: run-up against healthy, at matched position "
+            f"({budget:.0%} budget)",
+            x=0.005,
+            ha="left",
+            fontsize=10,
+            color=INK_MUTED,
+        )
+        fig.tight_layout(rect=(0, 0.1, 1, 0.92))
+        return mo.vstack(
+            [
+                save(fig, "domain_position_null", FIGURES),
+                mo.md(
+                    "_Tokens are grouped by their **absolute** position in the "
+                    "answer, so the two lines in a panel are compared at the same "
+                    "depth into a generation and position cannot be what "
+                    "separates them. The vertical axis is symmetric-log, since "
+                    "the rates span four orders of magnitude and a linear axis "
+                    "shows only the top band._\n\n"
+                    "_The gap between the lines, not the height of either, is the "
+                    "quantity of interest. In `llama_nemotron` the run-up runs "
+                    "two to three orders of magnitude above its own healthy null "
+                    "at every band, so its advantage survives the control "
+                    "outright. In the mathematics domains the gap is a factor of "
+                    "a few at best, and it closes or reverses outright as "
+                    "position grows. In `if_sft_data_verified` the healthy line "
+                    "crosses above the run-up line entirely, so past roughly a "
+                    "thousand tokens a healthy answer of that domain is more "
+                    "likely to be flagged than an answer about to break. The domain ordering in the previous figure is "
+                    "therefore not a repackaging of the position effect._"
+                ),
+            ]
+        )
+
+    domain_position_figure(domain_pick.value, domain_budget.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    The false alarms split by domain too, and in the opposite direction. Length
+    is the confound to remove here rather than position, since the budget is
+    spent per answer and a longer answer offers more chances to cross the
+    threshold. Healthy answers are therefore grouped by their own length before
+    the domains are compared.
+    """)
+    return
+
+
+@app.cell
+def _(LEADING_CANDIDATES, domain_budget, domain_rollouts, missing, mo, pd):
+    def domain_false_alarms(budget):
+        """Where the false alarms come from, holding answer length fixed."""
+        frames = []
+        for candidate in LEADING_CANDIDATES:
+            table = domain_rollouts(candidate["label"], budget)
+            if table.empty:
+                continue
+            frames.append(table[~table["is_positive"]])
+        if not frames:
+            return missing("No candidate has been scored on `val` yet.")
+        healthy = pd.concat(frames, ignore_index=True)
+        healthy["length"] = pd.cut(
+            healthy["num_tokens"],
+            [0, 500, 1000, 1500, 4096],
+            right=False,
+            labels=["under 500", "500-1k", "1k-1.5k", "over 1.5k"],
+        )
+        rates = healthy.pivot_table(
+            index="domain",
+            columns="length",
+            values="fired",
+            aggfunc="mean",
+            observed=True,
+        ).round(4)
+        rates.insert(
+            0,
+            "share of answers over 1k tokens",
+            healthy.groupby("domain")["num_tokens"]
+            .apply(lambda lengths: (lengths > 1000).mean())
+            .round(3),
+        )
+        return mo.vstack(
+            [
+                mo.md(
+                    "Share of **healthy** answers raising a false alarm, by "
+                    "domain and by their own length, pooled over all twelve "
+                    f"candidates and their seeds at a **{budget:.0%} budget**. "
+                    "The first column is how much of each domain reaches the "
+                    "lengths where false alarms happen at all, so a domain with "
+                    "a high rate in the last column and a small share there "
+                    "contributes fewer alarms than the rate alone suggests."
+                ),
+                mo.ui.table(rates.reset_index(), selection=None),
+                mo.md(
+                    "Length explains most of when a false alarm happens and "
+                    "little of where. Within the longest band the mathematics "
+                    "domains fire several times more often than `llama_nemotron`, "
+                    "which is also the domain with by far the largest share of "
+                    "long healthy answers and therefore the most opportunities to "
+                    "fire. `if_sft_data_verified` is the one domain that fires on "
+                    "short answers at all, which is a mode length cannot account "
+                    "for and which matches the repetitive output its prompts "
+                    "often ask for."
+                ),
+            ]
+        )
+
+    domain_false_alarms(domain_budget.value)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    **What this changes.** The pooled warning coverage is an average over five
+    populations that behave in opposite ways, and it describes none of them.
+    Code carries most of the flagged run-up tokens in the whole split while
+    supplying the fewest false alarms per long answer; the mathematics domains
+    supply most of the false alarms and almost none of the warning; and
+    instruction-following has a false-alarm mode of its own that does not need a
+    long answer to appear. A single threshold is a compromise between these, and
+    every pooled figure elsewhere in this notebook inherits that compromise.
+
+    Read together with the sibling test further down, the same caution applies
+    twice. A warning coverage figure is partly a statement about the trajectory
+    and partly a statement about the answer's domain, its length, and how far in
+    the reader already is. The share attributable to the trajectory alone is
+    smaller than the pooled number, and it is not evenly distributed.
+
+    Two of the three per-domain readings sit on small counts: twenty-three
+    degenerate code answers and one from `aime_2025`. The claim these support is
+    the ordering and its consistency across twelve candidates, not the value in
+    any one cell. `codeforces` is held out and is also code, so a scoring pass
+    over the held-out split is the natural test of whether this is a property of
+    code or of `llama_nemotron`.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
     # S3. Do adapters earn their cost?
 
     Everything so far reads a frozen representation. If the run-up carries a
@@ -4369,6 +5434,23 @@ def _(layer_control, loss_config_control, mo):
 @app.cell
 def _(curve_figure, s3_loss_config, s3_loss_depth):
     curve_figure("S3", s3_loss_depth.value, s3_loss_config.value)
+    return
+
+
+@app.cell
+def _(replay_controls):
+    s3_replay_controls = replay_controls("S3")
+    s3_replay_controls
+    return (s3_replay_controls,)
+
+
+@app.cell
+def _(replay_scorecard, s3_replay_controls):
+    replay_scorecard(
+        "S3",
+        s3_replay_controls.value["step"],
+        s3_replay_controls.value["depth"],
+    )
     return
 
 
@@ -4434,6 +5516,221 @@ def _(s3_steps_config, s3_steps_depth, stage_tradeoff_trajectory):
     stage_tradeoff_trajectory(
         "S3", s3_steps_config.value, s3_steps_depth.value
     )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    ### Aside: is this probe reading the trajectory, or the prompt?
+
+    Every prompt in this corpus has ten rollouts. Some finish clean every time;
+    others produce a mix, at least one degenerate rollout alongside otherwise
+    healthy siblings. A probe reading imminence, "this trajectory is about to
+    break," should score a healthy sibling of a loop-prone prompt the same as a
+    healthy rollout from a prompt that never loops at all, because nothing went
+    wrong in either one. A probe that has instead picked up on which *prompts*
+    tend to loop, independent of what a given trajectory is doing, will score
+    the loop-prone prompt's healthy siblings higher.
+
+    This only works because the corpus keeps ten rollouts per prompt: without a
+    finished sibling sitting next to a degenerate one there is nothing to
+    compare a healthy trajectory's score against.
+
+    The two probes below are a frozen/adapted pair at depth 15, both
+    `all_tokens`/`hard1024`, seed 42 — the frozen head is layer 15 of the S1
+    ladder run, the adapted one is S3's LoRA-adapted counterpart at the same
+    depth. On validation, 469 healthy rollouts sit beside a degenerate sibling
+    and 3,057 come from prompts that never looped. Every healthy rollout's
+    score (the same max-over-tokens ranking score used everywhere else in this
+    notebook) is split by that grouping, and the two populations are compared
+    with a rank-biserial AUC: the probability a random sibling outscores a
+    random clean rollout. 0.5 is what a pure imminence detector should read,
+    since the two populations differ only in a fact about the prompt the probe
+    never sees; anything higher is the probe using that fact anyway.
+    """)
+    return
+
+
+@app.cell
+def _(BUILD_ROOT, OUTPUTS, pd):
+    def prompt_predisposition_labels(split="val"):
+        """Which prompts in this split ever produced a degenerate rollout."""
+        labels = pd.read_parquet(
+            BUILD_ROOT / "onset_labels" / "onset_labels.parquet",
+            columns=["prompt_id", "split", "is_positive"],
+        )
+        labels = labels[labels["split"] == split]
+        return labels.groupby("prompt_id")["is_positive"].any()
+
+    PREDISPOSITION_PROBES = {
+        "frozen, L15": OUTPUTS
+        / "apertus-8b-instruct_L1-31_all_tokens_hard1024_bce_lora-none_s42_7790c264"
+        / "20260814T050453" / "layers" / "layer_15" / "scores" / "val.parquet",
+        "lora-adapted, L15": OUTPUTS
+        / "apertus-8b-instruct_L15_all_tokens_hard1024_bce_lora-all_s42_b9e9df34"
+        / "20260816T085625" / "scores" / "val.parquet",
+    }
+    return PREDISPOSITION_PROBES, prompt_predisposition_labels
+
+
+@app.cell
+def _(PREDISPOSITION_PROBES, pd, prompt_predisposition_labels):
+    from degeneration_probe.evaluation.protocol import (
+        choose_thresholds as _choose_thresholds,
+        rollout_score as _rollout_score,
+    )
+    from scipy import stats as scipy_stats
+
+    def _healthy_groups(frame, loop_prone):
+        """Finished-on-its-own rollouts, split by their prompt's own history.
+
+        Healthy means stop_reason == 'eos' rather than merely is_positive ==
+        False, which would also admit the handful of capped rollouts the judge
+        could not resolve -- not a clean trajectory to compare against.
+        """
+        healthy = frame[frame["stop_reason"] == "eos"].copy()
+        healthy["prompt_loop_prone"] = healthy["prompt_id"].map(loop_prone).astype(bool)
+        return (
+            healthy[healthy["prompt_loop_prone"]],
+            healthy[~healthy["prompt_loop_prone"]],
+        )
+
+    def predisposition_result(path):
+        frame = pd.read_parquet(path)
+        frame["rollout_score"] = [_rollout_score(s) for s in frame["scores"]]
+        siblings, clean = _healthy_groups(frame, prompt_predisposition_labels())
+
+        statistic, p_value = scipy_stats.mannwhitneyu(
+            siblings["rollout_score"], clean["rollout_score"], alternative="greater"
+        )
+        auc = float(statistic / (len(siblings) * len(clean)))
+
+        thresholds = _choose_thresholds(frame, [0.01, 0.05, 0.10], persistence=1)
+        rates = pd.DataFrame(
+            [
+                {
+                    "target_negative_fpr": threshold.target_negative_fpr,
+                    "sibling_alarm_rate": float(
+                        (siblings["rollout_score"] >= threshold.tau).mean()
+                    ),
+                    "clean_alarm_rate": float(
+                        (clean["rollout_score"] >= threshold.tau).mean()
+                    ),
+                }
+                for threshold in thresholds
+            ]
+        )
+        rates["ratio"] = rates["sibling_alarm_rate"] / rates["clean_alarm_rate"]
+        return {
+            "siblings": siblings,
+            "clean": clean,
+            "auc": auc,
+            "p_value": float(p_value),
+            "rates": rates,
+        }
+
+    PREDISPOSITION_RESULTS = {
+        label: predisposition_result(path) for label, path in PREDISPOSITION_PROBES.items()
+    }
+    return (PREDISPOSITION_RESULTS,)
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_SOFT,
+    PREDISPOSITION_RESULTS,
+    SERIES,
+    mo,
+    np,
+    plt,
+    save,
+    tidy,
+):
+    def predisposition_figure():
+        """The healthy-score distribution, sibling-of-loop-prone vs clean."""
+        labels = list(PREDISPOSITION_RESULTS)
+        fig, axes = plt.subplots(1, len(labels), figsize=(5.2 * len(labels), 3.6), sharey=True)
+        if len(labels) == 1:
+            axes = [axes]
+        for axis, label, colour in zip(axes, labels, SERIES):
+            result = PREDISPOSITION_RESULTS[label]
+            for key, name, style in (
+                ("clean", "clean prompt", {"linestyle": "-"}),
+                ("siblings", "sibling of a loop-prone prompt", {"linestyle": (0, (3, 2))}),
+            ):
+                values = np.sort(result[key]["rollout_score"].to_numpy())
+                fractions = np.arange(1, len(values) + 1) / len(values)
+                axis.plot(values, fractions, color=colour, label=name, **style)
+            axis.set_title(f"{label}  (AUC={result['auc']:.3f})", color=INK_SOFT)
+            axis.set_xlabel("rollout score (max over tokens)")
+            axis.set_xlim(0, 1)
+            axis.set_ylim(0, 1)
+            tidy(axis, xgrid=False)
+            axis.legend(loc="lower right")
+        axes[0].set_ylabel("cumulative share of healthy rollouts")
+        fig.suptitle(
+            "Healthy-rollout score, by whether the prompt has a degenerate sibling",
+            x=0.005, ha="left", fontsize=10,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return mo.vstack(
+            [
+                save(fig, "prompt_predisposition_ecdf", FIGURES),
+                mo.md(
+                    "_Cumulative distribution of the healthy-rollout score, split by "
+                    "whether the rollout's own prompt ever produced a degenerate "
+                    "sibling. A pure imminence detector would draw the two lines on "
+                    "top of each other; the dashed line sitting to the right of the "
+                    "solid one is the probe reading the prompt rather than only the "
+                    "trajectory in front of it._"
+                ),
+            ]
+        )
+
+    predisposition_figure()
+    return
+
+
+@app.cell
+def _(PREDISPOSITION_RESULTS, mo, pd):
+    def predisposition_summary():
+        rows = []
+        for label, result in PREDISPOSITION_RESULTS.items():
+            row = {
+                "probe": label,
+                "healthy siblings": len(result["siblings"]),
+                "healthy, clean prompt": len(result["clean"]),
+                "AUC (sibling > clean)": round(result["auc"], 3),
+                "p-value": f"{result['p_value']:.1e}",
+            }
+            for _, rate in result["rates"].iterrows():
+                row[f"alarm ratio @{rate['target_negative_fpr']:.0%}"] = round(rate["ratio"], 2)
+            rows.append(row)
+        return mo.vstack(
+            [
+                mo.ui.table(pd.DataFrame(rows), selection=None),
+                mo.md(
+                    "Both probes read some of the prompt's own predisposition into a "
+                    "trajectory that never showed anything: a healthy rollout is "
+                    "roughly two to three times more likely to trip the alarm if it "
+                    "shares a prompt with a rollout that degenerated, at every budget "
+                    "tested. Letting the adapter reshape the representation, S3's own "
+                    "question, does not fix this -- the LoRA-adapted probe's AUC is "
+                    "not lower than the frozen one's, if anything slightly higher. "
+                    "This does not by itself prove a probe cannot also read "
+                    "imminence; it shows that whatever it reads is not cleanly "
+                    "separated from prompt-level difficulty, worth keeping in mind "
+                    "whenever a warning-coverage number elsewhere in this notebook is "
+                    "read as \"the probe saw the approach\" rather than \"the probe "
+                    "suspected the prompt.\""
+                ),
+            ]
+        )
+
+    predisposition_summary()
     return
 
 
@@ -4521,16 +5818,25 @@ def _(mo):
 
     A checkpoint is scored against a different model's own dataset build, using
     the same per-token scoring and the same four-view evaluator as scoring it on
-    Apertus, just pointed at cached activations from
-    `meta-llama/Llama-3.1-8B-Instruct` or `mistralai/Mistral-7B-Instruct-v0.1`.
-    Both share Apertus's hidden size of 4096 and its 32 layers, so a saved
-    linear head is shape-compatible. Whether it is also *useful* there is what
-    this part reports.
+    Apertus, just pointed at cached activations from a different model. Four
+    targets, in two pairs: `meta-llama/Llama-3.1-8B-Instruct` and
+    `mistralai/Mistral-7B-Instruct-v0.1` are a different architecture family
+    entirely; the other two are Apertus 1.5 variants (`capfilter-linear-it8816`,
+    `sft256k-4200`), the same architecture the checkpoints were trained on but a
+    different set of weights. All four share Apertus's hidden size of 4096 and
+    its 32 layers, so a saved linear head is shape-compatible everywhere; the
+    two pairs exist to separate two different questions the shape-compatibility
+    alone cannot answer: does the direction the probe found exist in a wholly
+    different model's activations at all, and separately, does it survive a
+    change of weights within the same architecture the head was picked on.
 
     The twelve leading candidates are what gets transferred, three seeds each,
     every one at the depth it was scored at. Only frozen checkpoints are ever
     scored this way: a LoRA adapter is fitted to Apertus's own decoder weights
-    and has no meaning against another model's.
+    and has no meaning against another model's activations. Part 4 below asks
+    the adapter's own version of this question instead: not whether its
+    activations transfer, but whether the adapter itself, transplanted onto a
+    different checkpoint's weights, still does its job.
 
     Everything here reads the validation split. The transferred side has the two
     test splits on disk as well, but the Apertus-side numbers each result is
@@ -4540,22 +5846,20 @@ def _(mo):
     Ground truth for the target models comes from the same LLM judge as every
     other split in this notebook, so a row below is only as trustworthy as that
     judge run on that model's answers.
-
-    Two further target models, both Apertus 1.5 variants, are being scored the
-    same way. That sweep covers five of the thirty-six seed runs so far, so it
-    is left out of this part rather than shown as a ragged column.
     """)
     return
 
 
 @app.cell
 def _(LEADING_CANDIDATES, Path, all_runs, pd):
-    # The two models every candidate has been scored against. Discovery is by
+    # The four models every candidate has been scored against. Discovery is by
     # candidate rather than by walking the output tree, so a half-finished sweep
     # against some other model cannot quietly add itself to the comparison.
     CROSS_MODEL_TARGETS = {
         "llama3p1-8b-instruct": "llama 3.1 8b",
         "mistral-7b-instruct-v0p1": "mistral 7b",
+        "apertus1p5-capfilter-linear-it8816": "apertus 1.5 capfilter",
+        "apertus1p5-sft256k-4200": "apertus 1.5 sft256k",
     }
     CROSS_MODEL_SPLIT = "val"
 
@@ -4610,8 +5914,8 @@ def _(CROSS_MODEL, LEADING_CANDIDATES, missing, mo):
     )
     mo.md(
         f"**{len(CROSS_MODEL)} scored transfers found**, out of "
-        f"{len(LEADING_CANDIDATES) * 3 * 2} expected: twelve candidates, three "
-        "seeds each, two target models."
+        f"{len(LEADING_CANDIDATES) * 3 * 4} expected: twelve candidates, three "
+        "seeds each, four target models."
     )
     return
 
@@ -4855,8 +6159,8 @@ def _(
         """One metric against the false-alarm budget, per candidate.
 
         A panel per candidate rather than every line on one axes: twelve
-        candidates times two target models plus twelve native references is
-        thirty-six lines, and the comparison that matters is within a candidate,
+        candidates times four target models plus twelve native references is
+        sixty lines, and the comparison that matters is within a candidate,
         not across them.
         """
         if SWEEPS.empty:
@@ -4946,22 +6250,29 @@ def _(budget_sweep_figure):
 @app.cell
 def _(mo):
     mo.md("""
-    **In-pattern coverage below is genuinely zero, and it is not a plotting
-    fault.** It is worth saying why, because zero everywhere usually means a
-    broken axis.
+    **In-pattern coverage on Llama and Mistral below is genuinely zero, and it
+    is not a plotting fault.** It is worth saying why, because zero everywhere
+    usually means a broken axis. On the two Apertus 1.5 targets, by contrast,
+    it is nowhere near zero: 0.65 median in-pattern coverage on capfilter,
+    0.58 on sft256k, against 0.000 on both Llama and Mistral, all at the same
+    5% false-alarm budget on the same twelve candidates. So the shape
+    compatibility all four targets share is not what decides this: the two
+    that share Apertus's own weights transfer; the two that only share its
+    hidden size and layer count do not.
 
-    Transferred to another model, the head stops separating anything: on Llama
-    every healthy answer peaks somewhere between 0.58 and 0.97, and the tokens
-    inside the loop reach at most 0.94. The threshold that spends even a 1%
-    false-alarm budget therefore sits at about 0.95, above the highest score any
-    in-loop token achieves, so nothing inside the loop is flagged and the rate is
-    exactly 0. On Apertus the same head puts in-loop tokens near 0.93 on average
-    while healthy answers spread all the way down to 0.14, and the same 1%
-    threshold still admits two thirds of them.
+    Transferred to Llama or Mistral, the head stops separating anything: on
+    Llama every healthy answer peaks somewhere between 0.58 and 0.97, and the
+    tokens inside the loop reach at most 0.94. The threshold that spends even a
+    1% false-alarm budget therefore sits at about 0.95, above the highest score
+    any in-loop token achieves, so nothing inside the loop is flagged and the
+    rate is exactly 0. On Apertus the same head puts in-loop tokens near 0.93 on
+    average while healthy answers spread all the way down to 0.14, and the same
+    1% threshold still admits two thirds of them.
 
-    So the head does not produce a weaker version of the same signal on another
-    model. It produces a compressed, uniformly high score that carries almost no
-    ordering, which is also why rollout recall sits near zero at small budgets.
+    So the head does not produce a weaker version of the same signal on a
+    different architecture. It produces a compressed, uniformly high score
+    that carries almost no ordering, which is also why rollout recall sits
+    near zero at small budgets on those two targets, but not on the other two.
     """)
     return
 
@@ -4985,6 +6296,504 @@ def _(budget_sweep_figure):
         "precision",
         "transfer_precision_vs_budget",
     )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # Part 4. Does the adapter itself transplant?
+
+    Part 3 asked whether the *direction* a frozen head found survives on
+    another model's activations. A LoRA-adapted checkpoint has no direction to
+    export that way: the adapter reshapes Apertus's own decoder weights, and
+    the probe head is fit to the reshaped result, so the pair only means
+    anything read off Apertus's own layers. Scored against a different
+    architecture's activations, as Part 3's intro already noted, this is not
+    weak transfer, it is a category error, and it is not attempted anywhere in
+    this part.
+
+    What is attempted instead: load a *different* checkpoint's weights, one
+    that is the same architecture as Apertus but not the same weights, apply
+    the source run's adapter and head to it exactly as `setup_probe` applies
+    them during training, and score it live, one real forward pass per
+    rollout, no cached activations anywhere in the path. The two Apertus 1.5
+    variants are the only targets this is possible for at all, since they are
+    the only other checkpoints sharing Apertus's architecture. The question
+    this answers: does the adapter's reshaping of the residual stream capture
+    something about degeneration that generalises across weights, or is it
+    fit to the exact checkpoint it was trained on and nothing else.
+
+    The candidate set is close to Part 3's twelve but not identical: S1 #3
+    (`frontier_hard_negative128`) was never trained under LoRA, and S2c, a
+    regression head on `repetition_score` that Part 2 ruled out early and so
+    never appears there, was. Twelve configurations, three seeds each, all at
+    the depth each was originally scored at.
+
+    Everything here reads the validation split, same as Part 3, and for the
+    same reason: the native side of the comparison, this exact checkpoint
+    scored on Apertus itself under the same adapter weights, only exists on
+    validation, saved once per checkpoint under `sweep/<checkpoint>/` as part
+    of picking it in the first place.
+    """)
+    return
+
+
+@app.cell
+def _():
+    # The transplant sweep's own checkpoint list, read off training's own
+    # output directories the same way Part 2 reads LEADING_CANDIDATES: not
+    # re-derived here, only named and pointed at. Depth, seed and checkpoint
+    # are each confirmed against the run directories themselves.
+    LORA_TRANSPLANT_CANDIDATES = [
+        {"stage": "S1", "label": "S1 #1", "summary": "rollout_balanced, W=128", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_rollout_balanced128_hard_bce_lora-all_s42_ba87b2e1/20260816T085621", "checkpoint": "checkpoint-700"},
+        {"stage": "S1", "label": "S1 #1", "summary": "rollout_balanced, W=128", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_rollout_balanced128_hard_bce_lora-all_s43_70ce1945/20260816T085625", "checkpoint": "checkpoint-1700"},
+        {"stage": "S1", "label": "S1 #1", "summary": "rollout_balanced, W=128", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_rollout_balanced128_hard_bce_lora-all_s44_2cbd1630/20260816T085625", "checkpoint": "checkpoint-500"},
+        {"stage": "S1", "label": "S1 #2", "summary": "frontier_window, W=256, centered", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_frontier256_hard_bce_lora-all_s42_9730324c/20260816T085622", "checkpoint": "checkpoint-300"},
+        {"stage": "S1", "label": "S1 #2", "summary": "frontier_window, W=256, centered", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_frontier256_hard_bce_lora-all_s43_184d454f/20260816T085622", "checkpoint": "checkpoint-850"},
+        {"stage": "S1", "label": "S1 #2", "summary": "frontier_window, W=256, centered", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_frontier256_hard_bce_lora-all_s44_f93b2881/20260816T085620", "checkpoint": "checkpoint-1150"},
+        {"stage": "S2a", "label": "S2a #1", "summary": "frontier_window, W=512, centered, horizon=256", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_hard256_bce_lora-all_s42_16f11891/20260816T085615", "checkpoint": "checkpoint-1100"},
+        {"stage": "S2a", "label": "S2a #1", "summary": "frontier_window, W=512, centered, horizon=256", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_hard256_bce_lora-all_s43_10cb63a6/20260816T085621", "checkpoint": "checkpoint-1150"},
+        {"stage": "S2a", "label": "S2a #1", "summary": "frontier_window, W=512, centered, horizon=256", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_hard256_bce_lora-all_s44_defb4925/20260816T085629", "checkpoint": "checkpoint-1150"},
+        {"stage": "S2a", "label": "S2a #2", "summary": "all_tokens, horizon=1024", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_all_tokens_hard1024_bce_lora-all_s42_b9e9df34/20260816T085625", "checkpoint": "checkpoint-1600"},
+        {"stage": "S2a", "label": "S2a #2", "summary": "all_tokens, horizon=1024", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_all_tokens_hard1024_bce_lora-all_s43_1877dd23/20260816T085623", "checkpoint": "checkpoint-1700"},
+        {"stage": "S2a", "label": "S2a #2", "summary": "all_tokens, horizon=1024", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_all_tokens_hard1024_bce_lora-all_s44_6c4843a3/20260816T085627", "checkpoint": "checkpoint-1600"},
+        {"stage": "S2a", "label": "S2a #3", "summary": "frontier_window, W=512, trailing, horizon=512", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_hard512_bce_lora-all_s42_3983be82/20260816T085631", "checkpoint": "checkpoint-700"},
+        {"stage": "S2a", "label": "S2a #3", "summary": "frontier_window, W=512, trailing, horizon=512", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_hard512_bce_lora-all_s43_b9b42c7f/20260816T085625", "checkpoint": "checkpoint-1250"},
+        {"stage": "S2a", "label": "S2a #3", "summary": "frontier_window, W=512, trailing, horizon=512", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_hard512_bce_lora-all_s44_7c3d8248/20260816T085633", "checkpoint": "checkpoint-1150"},
+        {"stage": "S2b", "label": "S2b #1", "summary": "soft label, exponential decay/256", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s42_437c96ea/20260816T085628", "checkpoint": "checkpoint-700"},
+        {"stage": "S2b", "label": "S2b #1", "summary": "soft label, exponential decay/256", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s43_1d6b2028/20260816T085626", "checkpoint": "checkpoint-1250"},
+        {"stage": "S2b", "label": "S2b #1", "summary": "soft label, exponential decay/256", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s44_f805d430/20260816T085721", "checkpoint": "checkpoint-750"},
+        {"stage": "S2b", "label": "S2b #2", "summary": "soft label, linear decay/256", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s42_58f70906/20260816T085631", "checkpoint": "checkpoint-700"},
+        {"stage": "S2b", "label": "S2b #2", "summary": "soft label, linear decay/256", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s43_3d8a070f/20260816T085629", "checkpoint": "checkpoint-450"},
+        {"stage": "S2b", "label": "S2b #2", "summary": "soft label, linear decay/256", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s44_c40acb2c/20260816T085634", "checkpoint": "checkpoint-750"},
+        {"stage": "S2b", "label": "S2b #3", "summary": "soft label, exponential decay/128", "depth": 15, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s42_9ef8b036/20260816T085633", "checkpoint": "checkpoint-1100"},
+        {"stage": "S2b", "label": "S2b #3", "summary": "soft label, exponential decay/128", "depth": 15, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s43_e91a9911/20260816T085626", "checkpoint": "checkpoint-450"},
+        {"stage": "S2b", "label": "S2b #3", "summary": "soft label, exponential decay/128", "depth": 15, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L15_frontier512_soft_bce_lora-all_s44_f1ba47d3/20260816T085629", "checkpoint": "checkpoint-750"},
+        {"stage": "S2c", "label": "S2c", "summary": "regression on repetition_score, MSE", "depth": 12, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L12_frontier128_repetition_score_mse_lora-all_s42_d1708e38/20260816T085632", "checkpoint": "checkpoint-1450"},
+        {"stage": "S2c", "label": "S2c", "summary": "regression on repetition_score, MSE", "depth": 12, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L12_frontier128_repetition_score_mse_lora-all_s43_d93bc55e/20260816T085634", "checkpoint": "checkpoint-1500"},
+        {"stage": "S2c", "label": "S2c", "summary": "regression on repetition_score, MSE", "depth": 12, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L12_frontier128_repetition_score_mse_lora-all_s44_fcb9756d/20260816T085631", "checkpoint": "checkpoint-1100"},
+        {"stage": "S2d", "label": "S2d #1", "summary": "base recipe, pos_weight=on", "depth": 4, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s42_2f0b0bd2/20260816T085632", "checkpoint": "checkpoint-1200"},
+        {"stage": "S2d", "label": "S2d #1", "summary": "base recipe, pos_weight=on", "depth": 4, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s43_26446f82/20260816T085639", "checkpoint": "checkpoint-1100"},
+        {"stage": "S2d", "label": "S2d #1", "summary": "base recipe, pos_weight=on", "depth": 4, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s44_77556c4d/20260816T085636", "checkpoint": "checkpoint-750"},
+        {"stage": "S2d", "label": "S2d #2", "summary": "base recipe, pos_weight=off", "depth": 4, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s42_6784e5dc/20260816T085633", "checkpoint": "checkpoint-550"},
+        {"stage": "S2d", "label": "S2d #2", "summary": "base recipe, pos_weight=off", "depth": 4, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s43_477c135c/20260816T085637", "checkpoint": "checkpoint-550"},
+        {"stage": "S2d", "label": "S2d #2", "summary": "base recipe, pos_weight=off", "depth": 4, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s44_686bb168/20260816T085636", "checkpoint": "checkpoint-500"},
+        {"stage": "S2d", "label": "S2d #3", "summary": "base recipe, pos_weight=on, positive_fraction=0.5", "depth": 4, "seed": 42, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s42_19312f07/20260816T085636", "checkpoint": "checkpoint-1200"},
+        {"stage": "S2d", "label": "S2d #3", "summary": "base recipe, pos_weight=on, positive_fraction=0.5", "depth": 4, "seed": 43, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s43_65b4300f/20260816T085628", "checkpoint": "checkpoint-1100"},
+        {"stage": "S2d", "label": "S2d #3", "summary": "base recipe, pos_weight=on, positive_fraction=0.5", "depth": 4, "seed": 44, "run_dir": "outputs/apertus-8b-instruct_L4_frontier128_hard_bce_lora-all_s44_7a0c77d6/20260816T085639", "checkpoint": "checkpoint-750"},
+    ]
+    return (LORA_TRANSPLANT_CANDIDATES,)
+
+
+@app.cell
+def _(LORA_TRANSPLANT_CANDIDATES, Path, pd):
+    # The two possible targets: the only other checkpoints sharing Apertus's
+    # architecture. Discovery is by candidate, same reasoning as Part 3's
+    # cross_model_index -- a half-finished sweep cannot quietly add itself.
+    LORA_TARGETS = {
+        "apertus1p5-capfilter-linear-it8816": "apertus 1.5 capfilter",
+        "apertus1p5-sft256k-4200": "apertus 1.5 sft256k",
+    }
+    LORA_SPLIT = "val"
+
+    def lora_transplant_index():
+        """One row per (candidate, seed, target checkpoint) that has been scored."""
+        rows = []
+        for candidate in LORA_TRANSPLANT_CANDIDATES:
+            root = Path(candidate["run_dir"])
+            native = root / "sweep" / candidate["checkpoint"]
+            for target, target_label in LORA_TARGETS.items():
+                scoped = root / "lora_transplant" / target
+                evaluation = scoped / "evaluation" / LORA_SPLIT
+                if not (evaluation / "view_a_detection.csv").is_file():
+                    continue
+                rows.append(
+                    {
+                        "stage": candidate["stage"],
+                        "label": candidate["label"],
+                        "recipe": candidate["summary"],
+                        "depth": candidate["depth"],
+                        "target": target_label,
+                        "seed": candidate["seed"],
+                        "evaluation": str(evaluation),
+                        "scores": str(scoped / "scores" / f"{LORA_SPLIT}.parquet"),
+                        "native_scores": str(native / "scores" / f"{LORA_SPLIT}.parquet"),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    LORA_TRANSPLANT = lora_transplant_index()
+    return (LORA_TRANSPLANT,)
+
+
+@app.cell
+def _(LORA_TRANSPLANT, LORA_TRANSPLANT_CANDIDATES, missing, mo):
+    mo.stop(
+        LORA_TRANSPLANT.empty,
+        missing(
+            "No transplant scores on disk yet. They land under "
+            "`<run_dir>/lora_transplant/<model>/evaluation/<split>/` once "
+            "`scripts/evaluate_lora_transplant.py` and "
+            "`scripts/evaluate_scores.py` have run for a checkpoint."
+        ),
+    )
+    mo.md(
+        f"**{len(LORA_TRANSPLANT)} scored transplants found**, out of "
+        f"{len(LORA_TRANSPLANT_CANDIDATES) * 2} expected: thirty-six checkpoints, "
+        "two target checkpoints each."
+    )
+    return
+
+
+@app.cell
+def _(budget_control):
+    lora_transplant_table_budget = budget_control()
+    lora_transplant_table_budget
+    return (lora_transplant_table_budget,)
+
+
+@app.cell
+def _(LORA_TRANSPLANT, Path, lora_transplant_table_budget, mo, pd):
+    # Same view set as Part 3's transfer_table, kept local to this cell under
+    # underscore-prefixed names so the two sections can define their own
+    # copies without marimo treating them as the same variable twice.
+    _LORA_VIEWS = [
+        ("recall", "view_a_detection", "recall"),
+        ("precision", "view_a_detection", "precision"),
+        ("TPR", "view_a_detection", "recall"),
+        ("FPR", "view_a_detection", "negative_fpr"),
+        ("in-pattern coverage", "view_b_coverage", "in_pattern_recall"),
+        ("warning coverage 128", "view_b_coverage", "warning_recall_128"),
+        ("warning coverage 256", "view_b_coverage", "warning_recall_256"),
+        ("healthy token rate", "view_b_coverage", "token_false_positive_rate"),
+        ("median lead", "view_c_lead_time", "median_offset"),
+        ("never fired", "view_c_lead_time", "never_fired_positives"),
+    ]
+    _LORA_PERSISTENCE = [
+        ("alarm length, degenerate", "positive"),
+        ("alarm length, healthy", "negative"),
+    ]
+    _LORA_ORDER = [name for name, *_ in _LORA_VIEWS] + [
+        name for name, _ in _LORA_PERSISTENCE
+    ]
+
+    def _lora_transfer_records(budget):
+        records = []
+        for record in LORA_TRANSPLANT.itertuples():
+            evaluation = Path(record.evaluation)
+            for metric, view_file, column in _LORA_VIEWS:
+                path = evaluation / f"{view_file}.csv"
+                if not path.is_file():
+                    continue
+                frame = pd.read_csv(path)
+                if column not in frame.columns:
+                    continue
+                rows = frame[frame["target_negative_fpr"] == budget]
+                for _, row in rows.iterrows():
+                    records.append(
+                        {
+                            "stage": record.stage,
+                            "label": record.label,
+                            "recipe": record.recipe,
+                            "target": record.target,
+                            "metric": metric,
+                            "value": row[column],
+                        }
+                    )
+            path = evaluation / "view_d_persistence.csv"
+            if not path.is_file():
+                continue
+            persistence = pd.read_csv(path)
+            for metric, population in _LORA_PERSISTENCE:
+                rows = persistence[
+                    (persistence["population"] == population)
+                    & (persistence["target_negative_fpr"] == budget)
+                ]
+                for _, row in rows.iterrows():
+                    records.append(
+                        {
+                            "stage": record.stage,
+                            "label": record.label,
+                            "recipe": record.recipe,
+                            "target": record.target,
+                            "metric": metric,
+                            "value": row["median_first_run_length"],
+                        }
+                    )
+        return pd.DataFrame(records)
+
+    def _lora_transfer_table(budget):
+        long = _lora_transfer_records(budget)
+        if long.empty:
+            return mo.md("_Nothing scored at this budget yet._")
+
+        def _summarise(values):
+            values = values.dropna()
+            if values.empty:
+                return ""
+            middle = values.median()
+            text = f"{middle:.3f}" if abs(middle) < 100 else f"{middle:.0f}"
+            if len(values) > 1 and values.min() != values.max():
+                low, high = values.min(), values.max()
+                span = (
+                    f"{low:.3f}–{high:.3f}"
+                    if abs(middle) < 100
+                    else f"{low:.0f}–{high:.0f}"
+                )
+                return f"{text} [{span}]"
+            return text
+
+        meta = (
+            long[["stage", "label", "recipe", "target"]]
+            .drop_duplicates()
+            .set_index(["label", "target"])
+        )
+        pivoted = long.pivot_table(
+            index=["label", "target"],
+            columns="metric",
+            values="value",
+            aggfunc=_summarise,
+        ).reindex(columns=[m for m in _LORA_ORDER if m in set(long["metric"])])
+        table = meta.join(pivoted).reset_index()
+        table = table.sort_values(["label", "target"])
+        return mo.vstack(
+            [
+                mo.md(
+                    "One row per candidate per target checkpoint: the median "
+                    "across its three seeds, with the seed-to-seed range in "
+                    f"brackets where it varies, at a **{budget:.0%} false-alarm "
+                    "budget** on the target checkpoint's own validation split."
+                ),
+                mo.ui.table(table, selection=None),
+            ]
+        )
+
+    _lora_transfer_table(lora_transplant_table_budget.value)
+    return
+
+
+@app.cell
+def _(LORA_TRANSPLANT, np, pd):
+    from degeneration_probe.evaluation.protocol import (
+        coverage_window as _lora_coverage_window,
+        rollout_score as _lora_rollout_score,
+        threshold_for_budget as _lora_threshold_for_budget,
+    )
+
+    _LORA_BUDGET_GRID = np.geomspace(0.001, 0.30, 48)
+    _LORA_SWEEP_CACHE = {}
+
+    def _lora_sweep_one(path):
+        if path in _LORA_SWEEP_CACHE:
+            return _LORA_SWEEP_CACHE[path]
+        frame = pd.read_parquet(path)
+        positives = frame[frame["is_positive"].astype(bool)]
+        negatives = frame[~frame["is_positive"].astype(bool)]
+        if positives.empty or negatives.empty:
+            _LORA_SWEEP_CACHE[path] = pd.DataFrame()
+            return _LORA_SWEEP_CACHE[path]
+        negative_peaks = np.array(
+            [_lora_rollout_score(s) for s in negatives["scores"]], dtype=np.float64
+        )
+        positive_peaks = np.array(
+            [_lora_rollout_score(s) for s in positives["scores"]], dtype=np.float64
+        )
+        in_pattern = np.sort(
+            np.concatenate(
+                [
+                    np.asarray(scores, dtype=np.float64)[
+                        _lora_coverage_window(len(scores), int(onset), None)
+                    ]
+                    for scores, onset in zip(
+                        positives["scores"], positives["onset_position"]
+                    )
+                ]
+            )
+        )
+        rows = []
+        for budget in _LORA_BUDGET_GRID:
+            tau, _ = _lora_threshold_for_budget(negative_peaks, float(budget))
+            caught = int((positive_peaks >= tau).sum())
+            false_alarms = int((negative_peaks >= tau).sum())
+            flagged = caught + false_alarms
+            rows.append(
+                {
+                    "budget": float(budget),
+                    "recall": caught / positive_peaks.size,
+                    "precision": (caught / flagged) if flagged else 0.0,
+                    "in_pattern_recall": float(
+                        (in_pattern.size - np.searchsorted(in_pattern, tau, "left"))
+                        / in_pattern.size
+                    ),
+                }
+            )
+        _LORA_SWEEP_CACHE[path] = pd.DataFrame(rows)
+        return _LORA_SWEEP_CACHE[path]
+
+    def _lora_transplant_sweeps():
+        frames = []
+        for record in LORA_TRANSPLANT.itertuples():
+            for source, path in (
+                (record.target, record.scores),
+                ("apertus (native)", record.native_scores),
+            ):
+                curve = _lora_sweep_one(path)
+                if curve.empty:
+                    continue
+                piece = curve.copy()
+                piece["label"] = record.label
+                piece["source"] = source
+                piece["seed"] = record.seed
+                frames.append(piece)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    LORA_SWEEPS = _lora_transplant_sweeps()
+    return (LORA_SWEEPS,)
+
+
+@app.cell
+def _(
+    FIGURES,
+    INK_SOFT,
+    LORA_SWEEPS,
+    LORA_TRANSPLANT_CANDIDATES,
+    SERIES,
+    missing,
+    mo,
+    plt,
+    save,
+    tidy,
+):
+    def lora_budget_sweep_figure(column, title, ylabel, name):
+        """One metric against the false-alarm budget, per candidate.
+
+        Same layout as Part 3's budget_sweep_figure: a panel per candidate,
+        solid lines for each target checkpoint, a dashed line for the same
+        checkpoint's native (in-family) score.
+        """
+        if LORA_SWEEPS.empty:
+            return missing("No transplant has been swept yet.")
+        labels = list(dict.fromkeys(c["label"] for c in LORA_TRANSPLANT_CANDIDATES))
+        labels = [label for label in labels if label in set(LORA_SWEEPS["label"])]
+        if not labels:
+            return missing("No transplant has been swept yet.")
+        sources = sorted(s for s in LORA_SWEEPS["source"].unique() if s != "apertus (native)")
+        colours = dict(zip(sources, SERIES))
+
+        columns = 4
+        rows = -(-len(labels) // columns)
+        fig, axes = plt.subplots(
+            rows, columns, figsize=(3.0 * columns, 2.5 * rows), squeeze=False,
+            sharex=True, sharey=True,
+        )
+        flat = [axis for row in axes for axis in row]
+        for axis, label in zip(flat, labels):
+            panel = LORA_SWEEPS[LORA_SWEEPS["label"] == label]
+            for source in sources:
+                line = panel[panel["source"] == source].groupby("budget")[column].median()
+                if line.empty:
+                    continue
+                axis.plot(line.index, line.to_numpy(), color=colours[source], label=source)
+            native = (
+                panel[panel["source"] == "apertus (native)"]
+                .groupby("budget")[column]
+                .median()
+            )
+            if not native.empty:
+                axis.plot(
+                    native.index,
+                    native.to_numpy(),
+                    color=INK_SOFT,
+                    linestyle="--",
+                    linewidth=1.4,
+                    label="apertus (native)",
+                )
+            axis.set_xscale("log")
+            axis.set_ylim(0, 1)
+            axis.set_title(label, color=INK_SOFT)
+            tidy(axis, xgrid=False)
+        for axis in flat[len(labels):]:
+            axis.set_axis_off()
+        for axis in axes[-1]:
+            axis.set_xlabel("false-alarm budget")
+        for row in axes:
+            row[0].set_ylabel(ylabel)
+        handles, names = flat[0].get_legend_handles_labels()
+        fig.legend(
+            handles, names, loc="upper center", bbox_to_anchor=(0.5, 0.02),
+            ncol=len(names),
+        )
+        fig.suptitle(title, x=0.005, ha="left", fontsize=10)
+        fig.tight_layout(rect=(0, 0.05, 1, 0.95))
+        return mo.vstack(
+            [
+                save(fig, name, FIGURES),
+                mo.md(
+                    "_One panel per candidate, median across its three seeds. "
+                    "Solid lines are the adapter and head transplanted onto a "
+                    "sibling checkpoint's weights; the dashed line is the same "
+                    "adapter and head on the Apertus checkpoint they were "
+                    "actually trained on, read at the same budget. The budget "
+                    "axis is swept continuously the same way Part 3's is._"
+                ),
+            ]
+        )
+
+    return (lora_budget_sweep_figure,)
+
+
+@app.cell
+def _(lora_budget_sweep_figure):
+    lora_budget_sweep_figure(
+        "recall",
+        "Detection: does the transplanted adapter still catch a degenerate answer?",
+        "recall",
+        "lora_transplant_recall_vs_budget",
+    )
+    return
+
+
+@app.cell
+def _(lora_budget_sweep_figure):
+    lora_budget_sweep_figure(
+        "in_pattern_recall",
+        "Coverage: does it still flag the tokens inside the loop?",
+        "in-pattern coverage",
+        "lora_transplant_in_pattern_vs_budget",
+    )
+    return
+
+
+@app.cell
+def _(lora_budget_sweep_figure):
+    lora_budget_sweep_figure(
+        "precision",
+        "Precision: what share of its alarms are on degenerate answers?",
+        "precision",
+        "lora_transplant_precision_vs_budget",
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    **Transplant trades coverage for precision, compared to reading the same
+    signal off frozen activations.** Both routes reach similarly high recall
+    on both Apertus 1.5 targets, and the ceiling on either route touches 1.0
+    for several candidates. Where they part ways: the transplanted adapter's
+    best precision at a fixed budget clears 0.85-0.93 on some candidates,
+    well above anything the frozen head reaches on these same two targets,
+    but its in-pattern coverage and warning lead time both run lower on
+    average than the frozen head's. A transplanted adapter fires sharper and
+    closer to the actual onset; a frozen head fires on more of the span
+    around it, including earlier, weaker signs, at the cost of more false
+    alarms along the way. Neither route dominates the other, and which one a
+    deployment wants depends on whether a late, confident alarm or an early,
+    noisier one is worth more.
+    """)
     return
 
 
