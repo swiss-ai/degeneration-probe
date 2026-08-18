@@ -87,3 +87,44 @@ def test_no_limit_leaves_the_monitor_alone():
     dataset = SimpleNamespace(records=[SimpleNamespace(is_positive=False)] * 12)
     assert subsample_for_monitoring(dataset, None, seed=1) is dataset
     assert subsample_for_monitoring(dataset, 99, seed=1) is dataset
+
+
+def test_the_stopping_block_builds_the_same_rule_the_replay_uses():
+    """One rule, whether a run stops itself or is judged after the fact."""
+    from degeneration_probe.config import StoppingConfig
+    from degeneration_probe.evaluation.head_selection import StoppingRule
+
+    config = StoppingConfig(floor=0.2, band=128, tolerance="0.004", patience=3)
+    assert config.as_rule() == StoppingRule(
+        floor=0.2, band=128, tolerance=0.004, patience=3
+    )
+    assert config.as_rule().objective == "warning_recall_128"
+
+
+def test_a_width_validation_never_measures_is_refused():
+    """The objective can only be read at the widths the record carries."""
+    from degeneration_probe.config import StoppingConfig
+
+    with pytest.raises(ValueError, match="training.stopping.band"):
+        StoppingConfig(band=200)
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"floor": 1.5}, {"tolerance": -0.1}, {"patience": 0}]
+)
+def test_the_stopping_block_refuses_settings_that_cannot_decide_anything(kwargs):
+    from degeneration_probe.config import StoppingConfig
+
+    with pytest.raises(ValueError):
+        StoppingConfig(**kwargs)
+
+
+def test_the_old_patience_setting_says_what_replaced_it():
+    """It stopped on whichever scalar best-model selection tracked, which is a
+    different question from the one the rule asks, so it cannot be repointed
+    silently."""
+    from degeneration_probe.config import BudgetConfig
+
+    assert BudgetConfig().patience is None
+    with pytest.raises(ValueError, match="training.stopping.patience"):
+        BudgetConfig(patience=4)

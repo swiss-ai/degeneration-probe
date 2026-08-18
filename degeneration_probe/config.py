@@ -136,6 +136,62 @@ class SelectionConfig:
 
 
 @dataclass
+class StoppingConfig:
+    """When a depth has stopped improving, and which checkpoint it is judged on.
+
+    The same four numbers the replay of saved checkpoints is read with, so a run
+    that stops itself and a run that is judged afterwards are judged by one
+    rule. They set how long a run trains far more than they set what it
+    reports: over the whole range that has been measured, the depth a run is
+    reported at and the value it reports barely move, while the step it stops at
+    roughly doubles. Read them as a budget, not as an accuracy setting.
+    """
+
+    enabled: bool = True
+    # Coverage inside the loop a depth must reach before its checkpoints can be
+    # selected from. There is no natural break in this quantity, so the value is
+    # a judgement: it separates depths that never found the loop from the rest.
+    floor: float = 0.3
+    # Which run-up width the objective is measured over.
+    band: int = 256
+    # How much better a step has to be to count as an improvement. Roughly the
+    # sampling error of the objective on a full validation split, and several
+    # times the step-to-step wobble between neighbouring checkpoints.
+    tolerance: float = 0.002
+    # Evaluations without an improvement before a depth stops. Counted in
+    # evaluations, so it has to move with the validation cadence.
+    patience: int = 4
+
+    def __post_init__(self) -> None:
+        from degeneration_probe.evaluation.protocol import WARNING_BANDS
+
+        self.floor = _as_float(self.floor)
+        self.tolerance = _as_float(self.tolerance)
+        if not 0.0 <= self.floor <= 1.0:
+            raise ValueError("training.stopping.floor must lie in [0, 1]")
+        if self.band not in WARNING_BANDS:
+            raise ValueError(
+                f"training.stopping.band must be one of {list(WARNING_BANDS)}: the objective "
+                "is only measured at the widths validation reports"
+            )
+        if self.tolerance < 0:
+            raise ValueError("training.stopping.tolerance must be non-negative")
+        if self.patience < 1:
+            raise ValueError("training.stopping.patience must be at least 1")
+
+    def as_rule(self):
+        """The rule itself, as the replay and the analysis build it."""
+        from degeneration_probe.evaluation.head_selection import StoppingRule
+
+        return StoppingRule(
+            floor=self.floor,
+            band=self.band,
+            tolerance=self.tolerance,
+            patience=self.patience,
+        )
+
+
+@dataclass
 class BudgetConfig:
     """The training budget, in the units that make recipes comparable.
 
@@ -155,8 +211,17 @@ class BudgetConfig:
         self.collapse_threshold = _as_float(self.collapse_threshold)
         if self.tokens_per_step is not None and self.tokens_per_step < 1:
             raise ValueError("training.budget.tokens_per_step must be positive")
-        if self.patience is not None and self.patience < 1:
-            raise ValueError("training.budget.patience must be at least 1")
+        if self.patience is not None:
+            # Kept only so that a run recorded before the rule existed still
+            # loads. It stopped on whichever scalar best-model selection was
+            # keyed to, which is a different question from the one the rule
+            # asks, so pointing it at the rule silently would change what a
+            # configuration means.
+            raise ValueError(
+                "training.budget.patience has been replaced by training.stopping.patience, "
+                "which counts evaluations without an improvement in run-up coverage rather "
+                "than in whichever scalar best-model selection happens to track"
+            )
         if self.collapse_threshold < 0:
             raise ValueError("training.budget.collapse_threshold must be non-negative")
 
@@ -271,8 +336,12 @@ class CheckpointConfig:
     steps: Optional[int] = None
     save_total_limit: int = 2
     keep_best: bool = True
-    metric_for_best_model: str = "loss"
-    greater_is_better: bool = False
+    # The rule's objective, gated on coverage inside the loop. Rollout-level
+    # recall saturates: on a split with a hundred degenerate answers it reads
+    # the same at every step of a run, so the checkpoint it picks is whichever
+    # one happened to catch one more answer.
+    metric_for_best_model: str = "selection_score"
+    greater_is_better: bool = True
     resume: str = "auto"
 
     def __post_init__(self) -> None:
@@ -324,6 +393,7 @@ class TrainingConfig:
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    stopping: StoppingConfig = field(default_factory=StoppingConfig)
     lora: LoraConfig = field(default_factory=LoraConfig)
     label: LabelConfig = field(default_factory=LabelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
@@ -339,6 +409,7 @@ class TrainingConfig:
             "features": FeaturesConfig,
             "selection": SelectionConfig,
             "budget": BudgetConfig,
+            "stopping": StoppingConfig,
             "lora": LoraConfig,
             "label": LabelConfig,
             "loss": LossConfig,

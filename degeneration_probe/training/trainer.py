@@ -47,6 +47,9 @@ class ProbeTrainer(Trainer):
             )
         self.cfg = cfg
         self.loss_name = cfg.loss.name
+        # Built whether or not the run stops itself: the rule also defines the
+        # scalar a checkpoint is ranked by, and that is needed either way.
+        self.rule = cfg.stopping.as_rule()
         self.validation_dataset = validation_dataset
         self.final_evaluation_datasets = final_evaluation_datasets
         self.pos_weight = pos_weight
@@ -235,6 +238,7 @@ class ProbeTrainer(Trainer):
             prefix="val",
             pos_weight=self.pos_weight,
             metric_names=self.cfg.validation.metrics,
+            rule=self.rule,
         )
         self.log(dict(metrics))
         for key, value in list(metrics.items()):
@@ -244,9 +248,10 @@ class ProbeTrainer(Trainer):
         wanted = selection if selection.startswith("eval_") else f"eval_{selection}"
         if self.cfg.checkpoint.keep_best and wanted not in metrics:
             raise ValueError(
-                f"selection metric {selection!r} was not produced by validation. A rank metric "
-                "needs both classes present on the monitor, so check that the monitoring split "
-                f"holds positive and negative rollouts. Available: {sorted(metrics)}"
+                f"selection metric {selection!r} was not produced by validation. The rule's "
+                "objective needs healthy rollouts to set a threshold against and degenerate "
+                "rollouts whose frontier falls inside the scored completion, so check that the "
+                f"monitoring split holds both. Available: {sorted(metrics)}"
             )
         self.control = self.callback_handler.on_evaluate(
             self.args, self.state, self.control, metrics
@@ -270,6 +275,7 @@ class ProbeTrainer(Trainer):
                 prefix=f"final/{split}",
                 pos_weight=self.pos_weight,
                 metric_names=self.cfg.validation.metrics,
+                rule=self.rule,
             )
             self.log(metrics)
             all_metrics.update(metrics)

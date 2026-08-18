@@ -42,6 +42,7 @@ from degeneration_probe.training.recording import (
     RunRecorder,
     prepare_run_location,
 )
+from degeneration_probe.training.stopping import HeadSelection
 from degeneration_probe.training.run_identity import (
     derive_group_name,
     derive_run_name,
@@ -98,6 +99,37 @@ def subsample_for_monitoring(dataset, max_rollouts, *, seed: int = MONITOR_SEED)
     reduced = copy.copy(dataset)
     reduced.records = positives + negatives
     return reduced
+
+
+def report_monitor(dataset, *, split: str, whole: int) -> None:
+    """Say what the monitoring split can and cannot support.
+
+    The rule's threshold is the highest score a small fixed share of healthy
+    answers is allowed to reach, so the number of healthy answers on the monitor
+    decides how firmly it is pinned. Below a few hundred it rests on two or
+    three answers, and every quantity derived from it inherits that: the record
+    still has a value, and the value moves for reasons that have nothing to do
+    with the probe. Reported at the start rather than inferred later from a
+    curve that will not sit still.
+    """
+    from degeneration_probe.evaluation.head_selection import STEERING_BUDGET
+
+    positives = sum(1 for record in dataset.records if record.is_positive)
+    negatives = len(dataset.records) - positives
+    allowed = int(STEERING_BUDGET * negatives)
+    print(
+        f"Monitoring on {len(dataset.records)} of {whole} {split} rollouts "
+        f"({positives} degenerate, {negatives} healthy); a "
+        f"{STEERING_BUDGET:.0%} false-alarm budget puts the threshold above the "
+        f"{allowed + 1} highest-scoring healthy answers"
+    )
+    if allowed < 10:
+        print(
+            f"  WARNING: {allowed + 1} answers decide the threshold, so the rule's record will "
+            "move with the sample rather than with the probe. Raise "
+            "training.validation.max_rollouts, or read the selection off a replay of the saved "
+            "checkpoints against the whole split."
+        )
 
 
 def _trainable_parameter_counts(probe) -> dict:
@@ -373,12 +405,14 @@ def _train(
         and getattr(datasets[splits.train], "selection", None) is not None
     ):
         callbacks.append(ResampleWindows(datasets[splits.train]))
-    if config.training.budget.patience:
-        from transformers import EarlyStoppingCallback
-
-        callbacks.append(
-            EarlyStoppingCallback(early_stopping_patience=config.training.budget.patience)
+    callbacks.append(
+        HeadSelection(
+            run_dir,
+            rule=config.training.stopping.as_rule(),
+            layers=config.training.probe.probed_layers,
+            stop_when_finished=config.training.stopping.enabled,
         )
+    )
     monitor = subsample_for_monitoring(
         datasets[splits.validation], config.training.validation.max_rollouts
     )
@@ -393,11 +427,11 @@ def _train(
             f"training.validation.final_splits names {sorted(unknown)}, which the dataset "
             f"does not define. Available: {sorted(datasets)}"
         )
-    if monitor is not datasets[splits.validation]:
-        print(
-            f"Monitoring on {len(monitor)} of {len(datasets[splits.validation])} "
-            f"{splits.validation} rollouts, every positive kept"
-        )
+    report_monitor(
+        monitor,
+        split=splits.validation,
+        whole=len(datasets[splits.validation]),
+    )
     trainer = ProbeTrainer(
         model=probe,
         cfg=config.training,

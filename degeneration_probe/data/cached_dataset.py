@@ -86,6 +86,10 @@ class CachedActivationDataset(Dataset):
             "domain": record.domain,
             "split": record.split,
             "is_positive": record.is_positive,
+            # Where the loop starts, carried through so that evaluation can
+            # measure coverage of the run-up without re-deriving a frontier from
+            # the targets, which a soft label makes ambiguous.
+            "onset_position": record.onset_position,
             # No prompt is prepended here: the cache holds completion tokens only.
             "prompt_length": 0,
         }
@@ -154,6 +158,7 @@ def cached_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]:
         "domain": [item["domain"] for item in batch],
         "split": [item["split"] for item in batch],
         "is_positive": [item.get("is_positive", False) for item in batch],
+        "onset_position": [item.get("onset_position") for item in batch],
     }
 
 

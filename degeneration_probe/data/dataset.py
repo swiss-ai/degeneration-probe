@@ -453,6 +453,9 @@ class DegenerationTokenDataset(Dataset):
             "domain": record.domain,
             "split": record.split,
             "is_positive": record.is_positive,
+            # Counted from the first generated token, so it indexes the scored
+            # completion rather than the padded input.
+            "onset_position": record.onset_position,
         }
 
     def _effective_targets(self, index: int) -> np.ndarray:
@@ -554,6 +557,7 @@ def degeneration_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]
         "domain": [item["domain"] for item in batch],
         "split": [item["split"] for item in batch],
         "is_positive": [item.get("is_positive", False) for item in batch],
+        "onset_position": [item.get("onset_position") for item in batch],
     }
 
 

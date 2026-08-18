@@ -227,3 +227,36 @@ def test_scoring_a_multi_head_run_must_name_a_depth(tmp_path, monkeypatch):
         score_rollouts.run(
             run_dir, checkpoint="final", splits=["val"], batch_size=1, layer=99
         )
+
+
+def test_the_headline_is_one_depth_but_the_collapse_guard_sees_them_all():
+    """A run's headline row must describe a probe that exists.
+
+    Reporting each column's best separately would put one depth's loss beside
+    another depth's coverage. The spread is the exception: the collapse guard
+    asks whether the probe has stopped distinguishing anything at all, and that
+    is false while any head is still spreading its scores.
+    """
+    from degeneration_probe.evaluation.evaluate import _headline
+    from degeneration_probe.evaluation.head_selection import StoppingRule
+
+    heads = [
+        {"loss": 0.1, "prediction_std": 0.4, "selection_score": -1.0, "in_pattern_recall": 0.1},
+        {"loss": 0.9, "prediction_std": 0.002, "selection_score": 0.05, "in_pattern_recall": 0.6},
+    ]
+    headline = _headline(heads, "val", StoppingRule())
+    assert headline["val/loss"] == 0.9
+    assert headline["val/selection_score"] == 0.05
+    assert headline["val/prediction_std"] == 0.4
+
+
+def test_below_the_floor_the_headline_is_the_depth_that_sees_most_of_the_loop():
+    """Every depth scores alike below the floor, so the tie needs breaking."""
+    from degeneration_probe.evaluation.evaluate import _headline
+    from degeneration_probe.evaluation.head_selection import StoppingRule
+
+    heads = [
+        {"loss": 0.5, "selection_score": -1.0, "in_pattern_recall": 0.02},
+        {"loss": 0.4, "selection_score": -1.0, "in_pattern_recall": 0.25},
+    ]
+    assert _headline(heads, "val", StoppingRule())["val/loss"] == 0.4

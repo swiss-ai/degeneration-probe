@@ -1,9 +1,16 @@
-"""Loss-based evaluation for the degeneration probe."""
+"""Loss-based evaluation for the degeneration probe.
+
+Validation produces the same record the checkpoint rule reads: a threshold set
+to a false-alarm budget, coverage of the loop, and coverage of the run-up at
+each warning width. That record is the one definition, shared with the replay
+of saved checkpoints, so a rule applied while a run trains and the same rule
+applied afterwards cannot disagree.
+"""
 
 from __future__ import annotations
 
 import math
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -12,37 +19,84 @@ import torch.nn.functional as F
 from degeneration_probe.evaluation.metrics import build_validation_metrics
 from degeneration_probe.training.loss import compute_degeneration_loss
 
-# The budget an in-training operating point is reported at. One number rather
-# than the reported family, because this exists to steer a run rather than to
-# describe it.
-MONITOR_BUDGET = 0.01
+# Metrics that a depth is better for having more of. Everything else is either
+# lower-is-better or a description of the operating point rather than a score.
+GREATER_IS_BETTER = {
+    "rollout_auc",
+    "rollout_ap",
+    "prediction_std",
+    "recall_at_budget",
+    "in_pattern_recall",
+    "warning_recall_128",
+    "warning_recall_256",
+    "selection_score",
+}
 
 
-def operating_point(peaks: Dict[tuple, float], labels: Dict[tuple, bool]) -> Dict[str, float]:
-    """Recall when the threshold is set to spend exactly the monitor's budget.
+def monitor_record(
+    negative_peaks: Sequence[float],
+    positive_scores: Sequence[np.ndarray],
+    onsets: Sequence[int],
+) -> Dict[str, float]:
+    """What one depth reports at one step, on the monitoring split.
 
-    A rank metric asks whether the ordering is right and saturates long before a
-    probe is good, because separating a mostly-degenerate rollout from a healthy
-    one is easy. What a deployment turns on is narrower: with false alarms capped
-    at a small rate, how many degenerations are actually caught. That question
-    stays sensitive where ranking does not, so it is the one worth steering on.
-
-    The threshold comes from the same rule the reported protocol uses, so this
-    number and the reported one mean the same thing at a persistence of one.
+    Delegates to the single definition in ``head_selection`` rather than
+    restating it, which is what keeps a live run and a replay of its saved
+    checkpoints measuring the same quantity.
     """
-    from degeneration_probe.evaluation.protocol import threshold_for_budget
+    from degeneration_probe.evaluation.head_selection import STEERING_BUDGET, validation_record
 
-    negatives = [peak for key, peak in peaks.items() if not labels.get(key)]
-    positives = [peak for key, peak in peaks.items() if labels.get(key)]
-    if not negatives or not positives:
+    if not len(negative_peaks) or not len(positive_scores):
         return {}
-    tau, realized = threshold_for_budget(np.asarray(negatives), MONITOR_BUDGET)
-    caught = sum(1 for peak in positives if peak >= tau)
-    return {
-        "recall_at_budget": caught / len(positives),
-        "budget_tau": tau,
-        "budget_realized_fpr": realized,
-    }
+    return validation_record(
+        negative_peaks=negative_peaks,
+        positive_scores=positive_scores,
+        onsets=onsets,
+        budget=STEERING_BUDGET,
+    )
+
+
+def selection_score(record: Dict[str, float], rule) -> Optional[float]:
+    """The scalar a depth is ranked by, or ``None`` when the rule cannot speak.
+
+    Coverage of the run-up, once coverage inside the loop clears the floor. A
+    depth below the floor scores below every depth above it rather than being
+    dropped, because the trainer's own best-model tracking needs a total order
+    and a missing value would silently keep whatever came before.
+
+    The latch that the full rule applies to eligibility is deliberately absent
+    here: latching is a statement about a trajectory, and this is a statement
+    about one step. The trajectory is where the rule is actually applied.
+    """
+    if rule is None or not record:
+        return None
+    objective = record.get(rule.objective)
+    inside = record.get("in_pattern_recall")
+    if objective is None or inside is None or not math.isfinite(objective):
+        return None
+    return float(objective) if inside >= rule.floor else -1.0
+
+
+def _completion_scores(probabilities, valid, row: int) -> np.ndarray:
+    """One rollout's scores over the tokens it is measured on, in order."""
+    return probabilities[row][valid[row]].detach().cpu().numpy().astype(np.float32)
+
+
+def _usable_onset(onset, length: int) -> Optional[int]:
+    """The frontier, when it lies inside the scored part of the rollout.
+
+    A rollout longer than the configured completion budget is scored up to that
+    budget, so a loop starting past it has no run-up to measure and no in-loop
+    tokens to cover. Such a rollout contributes to neither, rather than
+    contributing a window that runs off the end.
+    """
+    if onset is None:
+        return None
+    try:
+        onset = int(onset)
+    except (TypeError, ValueError):
+        return None
+    return onset if 0 <= onset < length else None
 
 
 @torch.no_grad()
@@ -54,14 +108,15 @@ def evaluate_probe(
     prefix: str,
     pos_weight: Optional[float] = None,
     metric_names: Iterable[str] = (),
+    rule=None,
 ) -> Dict[str, float]:
-    """Compute token-weighted loss and basic collapse diagnostics.
+    """Compute token-weighted loss, collapse diagnostics and the rule's record.
 
     A probe with a head per depth is scored in the same single pass over the
     data, since re-reading the split once per head would cost the whole saving
     that training them together bought. Each head's metrics are namespaced by
-    its layer, and the best of them is repeated unprefixed so that selection and
-    early stopping have a scalar to key off.
+    its layer, and the head the rule ranks highest is repeated unprefixed so
+    that selection and early stopping have a scalar to key off.
     """
     probe.eval()
     layer_indices = getattr(probe, "layer_indices", None)
@@ -73,14 +128,19 @@ def evaluate_probe(
             prefix=prefix,
             pos_weight=pos_weight,
             layer_indices=layer_indices,
+            rule=rule,
         )
     device = getattr(probe, "device", next(probe.parameters()).device)
     optional_metrics = build_validation_metrics(metric_names)
     # Accumulated per rollout so a rollout-level metric can be formed: the
     # score a rollout is judged by is the highest it ever reaches, which is
-    # exactly the quantity a decision threshold acts on.
+    # exactly the quantity a decision threshold acts on. Degenerate rollouts
+    # keep every token as well, because coverage is a statement about tokens
+    # and the threshold is not known until the healthy ones have been read.
     rollout_peak: Dict[tuple, float] = {}
     rollout_label: Dict[tuple, bool] = {}
+    positive_scores: Dict[tuple, np.ndarray] = {}
+    positive_onsets: Dict[tuple, int] = {}
     total_loss = 0.0
     total_plain_loss = 0.0
     total_tokens = 0
@@ -123,13 +183,21 @@ def evaluate_probe(
         valid_targets = targets[valid].float()
         valid_predictions = torch.sigmoid(logits[valid].float())
         probabilities = torch.sigmoid(logits.float())
+        labels_present = batch.get("is_positive", [False] * len(batch["prompt_id"]))
+        onsets_present = batch.get("onset_position", [None] * len(batch["prompt_id"]))
         for row, key in enumerate(zip(batch["prompt_id"], batch["rollout_idx"])):
             row_valid = valid[row]
             if not bool(row_valid.any()):
                 continue
-            peak = float(probabilities[row][row_valid].max())
-            rollout_peak[key] = max(rollout_peak.get(key, 0.0), peak)
-            rollout_label[key] = bool(batch.get("is_positive", [False] * len(batch["prompt_id"]))[row])
+            is_positive = bool(labels_present[row])
+            scores = _completion_scores(probabilities, valid, row)
+            rollout_peak[key] = max(rollout_peak.get(key, 0.0), float(scores.max()))
+            rollout_label[key] = is_positive
+            if is_positive:
+                onset = _usable_onset(onsets_present[row], scores.size)
+                if onset is not None:
+                    positive_scores[key] = scores
+                    positive_onsets[key] = onset
         total_loss += float(loss.item()) * active_tokens
         total_plain_loss += float(plain_loss.item()) * active_tokens
         total_tokens += active_tokens
@@ -179,10 +247,19 @@ def evaluate_probe(
         peaks = [rollout_peak[key] for key in rollout_peak]
         metrics[f"{prefix}/rollout_auc"] = float(roc_auc_score(labels, peaks))
         metrics[f"{prefix}/rollout_ap"] = float(average_precision_score(labels, peaks))
-    for key, value in operating_point(rollout_peak, rollout_label).items():
+    record = monitor_record(
+        [peak for key, peak in rollout_peak.items() if not rollout_label[key]],
+        [positive_scores[key] for key in positive_scores],
+        [positive_onsets[key] for key in positive_scores],
+    )
+    for key, value in record.items():
         metrics[f"{prefix}/{key}"] = value
+    score = selection_score(record, rule)
+    if score is not None:
+        metrics[f"{prefix}/selection_score"] = score
     metrics[f"{prefix}/rollouts"] = len(rollout_peak)
     metrics[f"{prefix}/positive_rollouts"] = int(sum(labels))
+    metrics[f"{prefix}/measured_positive_rollouts"] = len(positive_scores)
     for name, metric in optional_metrics.items():
         for key, value in metric.compute().items():
             metrics[f"{prefix}/{name}/{key}"] = float(value)
@@ -198,6 +275,7 @@ def _evaluate_multi_head(
     prefix: str,
     pos_weight: Optional[float],
     layer_indices,
+    rule=None,
 ) -> Dict[str, float]:
     """Score every head of a multi-layer probe in one pass over the split.
 
@@ -211,6 +289,11 @@ def _evaluate_multi_head(
     heads = len(layer_indices)
     peaks = [{} for _ in range(heads)]
     labels: Dict[tuple, bool] = {}
+    # One array per degenerate rollout, shaped [depths, tokens]: the run-up is
+    # measured per depth and the threshold it is measured against is not known
+    # until the healthy rollouts have been read.
+    positive_scores: Dict[tuple, np.ndarray] = {}
+    positive_onsets: Dict[tuple, int] = {}
     zeros = torch.zeros(heads, dtype=torch.float64, device=device)
     loss_total = zeros.clone()
     plain_total = zeros.clone()
@@ -274,6 +357,7 @@ def _evaluate_multi_head(
         row_peaks = probabilities.masked_fill(~keep, -1.0).amax(dim=1).cpu()
         rows_present = valid.any(dim=1).cpu()
         is_positive = batch.get("is_positive", [False] * len(batch["prompt_id"]))
+        onsets_present = batch.get("onset_position", [None] * len(batch["prompt_id"]))
         for row, key in enumerate(zip(batch["prompt_id"], batch["rollout_idx"])):
             if not bool(rows_present[row]):
                 continue
@@ -283,6 +367,16 @@ def _evaluate_multi_head(
                 value = float(row_values[index])
                 if value > peaks[index].get(key, -1.0):
                     peaks[index][key] = value
+            if not labels[key] or key in positive_scores:
+                continue
+            # [tokens, depths] to [depths, tokens], on the host: a monitoring
+            # split holds a hundred or so degenerate rollouts, so this is tens
+            # of megabytes rather than anything that needs managing.
+            scores = probabilities[row][valid[row]].t().contiguous().cpu().numpy()
+            onset = _usable_onset(onsets_present[row], scores.shape[1])
+            if onset is not None:
+                positive_scores[key] = scores.astype(np.float32)
+                positive_onsets[key] = onset
 
     if total_tokens == 0:
         raise ValueError(f"Evaluation split {prefix!r} contains no valid target tokens")
@@ -296,44 +390,93 @@ def _evaluate_multi_head(
         ),
         f"{prefix}/rollouts": len(labels),
         f"{prefix}/positive_rollouts": int(sum(labels.values())),
+        f"{prefix}/measured_positive_rollouts": len(positive_scores),
     }
     if loss_name == "bce" and pos_weight is not None:
         metrics[f"{prefix}/pos_weight"] = float(pos_weight)
 
-    best: Dict[str, float] = {}
+    ordered_positives = list(positive_scores)
+    onsets = [positive_onsets[key] for key in ordered_positives]
+    per_head: List[Dict[str, float]] = []
     for index, layer in enumerate(layer_indices):
         name = f"{prefix}/layer{layer:02d}"
         mean = float(prediction_sum[index]) / total_tokens
         head_metrics = {
-            f"{name}/loss": float(loss_total[index]) / total_tokens,
-            f"{name}/loss_unweighted": float(plain_total[index]) / total_tokens,
-            f"{name}/prediction_mean": mean,
-            f"{name}/prediction_std": math.sqrt(
+            "loss": float(loss_total[index]) / total_tokens,
+            "loss_unweighted": float(plain_total[index]) / total_tokens,
+            "prediction_mean": mean,
+            "prediction_std": math.sqrt(
                 max(0.0, float(prediction_sq_sum[index]) / total_tokens - mean**2)
             ),
-            f"{name}/prediction_positive_rate": float(predicted_positive[index]) / total_tokens,
+            "prediction_positive_rate": float(predicted_positive[index]) / total_tokens,
         }
-        ordered = [labels[key] for key in peaks[index]]
-        if any(ordered) and not all(ordered):
+        head_labels = [labels[key] for key in peaks[index]]
+        if any(head_labels) and not all(head_labels):
             from sklearn.metrics import average_precision_score, roc_auc_score
 
             values = [peaks[index][key] for key in peaks[index]]
-            head_metrics[f"{name}/rollout_auc"] = float(roc_auc_score(ordered, values))
-            head_metrics[f"{name}/rollout_ap"] = float(
-                average_precision_score(ordered, values)
+            head_metrics["rollout_auc"] = float(roc_auc_score(head_labels, values))
+            head_metrics["rollout_ap"] = float(
+                average_precision_score(head_labels, values)
             )
-        for key, value in operating_point(peaks[index], labels).items():
-            head_metrics[f"{name}/{key}"] = value
-        metrics.update(head_metrics)
+        record = monitor_record(
+            [peak for key, peak in peaks[index].items() if not labels[key]],
+            [positive_scores[key][index] for key in ordered_positives],
+            onsets,
+        )
+        head_metrics.update(record)
+        score = selection_score(record, rule)
+        if score is not None:
+            head_metrics["selection_score"] = score
+        per_head.append(head_metrics)
         for key, value in head_metrics.items():
-            suffix = key.rsplit("/", 1)[1]
-            # The run's headline number is its best depth, since that is the
-            # probe the run would actually be used for. Reported unprefixed so
-            # checkpoint selection and the collapse guard keep working unchanged.
-            better = suffix in {"rollout_auc", "rollout_ap", "prediction_std", "recall_at_budget"}
-            current = best.get(suffix)
-            if current is None or (value > current if better else value < current):
-                best[suffix] = value
-    for suffix, value in best.items():
-        metrics[f"{prefix}/{suffix}"] = value
+            metrics[f"{name}/{key}"] = value
+
+    metrics.update(_headline(per_head, prefix, rule))
     return metrics
+
+
+def _headline(per_head: List[Dict[str, float]], prefix: str, rule) -> Dict[str, float]:
+    """The run's unprefixed numbers: one depth's row, not a best-of per column.
+
+    A run's headline is the probe it would actually be used at, so every number
+    in it has to come from the same head. Taking each column's best separately
+    would report a loss from one depth beside a coverage from another and call
+    the result a run, which is a scorer that does not exist.
+
+    Depths are ordered by the rule's score and, below its floor where every
+    depth scores alike, by how much of the loop each has learned to cover, so
+    that early in a run the headline is the leading depth rather than the first
+    one. Without a rule there is no such thing as the run's depth, and each
+    column's best is reported instead.
+    """
+    if not per_head:
+        return {}
+    ranked = [head.get("selection_score") for head in per_head]
+    if rule is not None and any(value is not None for value in ranked):
+        best = max(
+            range(len(per_head)),
+            key=lambda index: (
+                ranked[index] is not None,
+                ranked[index] if ranked[index] is not None else -np.inf,
+                per_head[index].get("in_pattern_recall", -np.inf),
+            ),
+        )
+        headline = dict(per_head[best])
+    else:
+        headline = {}
+        for head in per_head:
+            for key, value in head.items():
+                better = key in GREATER_IS_BETTER
+                current = headline.get(key)
+                if current is None or (value > current if better else value < current):
+                    headline[key] = value
+    # The collapse guard asks whether the probe has stopped distinguishing
+    # anything, and the answer is no while any head still spreads its scores. A
+    # guard reading one depth's spread would kill a run for the state of a depth
+    # nobody would use, which early on is whichever depth the ranking has not
+    # separated yet.
+    spreads = [head["prediction_std"] for head in per_head if "prediction_std" in head]
+    if spreads:
+        headline["prediction_std"] = max(spreads)
+    return {f"{prefix}/{key}": value for key, value in headline.items()}

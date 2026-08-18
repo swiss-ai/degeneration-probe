@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 
@@ -15,6 +16,16 @@ class FixedProbe(torch.nn.Module):
 
     def forward(self, input_ids, attention_mask=None):
         return {"probe_logits": self.anchor + torch.zeros_like(input_ids, dtype=torch.float32)}
+
+
+def _negative_batch():
+    """A healthy answer, which is what a false-alarm budget is measured on."""
+    batch = _batch("val")
+    batch["prompt_id"] = ["n"]
+    batch["targets"] = torch.tensor([[0.0, 0.0, float("nan")]])
+    batch["is_positive"] = [False]
+    batch["onset_position"] = [None]
+    return batch
 
 
 def _batch(split):
@@ -83,36 +94,106 @@ def test_the_unweighted_loss_matches_the_weighted_one_when_unweighted():
         assert metrics["val/loss"] == pytest.approx(metrics["val/loss_unweighted"])
 
 
-def test_the_monitor_reports_recall_at_a_fixed_false_alarm_budget():
-    """A rank metric saturates; the operating point is what a run is steered by.
+def test_the_monitor_reports_the_rule_record_rather_than_a_ranking():
+    """What validation measures is what the checkpoint rule reads.
 
-    Separating a mostly-degenerate rollout from a healthy one is easy, so ranking
-    reaches its ceiling long before a probe is useful. Recall under a cap on
-    false alarms keeps moving after that, which is what makes it worth selecting
-    on.
+    A ranking saturates: separating a mostly-degenerate answer from a healthy
+    one is easy, so it reaches its ceiling long before the probe is useful. So
+    does rollout-level recall on a split with a hundred degenerate answers.
+    Coverage of the tokens before the loop keeps moving after both have stopped,
+    and it is what the project is about, so it is what a run is steered by.
     """
-    from degeneration_probe.evaluation.evaluate import operating_point
+    from degeneration_probe.evaluation.evaluate import monitor_record
 
-    # Ninety negatives spread low, ten positives above all but one of them.
-    peaks = {("n", i): 0.1 + 0.004 * i for i in range(90)}
-    labels = {("n", i): False for i in range(90)}
-    # One negative the probe is confidently wrong about, which is what sets the
-    # bar when only a one percent false-alarm rate is affordable.
-    peaks[("n", 99)] = 0.99
-    labels[("n", 99)] = False
-    for i in range(10):
-        peaks[("p", i)] = 0.7 + 0.01 * i
-        labels[("p", i)] = True
+    # Ninety healthy answers spread low, and one the probe is confidently wrong
+    # about, which is what sets the bar when only a one percent false-alarm rate
+    # is affordable.
+    negatives = [0.1 + 0.004 * index for index in range(90)] + [0.99]
+    # Ten degenerate answers, each flagged from ten tokens before its loop.
+    positives = [np.concatenate([np.full(40, 0.2), np.full(60, 0.995)]) for _ in range(10)]
+    onsets = [50] * 10
 
-    point = operating_point(peaks, labels)
-    assert point["budget_realized_fpr"] <= 0.01 + 1e-9
-    assert 0.0 <= point["recall_at_budget"] <= 1.0
-    # The one confidently wrong negative sets the bar, so it costs recall.
-    assert point["budget_tau"] > 0.9
+    record = monitor_record(negatives, positives, onsets)
+    assert record["budget_realized_fpr"] <= 0.01 + 1e-9
+    assert record["budget_tau"] > 0.9
+    # Every degenerate answer is caught, and caught before its loop.
+    assert record["recall_at_budget"] == pytest.approx(1.0)
+    assert record["never_fired_positives"] == 0
+    assert record["median_offset"] == pytest.approx(-10.0)
+    # Coverage inside the loop is complete; coverage of the run-up is the ten
+    # flagged tokens out of the band, which is the number that keeps moving.
+    assert record["in_pattern_recall"] == pytest.approx(1.0)
+    assert record["warning_recall_256"] == pytest.approx(10 / 50)
 
 
-def test_the_operating_point_is_undefined_without_both_classes():
-    from degeneration_probe.evaluation.evaluate import operating_point
+def test_the_record_is_empty_without_both_populations():
+    """A threshold needs healthy answers and coverage needs degenerate ones."""
+    from degeneration_probe.evaluation.evaluate import monitor_record
 
-    assert operating_point({("a", 0): 0.5}, {("a", 0): True}) == {}
-    assert operating_point({("a", 0): 0.5}, {("a", 0): False}) == {}
+    assert monitor_record([], [np.full(4, 0.9)], [2]) == {}
+    assert monitor_record([0.5], [], []) == {}
+
+
+def test_a_depth_below_the_floor_ranks_under_every_depth_above_it():
+    """The gate is what stops an accidental early alarm from being selected.
+
+    A depth that has not learned to flag the loop can still post run-up coverage,
+    by firing more or less at random. Ranking it on that would select a
+    checkpoint that saw nothing, so a depth only enters the ranking once its
+    coverage inside the loop clears the floor.
+    """
+    from degeneration_probe.evaluation.evaluate import selection_score
+    from degeneration_probe.evaluation.head_selection import StoppingRule
+
+    rule = StoppingRule(floor=0.3, band=256)
+    blind = {"in_pattern_recall": 0.05, "warning_recall_256": 0.9}
+    seeing = {"in_pattern_recall": 0.5, "warning_recall_256": 0.02}
+    assert selection_score(blind, rule) < selection_score(seeing, rule)
+    assert selection_score(seeing, rule) == pytest.approx(0.02)
+    # No rule and no record are both "nothing to say", not a score of zero.
+    assert selection_score(seeing, None) is None
+    assert selection_score({}, rule) is None
+
+
+def test_evaluation_reports_the_record_when_the_batch_carries_a_frontier():
+    """The frontier has to survive the collate, or none of this is measurable."""
+    from degeneration_probe.evaluation.head_selection import StoppingRule
+
+    batch = _batch("val")
+    batch["is_positive"] = [True]
+    batch["onset_position"] = [1]
+    metrics = evaluate_probe(
+        FixedProbe(),
+        [batch, _negative_batch()],
+        loss_name="bce",
+        prefix="val",
+        rule=StoppingRule(),
+    )
+    assert "val/in_pattern_recall" in metrics
+    assert "val/warning_recall_256" in metrics
+    assert "val/selection_score" in metrics
+    assert metrics["val/measured_positive_rollouts"] == 1
+
+
+def test_a_frontier_past_the_scored_completion_is_left_out():
+    """A truncated answer whose loop starts past the cap has nothing to measure.
+
+    Counting it as covered or as missed would both be wrong: the tokens the
+    claim would be about were never scored.
+    """
+    from degeneration_probe.evaluation.head_selection import StoppingRule
+
+    batch = _batch("val")
+    batch["is_positive"] = [True]
+    # Two tokens are scored; the loop is recorded as starting well past them.
+    batch["onset_position"] = [900]
+    metrics = evaluate_probe(
+        FixedProbe(),
+        [batch, _negative_batch()],
+        loss_name="bce",
+        prefix="val",
+        rule=StoppingRule(),
+    )
+    assert metrics["val/positive_rollouts"] == 1
+    assert metrics["val/measured_positive_rollouts"] == 0
+    assert "val/warning_recall_256" not in metrics

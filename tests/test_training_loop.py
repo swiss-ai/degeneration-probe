@@ -70,6 +70,9 @@ class TinyRollouts(Dataset):
             else torch.zeros(4),
             "target_mask": torch.ones(4, dtype=torch.bool),
             "is_positive": positive,
+            # Where the loop starts, which is what the rule measures coverage
+            # around. A positive rollout without one cannot be measured at all.
+            "onset_position": 2 if positive else None,
             "prompt_length": 0,
             "pad_token_id": 0,
             "prompt_id": f"p{index}",

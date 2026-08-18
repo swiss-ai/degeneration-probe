@@ -41,11 +41,28 @@ budget:
   # Tokens each optimizer step sees. Held equal across rules, this is what makes
   # them comparable; left unset, the accumulation from runtime is used as is.
   tokens_per_step: null
-  # Evaluations without improvement before stopping; null disables it.
-  patience: null
   # Minimum spread of the probe's scores on the monitor. Below this it has
   # collapsed to a constant, which converges and scores plausibly.
   collapse_threshold: 0.01
+
+stopping:
+  # Whether a run ends itself once every depth has stopped improving. Switched
+  # off, the rule is still measured and recorded, and the run trains to whatever
+  # step budget it was given.
+  enabled: true
+  # Coverage inside the loop a depth must reach before its checkpoints can be
+  # selected from. A depth below it has not learned to see the obvious and can
+  # post a flattering number before the frontier by accident.
+  floor: 0.3
+  # The run-up width the objective is measured over, in tokens.
+  band: 256
+  # How much better a step has to be to count as an improvement, and how many
+  # evaluations may pass without one. These set how long a run trains much more
+  # than what it reports: across the range that has been measured, the depth a
+  # run is reported at does not move and its value moves by a few percent, while
+  # the step it stops at roughly doubles.
+  tolerance: 0.002
+  patience: 4
 
 label:
   # frontier_hard | frontier_soft | token_signal
@@ -113,11 +130,14 @@ checkpoint:
   # to be reconsidered later without retraining anything.
   save_total_limit: null
   keep_best: true
-  # Selection runs on the operating point rather than on a ranking. Telling a
-  # mostly-degenerate rollout from a healthy one is easy, so ranking reaches
-  # its ceiling long before the probe is useful and stops separating
-  # checkpoints; recall under a cap on false alarms keeps moving after that.
-  metric_for_best_model: recall_at_budget
+  # Selection runs on coverage of the run-up, gated on coverage inside the loop.
+  # Both a ranking and rollout-level recall reach their ceiling long before the
+  # probe is useful: on a split with a hundred degenerate answers, recall under
+  # a cap on false alarms reads the same at every step of a run, so the
+  # checkpoint it picks is whichever one happened to catch one more answer.
+  # Coverage of the approach keeps separating checkpoints after that, and it is
+  # the quantity the project is about.
+  metric_for_best_model: selection_score
   greater_is_better: true
   resume: auto
 

@@ -33,11 +33,12 @@ def test_defaults_produce_resumable_checkpoints_and_keep_the_best(tmp_path):
     # Every checkpoint is kept. They hold one small head per depth, and keeping
     # them is what lets a selection rule be reconsidered without retraining.
     assert args.save_total_limit is None
-    # Selection keys off an operating point, not the loss and not a ranking. A
-    # token loss is dominated by the trivially separable in-pattern tokens, and
-    # a ranking metric reaches its ceiling while the probe is still improving,
-    # after which it can no longer tell two checkpoints apart.
-    assert args.metric_for_best_model == "recall_at_budget"
+    # Selection keys off coverage of the run-up, not the loss, not a ranking and
+    # not rollout-level recall. A token loss is dominated by the trivially
+    # separable in-pattern tokens; a ranking metric reaches its ceiling while the
+    # probe is still improving; and rollout recall, on a split with a hundred
+    # degenerate answers, reads the same at every step of a run.
+    assert args.metric_for_best_model == "selection_score"
     assert args.greater_is_better is True
 
 
