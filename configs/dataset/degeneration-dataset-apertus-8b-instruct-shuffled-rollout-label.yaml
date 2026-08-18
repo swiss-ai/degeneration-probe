@@ -1,0 +1,28 @@
+short_name: apertus-8b-instruct-shuffled-rollout-label
+build_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct-shuffled-rollout-label
+build_config: configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml
+# Prompts, generations, labels and the manifest are symlinked from the real
+# build (scripts/build_shuffled_rollout_label_dataset.py); onset_labels.parquet
+# instead promotes a random same-size set of real healthy (eos) rollouts to
+# "positive" with an arbitrary uniform-random cut point, and demotes the real
+# positives to unused -- so which rollouts are treated as degenerate is fully
+# decoupled from whether they actually are. Activations are the real build's
+# own cache, read in place.
+activations_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct/activations
+
+splits:
+  train: train
+  validation: val
+  test_indomain: test_indomain
+  test_heldout_domains: test_heldout_domains
+
+tokenization:
+  max_length: 4608
+  max_completion_length: 4096
+  prompt_truncation_side: left
+
+sampling:
+  train_negative_rollouts_per_positive: 4.0
+  evaluation_negative_rollouts_per_positive: null
+  domain_stratified: true
+  seed: null

@@ -1,0 +1,28 @@
+short_name: apertus-8b-instruct-shuffled-frontier
+build_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct-shuffled-frontier
+build_config: configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml
+# Prompts, generations, labels and the manifest are symlinked from the real
+# build (scripts/build_shuffled_frontier_dataset.py); only onset_labels.parquet
+# differs, with each positive rollout's frontier position randomly reassigned
+# from another positive rollout in the same split. Activations are the real
+# build's own cache, read in place rather than duplicated -- the frontier
+# label a token gets during training is data-loading-time metadata, not
+# something baked into the cached hidden states.
+activations_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct/activations
+
+splits:
+  train: train
+  validation: val
+  test_indomain: test_indomain
+  test_heldout_domains: test_heldout_domains
+
+tokenization:
+  max_length: 4608
+  max_completion_length: 4096
+  prompt_truncation_side: left
+
+sampling:
+  train_negative_rollouts_per_positive: 4.0
+  evaluation_negative_rollouts_per_positive: null
+  domain_stratified: true
+  seed: null
