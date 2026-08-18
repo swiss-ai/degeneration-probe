@@ -64,6 +64,29 @@ def discover_checkpoints(run_dir: Path, every: int) -> List[int]:
     return [step for step in steps if step % every == 0]
 
 
+def check_collapsible(config: ExperimentConfig) -> None:
+    """Refuse a run the collapse identity does not describe.
+
+    Folding a checkpoint into one vector holds for a layer normalization
+    followed by a linear map over single-token features. Under any other
+    normalization, or with several tokens feeding one logit, the same
+    arithmetic silently produces scores belonging to no probe that was ever
+    trained, and the result looks like an ordinary weak run.
+    """
+    probe = config.training.probe
+    if probe.normalization != "layernorm":
+        raise SystemExit(
+            f"this run normalizes with {probe.normalization!r}; the replay folds a trained "
+            "layer normalization into the head that follows it, and that identity holds for "
+            "layernorm only"
+        )
+    if probe.context_window_size != 1:
+        raise SystemExit(
+            f"this run reads {probe.context_window_size} tokens per logit; the replay scores "
+            "one state at a time"
+        )
+
+
 def collapse_heads(
     run_dir: Path, steps: Sequence[int], layers: Sequence[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -73,8 +96,7 @@ def collapse_heads(
     ``[depths, checkpoints]``, already folded through the trained normalization
     so that scoring is a matrix multiply against normalised states.
     """
-    weights = torch.zeros(len(layers), len(steps), 4096, dtype=torch.float32)
-    biases = torch.zeros(len(layers), len(steps), dtype=torch.float32)
+    weights = biases = None
     for column, step in enumerate(steps):
         for row, layer in enumerate(layers):
             head = run_dir / f"checkpoint-{step}" / f"layer_{layer:02d}"
@@ -88,6 +110,14 @@ def collapse_heads(
                 beta = norm["bias"].reshape(-1).float()
                 b = b + float(torch.dot(w, beta))
                 w = w * gamma
+            if weights is None:
+                # The width comes from the head itself rather than from a
+                # constant, so a model of another size replays as it trained
+                # instead of failing on a shape nobody wrote down.
+                weights = torch.zeros(
+                    len(layers), len(steps), w.numel(), dtype=torch.float32
+                )
+                biases = torch.zeros(len(layers), len(steps), dtype=torch.float32)
             weights[row, column] = w
             biases[row, column] = b
     return weights, biases
@@ -119,6 +149,7 @@ def replay(
     budget: float,
 ) -> pd.DataFrame:
     config = load_run_config(run_dir)
+    check_collapsible(config)
     layers = list(config.training.probe.probed_layers)
     steps = discover_checkpoints(run_dir, every)
     if not steps:
