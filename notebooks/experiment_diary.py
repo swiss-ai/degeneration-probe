@@ -467,14 +467,49 @@ def _(mo):
 def _(mo):
     mo.md(r"""
     ---
+    ### How a run is trained
+
+    Every run in the programme is trained the same way, so that a difference
+    between two of them is a difference in the recipe rather than in the effort
+    spent on it.
+
+    - **A step sees 4,096 supervised tokens.** An epoch is not a fixed amount of
+      learning here: under the exhaustive rule it is the whole corpus, under an
+      anchored-window rule it is one window per answer. Training each recipe for
+      one epoch would hand them budgets differing by an order of magnitude, and
+      the measured difference would be mostly a difference in training length.
+      The number of answers a step reads is whatever it takes to reach that
+      token budget, measured from the training stream rather than assumed from
+      the window size.
+    - **The probe is measured and saved every 50 steps**, and every checkpoint
+      is kept. A checkpoint holds a linear head and, where adapters are trained,
+      the adapters: a few megabytes against a frozen backbone the configuration
+      already describes in full. Keeping all of them is what allows the rule
+      below to be reconsidered without retraining anything.
+    - **A run stops when the rule says it has stopped improving.** A step cap of
+      2000 stands behind that as a backstop and is not the operating point: over
+      the runs measured so far, 99% of reported checkpoints were reached by step
+      1500 and the median by step 800.
+
+    Two differences between the frozen and the adapted stages are forced rather
+    than chosen. A frozen run trains a head at all thirty-one depths in one pass,
+    because reading one depth out of the cache costs almost what reading every
+    depth costs; an adapted run hooks a single layer, so it names the depth its
+    frozen counterpart was best at. And an adapted run reads one answer at a
+    time because the language model is resident, reaching the same token budget
+    by accumulation instead. Holding the token budget therefore costs a narrow
+    window far more with adapters than without, since supervising sixty-four
+    tokens still runs a whole answer through the model.
+
     ### Which checkpoint gets reported
 
-    A run trains for 2000 steps and keeps a checkpoint every 50. Which of those
-    forty checkpoints a run is judged on is decided by the rule below, applied
-    to each depth independently, since the heads share no parameters and plateau
-    at very different steps. It replaces an earlier rule that watched
-    rollout-level recall during training, which saturated and could not separate
-    one checkpoint from another.
+    A run keeps forty or more checkpoints at every depth it trains. Which one a
+    depth is judged on is decided by the rule below, applied to each depth
+    independently, since the heads share no parameters and plateau at very
+    different steps. It replaces an earlier rule that watched rollout-level
+    recall, which saturates: on a split holding a hundred degenerate answers that
+    number reads the same at every step of a run, so the checkpoint it names is
+    whichever one happened to catch one more answer.
 
     - A head's **objective** is its coverage of the tokens immediately before
       the frontier, at a width $W$. This is what the project is about, it is an
@@ -503,29 +538,78 @@ def _(mo):
     floor would otherwise cross back and forth and restart its patience on every
     crossing.
 
-    $W$, $g$, $\epsilon$ and $P$ are not guessed. Every checkpoint of every run
-    was kept, so the whole trajectory can be recomputed and each combination
-    read off it.
+    ### Where the four numbers come from
+
+    $W = 256$, $g = 0.3$, $\epsilon = 0.002$, $P = 4$. Every checkpoint of every
+    run was kept, so each combination can be read off the recorded trajectories
+    rather than argued about, and what that reading says is that **these four
+    numbers set how long a run trains, not what it reports**. Swept over floors
+    from 0 to 0.5, tolerances from 0.0005 to 0.004 and patiences from 2 to 8, the
+    depth a run is reported at does not move at all and the value it reports
+    moves by a few percent, while the step at which it stops roughly doubles.
+    They are a budget, and should be read as one.
+
+    The two that could be argued from the data are $\epsilon$ and $P$.
+
+    - **$\epsilon$** is one sampling error of the objective. Splitting the
+      validation answers in half and measuring each half separately puts that
+      error at 0.0017 against a typical peak of 0.022, and puts the movement
+      between neighbouring checkpoints at 0.0004. So 0.002 is about one standard
+      error and about five times the step-to-step wobble: small enough to notice
+      real improvement, large enough not to chase noise.
+    - **$P$** was chosen by asking what more of it buys. Fitting the rule on one
+      half of the answers and re-measuring its pick on the other, raising
+      patience from 2 to 8 lifts the value claimed on the half it selected on by
+      12% and the honest value on the held-out half by 2.6%, for double the
+      training. Most of what waiting longer appears to buy is the selection
+      finding a higher point on the same noise. At $P = 4$ the rule already
+      captures 88% of what an oracle with hindsight would have picked.
+
+    $g$ is a judgement rather than a result. Coverage inside the loop has no
+    natural break: across every depth of every run it is a smooth distribution,
+    with about a tenth of them sitting within 0.05 of the floor wherever the
+    floor is put. What 0.3 does is separate the depths that never found the loop
+    from the rest, and moving it does not change which depth any run reports.
+
+    All of this is small next to the seed. Repeats of one recipe differ by 18% in
+    the value they report, and by three layers in the depth. **Nothing about the
+    rule's settings is worth as much as another seed.**
 
     ### What the rule is for
 
     **Only the checkpoint the rule picks is ever scored in full.** A *full
     scoring pass* means writing one score for every token of all 3,634
     validation answers and putting them through all four views above. It takes
-    a few minutes for one depth at one checkpoint. A run has 31 depths and 40
-    checkpoints, so doing it everywhere would cost days per run and throw away
+    a few minutes for one depth at one checkpoint. A frozen run has 31 depths and
+    40 checkpoints, so doing it everywhere would cost days per run and throw away
     all but one row of the result. The rule exists so that cost is spent once,
     at the checkpoint worth spending it on.
 
-    **The rule is one function, usable at either moment.** It reads a sequence
-    of cheap per-checkpoint measurements and says where a depth stopped
-    improving and which checkpoint was its best. That sequence can arrive as
-    training produces it, in which case the rule is an early-stopping
-    criterion, or it can be read back afterwards from saved checkpoints, in
-    which case the rule picks which one to report. The runs in this notebook
-    are the second case, because they finished before the rule existed. Since
-    the rule is the same code either way, what it decides for them is what it
-    would have decided while they ran.
+    **The rule is one function, used at either moment.** It reads a sequence of
+    cheap per-checkpoint measurements and says where a depth stopped improving
+    and which checkpoint was its best. That sequence can arrive as training
+    produces it, in which case the rule ends the run, or it can be read back
+    afterwards from saved checkpoints, in which case it picks which one to
+    report. Both call the same code, so the two cannot disagree.
+
+    Which of the two a stage uses is settled by cost rather than preference. A
+    frozen probe is a linear map on states that do not change, so a whole run's
+    checkpoints collapse into one matrix and every one of them can be applied to
+    answers that are read once: replaying a finished run costs about one pass
+    over the data rather than one pass per checkpoint, which is why the frozen
+    stages are judged that way. Adapters change the states, so nothing collapses
+    and there is no cheap replay; an adapted run therefore measures the rule as
+    it trains, which costs nothing beyond the evaluation it was already doing.
+
+    One thing the two do not share is how firmly the threshold is pinned. The
+    objective is measured at a fixed false-alarm budget of one percent, so the
+    threshold sits above the highest-scoring one percent of healthy answers, and
+    how many healthy answers there are decides how much it moves. Against the
+    whole validation split it rests on the top thirty-five; against a monitor of
+    four hundred answers it rests on three, and the objective derived from it
+    then carries a relative spread of 46%. A replayed run reads the whole split
+    by construction. A run judged live has to monitor the whole split as well,
+    and does.
     """)
     return
 
@@ -540,14 +624,28 @@ def _(Path, all_runs, missing, mo, pd):
 
     STEP_CAP = 2000
 
+    # A frozen run's trajectory is recovered afterwards by applying every saved
+    # checkpoint to answers read once; an adapted run records the same numbers as
+    # it trains, because adapters leave nothing to collapse and so nothing to
+    # replay cheaply. The two files hold the same columns, so everything
+    # downstream reads whichever a run left behind.
+    TRAJECTORY_FILES = ("checkpoint_replay.parquet", "selection_history.parquet")
+
+    def trajectory_path(run_dir):
+        for name in TRAJECTORY_FILES:
+            path = Path(run_dir) / name
+            if path.is_file():
+                return path
+        return None
+
     def replayed_runs():
-        """Runs whose saved checkpoints have been put through the rule."""
+        """Runs whose checkpoints have been put through the rule."""
         if all_runs.empty:
             return {}
         found = {}
         for row in all_runs.itertuples():
-            path = Path(row.run_dir) / "checkpoint_replay.parquet"
-            if path.is_file():
+            path = trajectory_path(row.run_dir)
+            if path is not None:
                 found[Path(row.run_dir).parent.name] = path
         return found
 
@@ -584,8 +682,8 @@ def _(Path, all_runs, missing, mo, pd):
                 mo.md(
                     f"At floor {rule.floor}, width {rule.band}, tolerance "
                     f"{rule.tolerance}, patience {rule.patience}. One row per "
-                    "replayed run: **never selectable** is how many of its 31 "
-                    "depths never cleared the in-loop-coverage floor at all, "
+                    "run: **never selectable** is how many of its depths never "
+                    "cleared the in-loop-coverage floor at all, "
                     "**earliest/median stop** is when its depths' patience ran out, "
                     "**best depth** is the one the run would actually be reported "
                     "at. A run ends when its **slowest** depth stops, so that "
@@ -595,7 +693,7 @@ def _(Path, all_runs, missing, mo, pd):
             ]
         )
 
-    return (stopping_outcomes,)
+    return stopping_outcomes, trajectory_path
 
 
 @app.cell
@@ -605,7 +703,7 @@ def _(stopping_outcomes):
 
 
 @app.cell
-def _(Path, all_runs, pd):
+def _(Path, all_runs, pd, trajectory_path):
     # The quantity selection runs on, so the quantity whose shape decides whether
     # a longer run would have changed the answer.
     SELECTION_METRIC = "warning_recall_256"
@@ -616,8 +714,8 @@ def _(Path, all_runs, pd):
             return pd.DataFrame()
         frames = []
         for row in all_runs.itertuples():
-            path = Path(row.run_dir) / "checkpoint_replay.parquet"
-            if not path.is_file():
+            path = trajectory_path(row.run_dir)
+            if path is None:
                 continue
             frame = pd.read_parquet(path)
             frame["run"] = Path(row.run_dir).parent.name
@@ -1436,37 +1534,312 @@ def _(BASE, CHOSEN_DEPTH, LADDER_RUNGS, POSITIONAL_RUNGS, SEEDS, WINDOWS):
         ]
 
     def _adapted_runs():
+        # The recipes each earlier stage selected: its leader, and everything within
+        # one standard deviation of it, since at that separation the ordering between
+        # them is a property of the three seeds rather than of the recipes. Each is
+        # carried at the depth its frozen counterpart was best at, averaged over
+        # seeds: a single seed's best depth moves by ten layers between repeats,
+        # while the averaged profile does not. The walltime each asks for follows
+        # from its window: holding the token budget makes a narrow window run many
+        # more answers through the model per step than a wide one.
+        CARRIED = [
+        # S1: rollout_balanced W=128/centered hard h=0 bce (0.0423 frozen)
+        {
+            "stage": "S1",
+            "depth": 15,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "rollout_balanced",
+                "training.selection.window_size": 128,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S1: frontier_window W=256/centered hard h=0 bce (0.0370 frozen)
+        {
+            "stage": "S1",
+            "depth": 15,
+            "walltime": "09:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 256,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S1: frontier_window_hard_negative W=256/centered hard h=0 bce (0.0365 frozen)
+        {
+            "stage": "S1",
+            "depth": 15,
+            "walltime": "08:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window_hard_negative",
+                "training.selection.window_size": 256,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S1: random_window W=64/centered hard h=0 bce (0.0357 frozen)
+        {
+            "stage": "S1",
+            "depth": 12,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "random_window",
+                "training.selection.window_size": 64,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S1: all_tokens W=128 hard h=0 bce (0.0355 frozen)
+        {
+            "stage": "S1",
+            "depth": 12,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "all_tokens",
+                "training.selection.window_size": 128,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S2a: frontier_window W=512/centered hard h=256 bce (0.0618 frozen)
+        {
+            "stage": "S2a",
+            "depth": 15,
+            "walltime": "07:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 512,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 256,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S2a: all_tokens W=128 hard h=1024 bce (0.0617 frozen)
+        {
+            "stage": "S2a",
+            "depth": 15,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "all_tokens",
+                "training.selection.window_size": 128,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 1024,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S2a: frontier_window W=512/trailing hard h=512 bce (0.0592 frozen)
+        {
+            "stage": "S2a",
+            "depth": 15,
+            "walltime": "07:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 512,
+                "training.selection.anchor": "trailing",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 512,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S2a: all_tokens W=128 hard h=256 bce (0.0535 frozen)
+        {
+            "stage": "S2a",
+            "depth": 15,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "all_tokens",
+                "training.selection.window_size": 128,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 256,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S2b: frontier_window W=512/centered soft exponential 256 bce posw=off (0.0518 frozen)
+        {
+            "stage": "S2b",
+            "depth": 15,
+            "walltime": "07:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 512,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_soft",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "false",
+            },
+        },
+        # S2b: frontier_window W=512/centered soft linear 256 bce posw=off (0.0456 frozen)
+        {
+            "stage": "S2b",
+            "depth": 15,
+            "walltime": "07:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 512,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_soft",
+                "training.label.horizon": 0,
+                "training.label.decay": "linear",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "false",
+            },
+        },
+        # S2c: frontier_window W=128/centered repetition_score mse (0.0038 frozen)
+        {
+            "stage": "S2c",
+            "depth": 11,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 128,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "token_signal",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "mse",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        # S2d: frontier_window W=128/centered hard h=0 bce (0.0321 frozen)
+        {
+            "stage": "S2d",
+            "depth": 4,
+            "walltime": "12:00:00",
+            "overrides": {
+                "training.selection.strategy": "frontier_window",
+                "training.selection.window_size": 128,
+                "training.selection.anchor": "centered",
+                "training.selection.positive_fraction": 0.25,
+                "training.label.family": "frontier_hard",
+                "training.label.horizon": 0,
+                "training.label.decay": "exponential",
+                "training.label.decay_length": 256,
+                "training.label.signal": "repetition_score",
+                "training.loss.name": "bce",
+                "training.loss.bce.use_pos_weight": "true",
+            },
+        },
+        ]
         runs = []
-        for seed in SEEDS:
-            common = {
-                "training.probe.layers": "null",
-                "training.probe.layer": CHOSEN_DEPTH,
-                "training.runtime.seed": seed,
-            }
-            runs.append(
-                {
-                    "label": f"adapted, LoRA over the probed depth (seed {seed})",
-                    "overrides": recipe(
-                        **common,
-                        **{
-                            "training.features.regime": "adapted",
-                            "training.lora.enabled": "true",
-                            "training.lora.layers": "all",
-                            # The head starts as noise, so adapters that moved at
-                            # the head's rate would rewrite the representation
-                            # before the probe knew what it was looking for.
-                            "training.optimizer.lora_learning_rate": 1e-5,
-                        },
-                    ),
-                    "sbatch": "--time=08:00:00",
-                }
-            )
-            runs.append(
-                {
-                    "label": f"frozen control at the same depth (seed {seed})",
-                    "overrides": recipe(**common),
-                }
-            )
+        for entry in CARRIED:
+            for seed in SEEDS:
+                runs.append(
+                    {
+                        "label": (
+                            f"{entry['stage']} leader, adapted at depth "
+                            f"{entry['depth']} (seed {seed})"
+                        ),
+                        "overrides": recipe(
+                            **entry["overrides"],
+                            **{
+                                "training.features.regime": "adapted",
+                                "training.lora.enabled": "true",
+                                "training.lora.layers": "all",
+                                "training.lora.rank": 16,
+                                # The head starts as noise, so adapters that
+                                # moved at the head's rate would rewrite the
+                                # representation before the probe knew what it
+                                # was looking for.
+                                "training.optimizer.lora_learning_rate": 1e-5,
+                                # One depth rather than every depth: the probe
+                                # reads its layer through a hook on a resident
+                                # model, so a head per depth is not available
+                                # here the way it is over cached states.
+                                "training.probe.layers": "null",
+                                "training.probe.layer": entry["depth"],
+                                # One answer at a time, for the same reason. The
+                                # token budget is unchanged and reached by
+                                # accumulation instead.
+                                "training.runtime.per_device_train_batch_size": 1,
+                                # The threshold sits above the highest-scoring
+                                # one percent of healthy answers, so a monitor
+                                # of four hundred would rest it on three of
+                                # them. There is no cheap replay to fall back
+                                # on once adapters have moved the states, so the
+                                # whole split is read as the run trains.
+                                "training.validation.max_rollouts": "null",
+                                "training.stopping.enabled": "true",
+                                "training.stopping.floor": 0.3,
+                                "training.stopping.band": 256,
+                                "training.stopping.tolerance": 0.002,
+                                "training.stopping.patience": 4,
+                                "training.runtime.seed": seed,
+                            },
+                        ),
+                        "sbatch": f"--time={entry['walltime']}",
+                    }
+                )
         return runs
 
     grid_runs = _grid_runs()
@@ -1542,7 +1915,7 @@ def _(
             "title": "Do adapters earn their cost?",
             "runs": adapted_runs,
             "shell": [],
-            "axes": ["features", "layer"],
+            "axes": ["features", "selection", "window", "horizon", "layer"],
         },
         {
             "id": "S4",
@@ -6844,7 +7217,9 @@ def _(mo):
         scores/<split>.parquet          one score per token per answer
         evaluation/<split>/*.csv        the four views
       cross_model/<model>/layer_NN/     the same depth, scored on another model
-      checkpoint_replay.parquet         every saved checkpoint, every depth
+      selection_history.parquet         the rule's record at every evaluation
+      selection_outcomes.json           where each depth stopped, and its pick
+      checkpoint_replay.parquet         the same record, recovered afterwards
       decision_thresholds.json          frozen on validation, reused on test
     ```
     """)
@@ -6898,6 +7273,16 @@ def _(mo):
     - `val/loss` carries a class weight fitted to each recipe's own training
       stream, so it is not comparable between recipes. Use
       `val/loss_unweighted`.
+    - The rule's record is only as firm as the healthy answers behind its
+      threshold. At a one percent false-alarm budget, four hundred answers put
+      the threshold on the top three of them and the objective derived from it
+      carries a relative spread of 46%; the whole split puts it on the top
+      thirty-five. A run judged from its own evaluations has to monitor the
+      whole split, and the trainer says at startup how many answers its
+      threshold is resting on.
+    - Rollout-level recall is not a selection metric on this data. With a
+      hundred degenerate answers it reads the same at every step of a run, so
+      the checkpoint it names is whichever one caught one more answer.
     - The token budget per step is derived from the *measured* tokens per
       example, not from the configured window size. Wide windows are clipped by
       the ends of the answers they sit in, so they land furthest below the
