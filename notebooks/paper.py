@@ -210,35 +210,32 @@ def _(RULE, RUNS, WARNING_BANDS, apply_rule_to_run, np, pd, population):
 @app.cell
 def _(SCORED, WARNING_BANDS, mo, pd):
     OBJECTIVE = "warning coverage 256"
-    # Averaged over a recipe's seeds. A depth and a step are each seed's own
-    # pick, so those are taken as the middle one rather than the mean, which
-    # would name a layer no seed chose.
-    AVERAGED = [
-        "rollout recall",
-        "rollout precision",
-        "false-alarm rate",
-        "in-pattern recall",
-        *(f"warning coverage {band}" for band in WARNING_BANDS),
-        "median offset",
-        "never fired",
-    ]
+    # Averaged over a recipe's seeds, each to the precision it is read at, so a
+    # figure and its spread are written to the same number of places.
+    AVERAGED = {
+        "rollout recall": 3,
+        "rollout precision": 3,
+        "false-alarm rate": 4,
+        "in-pattern recall": 3,
+        **{f"warning coverage {band}": 4 for band in WARNING_BANDS},
+        "median offset": 0,
+        "never fired": 1,
+    }
+    # A depth and a step are each seed's own pick out of a discrete set, so the
+    # middle one is reported with the range the seeds covered. A standard
+    # deviation would describe a spread around a mean that names no checkpoint
+    # any seed selected.
+    RANGED = ["layer", "step"]
     COLUMNS = [
         "training strategy",
         "rank",
         "seeds",
-        "layer",
-        "step",
-        "rollout recall",
-        "rollout precision",
-        "false-alarm rate",
-        "in-pattern recall",
-        *(f"warning coverage {band}" for band in WARNING_BANDS),
-        "median offset",
-        "never fired",
+        *RANGED,
+        *AVERAGED,
     ]
 
-    def with_spread(mean, spread):
-        """A coverage figure and how far its seeds sat from it.
+    def with_spread(mean, spread, decimals):
+        """A figure and how far its seeds sat from it.
 
         Written into the one cell rather than into a column of its own, because
         a spread parked at the far end of a wide table is read as a separate
@@ -247,18 +244,25 @@ def _(SCORED, WARNING_BANDS, mo, pd):
         if pd.isna(mean):
             return ""
         if pd.isna(spread):
-            return f"{mean:.4f}"
-        return f"{mean:.4f} ± {spread:.4f}"
+            return f"{mean:.{decimals}f}"
+        return f"{mean:.{decimals}f} ± {spread:.{decimals}f}"
+
+    def with_range(middle, low, high):
+        """The middle pick, and the range the seeds actually covered."""
+        if pd.isna(middle):
+            return ""
+        if low == high:
+            return f"{int(middle)}"
+        return f"{int(middle)} ({int(low)}-{int(high)})"
 
     def table(stages, title):
         """One row per training strategy, averaged over its seeds.
 
         Each seed contributes the checkpoint the rule kept for it, so a row is
         the mean of three separately selected probes rather than of three
-        readings of one. The spread beside it is the standard deviation of the
-        objective over those seeds, which is what says whether the ordering
-        above is worth reading: repeats of one recipe differ by more than
-        neighbouring rows in these tables do.
+        readings of one, and every figure carries the spread of those seeds. That
+        spread is what says whether the ordering above is worth reading: repeats
+        of one recipe differ by more than neighbouring rows in these tables do.
         """
         if SCORED.empty:
             return mo.md(f"**{title}** — no run has recorded a trajectory yet.")
@@ -267,40 +271,32 @@ def _(SCORED, WARNING_BANDS, mo, pd):
         if rows.empty:
             return mo.md(f"**{title}** — no run has finished yet.")
         grouped = rows.groupby("recipe")
-        summary = grouped[AVERAGED].mean()
-        spreads = grouped[[f"warning coverage {band}" for band in WARNING_BANDS]].std()
-        summary["seeds"] = grouped.size()
-        summary["layer"] = grouped["layer"].median().round().astype(int)
-        summary["step"] = grouped["step"].median().round().astype(int)
-        summary = summary.sort_values(OBJECTIVE, ascending=False)
-        # Every coverage figure carries the spread of the seeds it averages, so
-        # a reader can see at once whether two neighbouring rows differ by more
-        # than repeats of either one do.
-        coverage = {
-            f"warning coverage {band}": [
-                with_spread(mean, spreads.loc[recipe, f"warning coverage {band}"])
-                for recipe, mean in summary[f"warning coverage {band}"].items()
-            ]
-            for band in WARNING_BANDS
-        }
-        summary = summary.reset_index()
-        summary["rank"] = range(1, len(summary) + 1)
-        summary = summary.rename(columns={"recipe": "training strategy"})
-        for name, values in coverage.items():
-            summary[name] = values
-        shown = summary[COLUMNS].round(
-            {
-                "rollout recall": 3,
-                "rollout precision": 3,
-                "false-alarm rate": 4,
-                "in-pattern recall": 3,
-                "median offset": 0,
-                "never fired": 1,
-            }
-        )
-        return mo.vstack([mo.md(f"### {title}"), mo.ui.table(shown, selection=None)])
+        columns = list(AVERAGED)
+        means = grouped[columns].mean()
+        spreads = grouped[columns].std()
+        order = means.sort_values(OBJECTIVE, ascending=False).index
 
-    return AVERAGED, COLUMNS, OBJECTIVE, table
+        shown = pd.DataFrame(index=order)
+        shown["training strategy"] = order
+        shown["rank"] = range(1, len(order) + 1)
+        shown["seeds"] = grouped.size().reindex(order)
+        for name in RANGED:
+            middles = grouped[name].median().reindex(order)
+            lows = grouped[name].min().reindex(order)
+            highs = grouped[name].max().reindex(order)
+            shown[name] = [
+                with_range(middles[recipe], lows[recipe], highs[recipe]) for recipe in order
+            ]
+        for name, decimals in AVERAGED.items():
+            shown[name] = [
+                with_spread(means.loc[recipe, name], spreads.loc[recipe, name], decimals)
+                for recipe in order
+            ]
+        return mo.vstack(
+            [mo.md(f"### {title}"), mo.ui.table(shown[COLUMNS].reset_index(drop=True), selection=None)]
+        )
+
+    return AVERAGED, COLUMNS, OBJECTIVE, RANGED, table
 
 
 @app.cell
