@@ -364,10 +364,14 @@ class DegenerationTokenDataset(Dataset):
         self.tokenizer = tokenizer
         self.tokenization = tokenization
         self.selection = selection
-        self.seed = int(seed)
+        # Only actually consumed below (shuffle) and in resample() (selection
+        # not None) -- eval-time callers (shuffle=False, selection=None) never
+        # touch it, so a dataset config with sampling.seed unset must not
+        # crash a scoring run that never shuffles or resamples.
+        self.seed = seed
         self._selected: Optional[Dict[int, np.ndarray]] = None
         if shuffle:
-            order = np.random.default_rng(seed).permutation(len(self.records))
+            order = np.random.default_rng(int(seed)).permutation(len(self.records))
             self.records = [self.records[index] for index in order]
         if self.selection is not None:
             self.resample(0)
@@ -376,7 +380,7 @@ class DegenerationTokenDataset(Dataset):
         """Redraw which positions contribute to the loss."""
         from degeneration_probe.data.sampling import build_windows
 
-        rng = np.random.default_rng([self.seed, epoch])
+        rng = np.random.default_rng([int(self.seed), epoch])
         windows = build_windows(
             self.records,
             strategy=self.selection.strategy,
