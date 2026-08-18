@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import MISSING, fields, is_dataclass
 from typing import Any, Dict, List
 
 from degeneration_probe.config import ExperimentConfig
@@ -26,7 +26,13 @@ from degeneration_probe.config import ExperimentConfig
 # learns. They are excluded from the fingerprint so that re-running a
 # configuration with different logging or checkpointing lands on the same
 # identity, and can therefore resume.
-VOLATILE_TRAINING_FIELDS = {"checkpoint", "wandb", "validation"}
+# ``stopping`` sits here because every checkpoint of a run is kept: two runs
+# differing only in when they stop are one run truncated at two points, and the
+# shorter one's trajectory is a prefix of the longer one's. Sharing an identity
+# is what lets a rule with more patience continue a run rather than repeat it,
+# and what stops a re-reading of the same saved checkpoints from looking like a
+# different experiment.
+VOLATILE_TRAINING_FIELDS = {"checkpoint", "wandb", "validation", "stopping"}
 VOLATILE_RUNTIME_FIELDS = {
     "logging_steps",
     "dataloader_num_workers",
@@ -96,17 +102,72 @@ def run_axes(config: ExperimentConfig) -> Dict[str, Any]:
     }
 
 
+# A field with no default states something the configuration cannot do without,
+# so it is carried whatever its value.
+_REQUIRED = object()
+
+
+def _declared_default(field) -> Any:
+    if field.default is not MISSING:
+        return field.default
+    if field.default_factory is not MISSING:  # type: ignore[misc]
+        return field.default_factory()  # type: ignore[misc]
+    return _REQUIRED
+
+
+def _chosen(instance: Any) -> Dict[str, Any]:
+    """Only the settings that differ from what the configuration already says.
+
+    A configuration gains fields over time, and a field nobody set describes no
+    decision. Hashing the whole structure meant that adding one renamed every
+    run that already existed, which quietly detached each of them from the runs
+    they were meant to continue: a resumed run derives its own name, finds no
+    directory under it, and starts again from nothing. Comparing against the
+    declared defaults keeps an addition invisible until somebody uses it.
+    """
+    payload: Dict[str, Any] = {}
+    for field in fields(instance):
+        value = getattr(instance, field.name)
+        if is_dataclass(value):
+            nested = _chosen(value)
+            if nested:
+                payload[field.name] = nested
+            continue
+        default = _declared_default(field)
+        if default is not _REQUIRED and value == default:
+            continue
+        payload[field.name] = value
+    return payload
+
+
+def _prune(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop sections that removing a setting left empty.
+
+    A section holding nothing says the same as no section at all, and the two
+    must hash alike or the volatile settings would be excluded in name only.
+    """
+    pruned = {}
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            value = _prune(value)
+            if not value:
+                continue
+        pruned[key] = value
+    return pruned
+
+
 def _fingerprint_payload(config: ExperimentConfig, *, ignore_seed: bool) -> Dict[str, Any]:
-    payload = asdict(config)
-    training = payload["training"]
+    payload = _chosen(config)
+    training = payload.get("training", {})
     for field_name in VOLATILE_TRAINING_FIELDS:
         training.pop(field_name, None)
+    runtime = training.get("runtime", {})
     for field_name in VOLATILE_RUNTIME_FIELDS:
-        training["runtime"].pop(field_name, None)
+        runtime.pop(field_name, None)
     if ignore_seed:
-        training["runtime"].pop("seed", None)
-        payload["dataset"]["sampling"].pop("seed", None)
-    return payload
+        runtime.pop("seed", None)
+        payload.get("dataset", {}).get("sampling", {}).pop("seed", None)
+    return _prune(payload)
 
 
 def _fingerprint(payload: Dict[str, Any]) -> str:

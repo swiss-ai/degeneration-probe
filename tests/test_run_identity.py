@@ -138,3 +138,69 @@ def test_best_checkpoint_selection_requires_matching_cadences():
     resolved["training"]["checkpoint"]["strategy"] = "epoch"
     with pytest.raises(ValueError, match="cadences to match"):
         ExperimentConfig.from_dict(deepcopy(resolved))
+
+
+def test_when_a_run_stops_is_not_part_of_what_it_is():
+    """Two runs differing only in when they stop are one run truncated twice.
+
+    Every checkpoint is kept, so the shorter run's trajectory is a prefix of the
+    longer one's. Sharing an identity is what lets a rule given more patience
+    continue a run rather than repeat it, and what keeps a re-reading of the
+    same saved checkpoints from looking like a different experiment.
+    """
+    base = _experiment()
+    patient = _experiment()
+    patient.training.stopping.patience = 12
+    patient.training.stopping.floor = 0.1
+    patient.training.stopping.enabled = False
+    assert derive_run_name(base) == derive_run_name(patient)
+    assert config_fingerprint(base) == config_fingerprint(patient)
+
+
+def test_what_a_run_learns_from_is_part_of_what_it_is():
+    """The guard on the test above: the fingerprint still separates recipes."""
+    base = _experiment()
+    other = _experiment()
+    other.training.selection.window_size = base.training.selection.window_size * 2
+    assert config_fingerprint(base) != config_fingerprint(other)
+
+
+def test_a_setting_left_alone_does_not_enter_the_fingerprint():
+    """The failure this prevents: adding a field renames every existing run.
+
+    A run derives its own name and then looks for a directory under it, so a
+    renamed run finds nothing to continue and silently starts from zero. A field
+    nobody set records no decision, so it must not move the hash.
+    """
+    resolved = _resolved()
+    # A configuration written before the field existed, against one written
+    # after it and left at its default.
+    without = deepcopy(resolved)
+    without["dataset"].pop("activations_root", None)
+    with_default = deepcopy(resolved)
+    with_default["dataset"]["activations_root"] = None
+    a = ExperimentConfig.from_dict(without)
+    b = ExperimentConfig.from_dict(with_default)
+    assert config_fingerprint(a) == config_fingerprint(b)
+    assert derive_run_name(a) == derive_run_name(b)
+
+
+def test_a_setting_actually_chosen_does_enter_it():
+    """The guard on the test above: the hash still separates real decisions."""
+    resolved = _resolved()
+    chosen = deepcopy(resolved)
+    chosen["dataset"]["activations_root"] = "/somewhere/else"
+    assert config_fingerprint(ExperimentConfig.from_dict(resolved)) != config_fingerprint(
+        ExperimentConfig.from_dict(chosen)
+    )
+
+
+def test_setting_a_field_to_its_own_default_changes_nothing():
+    """Naming a default explicitly is a way of writing, not a different run."""
+    resolved = _resolved()
+    spelled_out = deepcopy(resolved)
+    spelled_out["training"]["probe"]["normalization"] = "layernorm"
+    spelled_out["training"]["lora"]["rank"] = 16
+    assert config_fingerprint(ExperimentConfig.from_dict(resolved)) == config_fingerprint(
+        ExperimentConfig.from_dict(spelled_out)
+    )
