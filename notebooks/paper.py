@@ -146,9 +146,19 @@ def _(RULE, RUNS, apply_rule_to_run, np, pd, population):
             "rollout precision": caught / (caught + false_alarms)
             if caught + false_alarms
             else np.nan,
+            # What the threshold actually spent. Precision is pinned by this
+            # rather than by the probe, and a scorer whose healthy answers pile
+            # up on one value cannot spend the budget at all, which is the case
+            # where every other number changes meaning.
+            "false-alarm rate": record["budget_realized_fpr"],
             "in-pattern recall": record["in_pattern_recall"],
-            "warning coverage": record["warning_recall_256"],
+            "warning coverage 128": record["warning_recall_128"],
+            "warning coverage 256": record["warning_recall_256"],
             "median offset": record["median_offset"],
+            # The median is taken over the answers that fired, so a probe that
+            # misses the hard cases gets a flattering one. This is the count it
+            # has to be read against.
+            "never fired": int(record["never_fired_positives"]),
         }
 
     def described(run):
@@ -195,6 +205,7 @@ def _(RULE, RUNS, apply_rule_to_run, np, pd, population):
 
 @app.cell
 def _(SCORED, mo, pd):
+    OBJECTIVE = "warning coverage 256"
     COLUMNS = [
         "checkpoint",
         "rank",
@@ -202,35 +213,54 @@ def _(SCORED, mo, pd):
         "step",
         "rollout recall",
         "rollout precision",
+        "false-alarm rate",
         "in-pattern recall",
-        "warning coverage",
+        "warning coverage 128",
+        "warning coverage 256",
+        "seeds",
+        "seed spread",
         "median offset",
+        "never fired",
     ]
 
     def table(stages, title):
-        """One row per training strategy: its best checkpoint, ranked."""
+        """One row per training strategy: its best checkpoint, ranked.
+
+        The row is the best of the recipe's seeds, so the value it carries is a
+        maximum over repeats rather than an estimate of the recipe. What the
+        spread column says is how much of the ordering above it is real: repeats
+        of one recipe differ by more than neighbouring rows in this table do.
+        """
         if SCORED.empty:
             return mo.md(f"**{title}** — no run has recorded a trajectory yet.")
         wanted = set(stages)
         rows = SCORED[SCORED["experiments"].map(lambda tags: bool(wanted & set(tags)))]
         if rows.empty:
             return mo.md(f"**{title}** — no run has finished yet.")
-        best = rows.loc[rows.groupby("recipe")["warning coverage"].idxmax()]
-        best = best.sort_values("warning coverage", ascending=False).reset_index(drop=True)
+        across_seeds = rows.groupby("recipe")[OBJECTIVE].agg(["std", "size"])
+        best = rows.loc[rows.groupby("recipe")[OBJECTIVE].idxmax()]
+        best = best.sort_values(OBJECTIVE, ascending=False).reset_index(drop=True)
         best["rank"] = range(1, len(best) + 1)
         best["checkpoint"] = best["recipe"] + ", seed " + best["seed"].astype(str)
+        # Reported next to the spread, because a spread over two repeats and a
+        # spread over three are not the same claim.
+        best["seed spread"] = best["recipe"].map(across_seeds["std"])
+        best["seeds"] = best["recipe"].map(across_seeds["size"])
         shown = best[COLUMNS].round(
             {
                 "rollout recall": 3,
                 "rollout precision": 3,
+                "false-alarm rate": 4,
                 "in-pattern recall": 3,
-                "warning coverage": 4,
+                "warning coverage 128": 4,
+                "warning coverage 256": 4,
+                "seed spread": 4,
                 "median offset": 0,
             }
         )
         return mo.vstack([mo.md(f"### {title}"), mo.ui.table(shown, selection=None)])
 
-    return COLUMNS, table
+    return COLUMNS, OBJECTIVE, table
 
 
 @app.cell
