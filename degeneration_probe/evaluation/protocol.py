@@ -40,10 +40,12 @@ MIN_POSITIVES_FOR_REPORTING = 10
 # measured inside a band rather than over the whole pre-frontier region: a token
 # flagged two thousand positions ahead of the loop is a claim about the rollout,
 # not a warning about what is happening in it, and pooling the two would let the
-# long run-ups decide the number. Reported at more than one width because the
-# choice is a judgement about how much warning is worth having, and burying it
-# in a single column would hide that.
-WARNING_BANDS = (128, 256)
+# long run-ups decide the number. Reported at several widths because the choice
+# is a judgement about how much warning is worth having, and burying it in a
+# single column would hide that. The narrow widths say whether a probe sees the
+# loop coming or only sees it arriving, which is a different claim from covering
+# more of the approach.
+WARNING_BANDS = (32, 64, 128, 256)
 
 
 # --- the first-alarm machinery -------------------------------------------------

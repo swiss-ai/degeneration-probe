@@ -18,6 +18,7 @@ def _():
         StoppingRule,
         apply_rule_to_run,
     )
+    from degeneration_probe.evaluation.protocol import WARNING_BANDS
 
     REPO = Path(__file__).resolve().parents[1]
     OUTPUTS = REPO / "outputs"
@@ -27,6 +28,7 @@ def _():
         Path,
         RULE,
         StoppingRule,
+        WARNING_BANDS,
         apply_rule_to_run,
         json,
         mo,
@@ -114,7 +116,7 @@ def _(OUTPUTS, Path, json, pd, re):
 
 
 @app.cell
-def _(RULE, RUNS, apply_rule_to_run, np, pd, population):
+def _(RULE, RUNS, WARNING_BANDS, apply_rule_to_run, np, pd, population):
     def best_checkpoint(run):
         """The checkpoint the rule keeps, across every depth the run trained.
 
@@ -152,8 +154,10 @@ def _(RULE, RUNS, apply_rule_to_run, np, pd, population):
             # where every other number changes meaning.
             "false-alarm rate": record["budget_realized_fpr"],
             "in-pattern recall": record["in_pattern_recall"],
-            "warning coverage 128": record["warning_recall_128"],
-            "warning coverage 256": record["warning_recall_256"],
+            **{
+                f"warning coverage {band}": record.get(f"warning_recall_{band}", np.nan)
+                for band in WARNING_BANDS
+            },
             "median offset": record["median_offset"],
             # The median is taken over the answers that fired, so a probe that
             # misses the hard cases gets a flattering one. This is the count it
@@ -204,32 +208,45 @@ def _(RULE, RUNS, apply_rule_to_run, np, pd, population):
 
 
 @app.cell
-def _(SCORED, mo, pd):
+def _(SCORED, WARNING_BANDS, mo):
     OBJECTIVE = "warning coverage 256"
+    # Averaged over a recipe's seeds. A depth and a step are each seed's own
+    # pick, so those are taken as the middle one rather than the mean, which
+    # would name a layer no seed chose.
+    AVERAGED = [
+        "rollout recall",
+        "rollout precision",
+        "false-alarm rate",
+        "in-pattern recall",
+        *(f"warning coverage {band}" for band in WARNING_BANDS),
+        "median offset",
+        "never fired",
+    ]
     COLUMNS = [
-        "checkpoint",
+        "training strategy",
         "rank",
+        "seeds",
         "layer",
         "step",
         "rollout recall",
         "rollout precision",
         "false-alarm rate",
         "in-pattern recall",
-        "warning coverage 128",
-        "warning coverage 256",
-        "seeds",
+        *(f"warning coverage {band}" for band in WARNING_BANDS),
         "seed spread",
         "median offset",
         "never fired",
     ]
 
     def table(stages, title):
-        """One row per training strategy: its best checkpoint, ranked.
+        """One row per training strategy, averaged over its seeds.
 
-        The row is the best of the recipe's seeds, so the value it carries is a
-        maximum over repeats rather than an estimate of the recipe. What the
-        spread column says is how much of the ordering above it is real: repeats
-        of one recipe differ by more than neighbouring rows in this table do.
+        Each seed contributes the checkpoint the rule kept for it, so a row is
+        the mean of three separately selected probes rather than of three
+        readings of one. The spread beside it is the standard deviation of the
+        objective over those seeds, which is what says whether the ordering
+        above is worth reading: repeats of one recipe differ by more than
+        neighbouring rows in these tables do.
         """
         if SCORED.empty:
             return mo.md(f"**{title}** — no run has recorded a trajectory yet.")
@@ -237,30 +254,30 @@ def _(SCORED, mo, pd):
         rows = SCORED[SCORED["experiments"].map(lambda tags: bool(wanted & set(tags)))]
         if rows.empty:
             return mo.md(f"**{title}** — no run has finished yet.")
-        across_seeds = rows.groupby("recipe")[OBJECTIVE].agg(["std", "size"])
-        best = rows.loc[rows.groupby("recipe")[OBJECTIVE].idxmax()]
-        best = best.sort_values(OBJECTIVE, ascending=False).reset_index(drop=True)
-        best["rank"] = range(1, len(best) + 1)
-        best["checkpoint"] = best["recipe"] + ", seed " + best["seed"].astype(str)
-        # Reported next to the spread, because a spread over two repeats and a
-        # spread over three are not the same claim.
-        best["seed spread"] = best["recipe"].map(across_seeds["std"])
-        best["seeds"] = best["recipe"].map(across_seeds["size"])
-        shown = best[COLUMNS].round(
+        grouped = rows.groupby("recipe")
+        summary = grouped[AVERAGED].mean()
+        summary["seed spread"] = grouped[OBJECTIVE].std()
+        summary["seeds"] = grouped.size()
+        summary["layer"] = grouped["layer"].median().round().astype(int)
+        summary["step"] = grouped["step"].median().round().astype(int)
+        summary = summary.sort_values(OBJECTIVE, ascending=False).reset_index()
+        summary["rank"] = range(1, len(summary) + 1)
+        summary = summary.rename(columns={"recipe": "training strategy"})
+        shown = summary[COLUMNS].round(
             {
                 "rollout recall": 3,
                 "rollout precision": 3,
                 "false-alarm rate": 4,
                 "in-pattern recall": 3,
-                "warning coverage 128": 4,
-                "warning coverage 256": 4,
+                **{f"warning coverage {band}": 4 for band in WARNING_BANDS},
                 "seed spread": 4,
                 "median offset": 0,
+                "never fired": 1,
             }
         )
         return mo.vstack([mo.md(f"### {title}"), mo.ui.table(shown, selection=None)])
 
-    return COLUMNS, OBJECTIVE, table
+    return AVERAGED, COLUMNS, OBJECTIVE, table
 
 
 @app.cell
