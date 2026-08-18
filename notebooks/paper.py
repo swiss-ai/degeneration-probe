@@ -208,7 +208,7 @@ def _(RULE, RUNS, WARNING_BANDS, apply_rule_to_run, np, pd, population):
 
 
 @app.cell
-def _(SCORED, WARNING_BANDS, mo):
+def _(SCORED, WARNING_BANDS, mo, pd):
     OBJECTIVE = "warning coverage 256"
     # Averaged over a recipe's seeds. A depth and a step are each seed's own
     # pick, so those are taken as the middle one rather than the mean, which
@@ -233,10 +233,22 @@ def _(SCORED, WARNING_BANDS, mo):
         "false-alarm rate",
         "in-pattern recall",
         *(f"warning coverage {band}" for band in WARNING_BANDS),
-        "seed spread",
         "median offset",
         "never fired",
     ]
+
+    def with_spread(mean, spread):
+        """A coverage figure and how far its seeds sat from it.
+
+        Written into the one cell rather than into a column of its own, because
+        a spread parked at the far end of a wide table is read as a separate
+        fact when it is the error bar on the number beside the rank.
+        """
+        if pd.isna(mean):
+            return ""
+        if pd.isna(spread):
+            return f"{mean:.4f}"
+        return f"{mean:.4f} ± {spread:.4f}"
 
     def table(stages, title):
         """One row per training strategy, averaged over its seeds.
@@ -256,21 +268,32 @@ def _(SCORED, WARNING_BANDS, mo):
             return mo.md(f"**{title}** — no run has finished yet.")
         grouped = rows.groupby("recipe")
         summary = grouped[AVERAGED].mean()
-        summary["seed spread"] = grouped[OBJECTIVE].std()
+        spreads = grouped[[f"warning coverage {band}" for band in WARNING_BANDS]].std()
         summary["seeds"] = grouped.size()
         summary["layer"] = grouped["layer"].median().round().astype(int)
         summary["step"] = grouped["step"].median().round().astype(int)
-        summary = summary.sort_values(OBJECTIVE, ascending=False).reset_index()
+        summary = summary.sort_values(OBJECTIVE, ascending=False)
+        # Every coverage figure carries the spread of the seeds it averages, so
+        # a reader can see at once whether two neighbouring rows differ by more
+        # than repeats of either one do.
+        coverage = {
+            f"warning coverage {band}": [
+                with_spread(mean, spreads.loc[recipe, f"warning coverage {band}"])
+                for recipe, mean in summary[f"warning coverage {band}"].items()
+            ]
+            for band in WARNING_BANDS
+        }
+        summary = summary.reset_index()
         summary["rank"] = range(1, len(summary) + 1)
         summary = summary.rename(columns={"recipe": "training strategy"})
+        for name, values in coverage.items():
+            summary[name] = values
         shown = summary[COLUMNS].round(
             {
                 "rollout recall": 3,
                 "rollout precision": 3,
                 "false-alarm rate": 4,
                 "in-pattern recall": 3,
-                **{f"warning coverage {band}": 4 for band in WARNING_BANDS},
-                "seed spread": 4,
                 "median offset": 0,
                 "never fired": 1,
             }
