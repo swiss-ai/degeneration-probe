@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -38,11 +39,78 @@ from degeneration_probe.data.dataset import (
 from degeneration_probe.evaluation.scores import build_scores, write_scores
 from degeneration_probe.data.cached_dataset import cached_collate_fn, create_cached_dataset
 from degeneration_probe.probes.linear_probe import setup_cached_probe, setup_probe
-from degeneration_probe.training.recording import FINAL_WEIGHTS_DIR, RESOLVED_CONFIG_FILE
-from degeneration_probe.utils.file_utils import load_json
+from degeneration_probe.training.recording import (
+    FINAL_WEIGHTS_DIR,
+    RESOLVED_CONFIG_FILE,
+    environment_info,
+)
+from degeneration_probe.utils.file_utils import load_json, save_json
 from degeneration_probe.utils.model_utils import load_model_and_tokenizer, resolve_torch_dtype
 
 SCORES_DIR = "scores"
+# Which weights produced the scores in a directory. Without it a scores file is
+# anonymous: the thresholds frozen beside it describe some scorer, and nothing
+# says which. Recovering that afterwards is not generally possible, since
+# neighbouring checkpoints of one depth differ by less than the precision the
+# stored metrics carry.
+PROVENANCE_FILE = "scoring_provenance.json"
+
+
+def check_provenance(output_dir: Path, checkpoint: str, layer: Optional[int]) -> None:
+    """Refuse to add a second scorer's output to one directory.
+
+    A directory of scores is read as one scorer: the thresholds frozen on its
+    validation split are applied to every other split beside it. Scoring one
+    split with one checkpoint and another split with a different one leaves a
+    directory that no threshold describes, and the resulting report looks
+    perfectly ordinary. Naming a separate destination is the way to hold two
+    checkpoints at once.
+    """
+    path = output_dir / PROVENANCE_FILE
+    if not path.is_file():
+        return
+    recorded = load_json(path)
+    same = recorded.get("checkpoint") == checkpoint and recorded.get("layer") == layer
+    if same:
+        return
+    raise SystemExit(
+        f"{output_dir} already holds scores from checkpoint "
+        f"{recorded.get('checkpoint')!r} at layer {recorded.get('layer')!r}, and this "
+        f"call would add checkpoint {checkpoint!r} at layer {layer!r} beside them. "
+        "Thresholds frozen in a directory describe the scorer that filled it, so the "
+        "two cannot share one. Pass --output-dir to give this checkpoint its own."
+    )
+
+
+def write_provenance(
+    output_dir: Path,
+    *,
+    run_dir: Path,
+    checkpoint: str,
+    checkpoint_dir: Path,
+    layer: Optional[int],
+    regime: str,
+    splits: List[str],
+) -> Path:
+    """Record which weights filled this directory, and when."""
+    path = output_dir / PROVENANCE_FILE
+    previous = load_json(path).get("splits", []) if path.is_file() else []
+    environment = environment_info()
+    save_json(
+        {
+            "run_dir": str(run_dir),
+            "checkpoint": checkpoint,
+            "checkpoint_dir": str(checkpoint_dir),
+            "layer": layer,
+            "regime": regime,
+            "splits": sorted(set(previous) | set(splits)),
+            "scored_at": datetime.now(timezone.utc).isoformat(),
+            "git_commit": environment.get("git_commit"),
+            "git_dirty": environment.get("git_dirty"),
+        },
+        path,
+    )
+    return path
 
 
 def load_run_config(run_dir: Path) -> ExperimentConfig:
@@ -189,6 +257,9 @@ def run(
     if not (checkpoint_dir / "probe_config.json").is_file():
         raise FileNotFoundError(f"No probe checkpoint at {checkpoint_dir}")
 
+    # Before the GPU is touched, so a mismatch costs nothing to discover.
+    check_provenance(output_dir, checkpoint, layer)
+
     # Evaluation never subsamples, whatever the run was trained with.
     config.dataset.sampling.evaluation_negative_rollouts_per_positive = None
     splits = splits or config.dataset.splits.final_evaluation
@@ -246,6 +317,17 @@ def run(
         positives = int(frame["is_positive"].sum())
         print(f"  {split:<22} {len(frame):>6} rollouts ({positives} positive), {tokens:>10,} tokens -> {path}")
         written.append(path)
+
+    record = write_provenance(
+        output_dir,
+        run_dir=run_dir,
+        checkpoint=checkpoint,
+        checkpoint_dir=checkpoint_dir,
+        layer=layer,
+        regime=config.training.features.regime,
+        splits=list(splits),
+    )
+    print(f"  provenance -> {record}")
     return written
 
 
