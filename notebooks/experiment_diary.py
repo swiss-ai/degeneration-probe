@@ -1410,7 +1410,6 @@ def _():
     WINDOWS = [64, 128, 256, 512]
     return (
         BASE,
-        CHOSEN_DEPTH,
         DEFAULT_LAYER,
         LADDER_RUNGS,
         POSITIONAL_RUNGS,
@@ -1421,7 +1420,7 @@ def _():
 
 
 @app.cell
-def _(BASE, CHOSEN_DEPTH, LADDER_RUNGS, POSITIONAL_RUNGS, SEEDS, WINDOWS):
+def _(BASE, LADDER_RUNGS, POSITIONAL_RUNGS, SEEDS, WINDOWS):
     def recipe(**changes):
         return {**BASE, **changes}
 
@@ -7166,6 +7165,363 @@ def _(mo):
     alarms along the way. Neither route dominates the other, and which one a
     deployment wants depends on whether a late, confident alarm or an early,
     noisier one is worth more.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
+    # Part 5. Reading the same probe under someone else's conventions
+
+    Every number in this notebook is measured one way: a decision per token, a
+    threshold solved so that one healthy answer in a hundred raises a false
+    alarm, and a population left at its natural rate of degeneration. The
+    nearest published work measures differently on all three counts. It pools
+    tokens into sentences, accumulates the evidence across them, reads an
+    operating point where a quarter to a third of healthy generations may fire,
+    and evaluates on a set rebalanced to equal numbers of the two classes.
+
+    Those three are decisions about how a score becomes a decision, not about
+    the scorer. So they can be turned on scores that already exist. Holding one
+    probe fixed and changing them one at a time gives a ladder from this
+    protocol to that one, and the distance between rungs is how much of the
+    disagreement between published numbers is a matter of convention.
+
+    Nothing here evaluates anyone else's detector. It is one of our probes read
+    under other people's reporting choices, and it says nothing about what their
+    model would do on this data.
+    """)
+    return
+
+
+@app.cell
+def _(OUTPUTS, Path, json):
+    import importlib.util as _importlib_util
+
+    # The ladder is computed by scripts/protocol_bridge.py rather than
+    # reimplemented here, so the figure below and the command line answer cannot
+    # drift apart.
+    def _load_bridge():
+        path = Path(__file__).resolve().parents[1] / "scripts" / "protocol_bridge.py"
+        spec = _importlib_util.spec_from_file_location("protocol_bridge", path)
+        module = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    BRIDGE = _load_bridge()
+
+    def bridge_candidates():
+        """Scored validation splits that can name the checkpoint that produced them.
+
+        Only directories carrying a provenance record are offered. A scores file
+        whose weights cannot be named is fine for a trend and wrong for a table
+        that will be quoted, and this is the second kind.
+        """
+        found = {}
+        for scores in OUTPUTS.glob("*/*/sweep/layer_*/checkpoint-*/scores/val.parquet"):
+            record = scores.parent.parent / "scoring_provenance.json"
+            if not record.is_file():
+                continue
+            provenance = json.loads(record.read_text())
+            # scores/ checkpoint-N/ layer_NN/ sweep/ <attempt>/ <run name>
+            run = scores.parents[5].name
+            # Drop only the configuration fingerprint. Truncating further would
+            # cut the seed suffix and collapse three runs of one recipe into one
+            # entry.
+            label = (
+                f"{run.rsplit('_', 1)[0]} "
+                f"L{provenance['layer']} {provenance['checkpoint']}"
+            )
+            found[label] = scores
+        return dict(sorted(found.items()))
+
+    BRIDGE_CANDIDATES = bridge_candidates()
+    return BRIDGE, BRIDGE_CANDIDATES
+
+
+@app.cell
+def _(BRIDGE_CANDIDATES, missing, mo):
+    mo.stop(
+        not BRIDGE_CANDIDATES,
+        missing(
+            "No scored validation split carries a provenance record yet. They are "
+            "written by `scripts/score_rollouts.py` from the commit that added "
+            "them onward, and land beside the scores as `scoring_provenance.json`."
+        ),
+    )
+    bridge_pick = mo.ui.dropdown(
+        options=BRIDGE_CANDIDATES,
+        value=next(iter(BRIDGE_CANDIDATES)),
+        label="probe",
+    )
+    bridge_span = mo.ui.dropdown(
+        options={"8": 8, "16": 16, "32": 32, "64": 64, "128": 128},
+        value="32",
+        label="tokens per pooled span",
+    )
+    mo.hstack([bridge_pick, bridge_span], justify="start", gap=2)
+    return bridge_pick, bridge_span
+
+
+@app.cell
+def _(BRIDGE, bridge_pick, bridge_span, pd):
+    def bridge_table(scores_path, span):
+        frame = pd.read_parquet(scores_path)
+        return BRIDGE.build(frame, span, [0.01, 0.05, 0.10, 0.30], draws=20, seed=42)
+
+    BRIDGE_RESULT = bridge_table(bridge_pick.value, bridge_span.value)
+    return (BRIDGE_RESULT,)
+
+
+@app.cell
+def _(BRIDGE_RESULT, mo):
+    def bridge_tables():
+        columns = [
+            "step", "recall", "precision", "realized_fpr", "in_pattern",
+            "warning_256", "median_offset", "fired_before", "never_fired",
+        ]
+        blocks = []
+        for name, block in BRIDGE_RESULT.groupby("table", sort=False):
+            blocks.append(mo.md(f"**{name}**"))
+            blocks.append(mo.ui.table(block[columns].round(4), selection=None))
+        blocks.append(
+            mo.md(
+                "_The first table walks from this protocol to the other one, "
+                "changing one convention per row and keeping the earlier changes. "
+                "The second changes one at a time from the top rung, which is what "
+                "says how large each term is on its own. **No weight changes in "
+                "either table.** `realized_fpr` is the share of healthy answers "
+                "that fired, so it reads back the budget the row was solved for._\n\n"
+                "_A pooled decision is carried from the **last** token of its span "
+                "rather than the first. Crediting it from the first would hand a "
+                "span detector up to a span of lead time it never had, which is "
+                "the quantity being measured. A rollout shorter than one span "
+                "therefore never fires, which is what a detector that must see a "
+                "whole span before deciding actually does._"
+            )
+        )
+        return mo.vstack(blocks)
+
+    bridge_tables()
+    return
+
+
+@app.cell
+def _(BRIDGE_RESULT, FIGURES, INK_MUTED, SERIES, mo, plt, save, tidy):
+    def bridge_ladder_figure():
+        """The ladder as two panels: how much is flagged, and when."""
+        ladder = BRIDGE_RESULT[BRIDGE_RESULT["table"] == "ladder"]
+        labels = [step.split(". ", 1)[-1] for step in ladder["step"]]
+        positions = range(len(ladder))
+
+        fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.6))
+        axes[0].plot(
+            positions, ladder["warning_256"], "o-", color=SERIES[0], linewidth=1.8
+        )
+        axes[0].set_ylabel("coverage of the 256 before the loop")
+        axes[0].set_ylim(bottom=0)
+
+        axes[1].plot(
+            positions, ladder["median_offset"], "o-", color=SERIES[1], linewidth=1.8
+        )
+        axes[1].axhline(0, color=INK_MUTED, linewidth=1, zorder=0)
+        axes[1].set_ylabel("median first alarm, tokens from the loop")
+
+        for axis in axes:
+            axis.set_xticks(list(positions))
+            axis.set_xticklabels(labels, rotation=28, ha="right", fontsize=7.5)
+            tidy(axis, xgrid=False)
+
+        fig.suptitle(
+            "One probe, five reporting conventions", x=0.005, ha="left",
+            fontsize=10, color=INK_MUTED,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.93))
+        return mo.vstack(
+            [
+                save(fig, "protocol_bridge_ladder", FIGURES),
+                mo.md(
+                    "_Left, the share of the run-up that gets flagged. Right, where "
+                    "the first alarm lands, with zero marking the loop's own start "
+                    "and negative meaning the alarm came first. Reading left to "
+                    "right is walking from this notebook's protocol to the one the "
+                    "nearest published work uses, and the probe is identical at "
+                    "every point._\n\n"
+                    "_What the two panels do **not** show is the price, which is in "
+                    "the precision column of the table above. The rung that buys "
+                    "most of the movement also spends thirty times the false-alarm "
+                    "budget, and the rung after it hides that by rebalancing the "
+                    "population the precision is measured on._"
+                ),
+            ]
+        )
+
+    bridge_ladder_figure()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## How large is the pooling term on its own?
+
+    Span width is the one convention with a free parameter, so it is worth
+    sweeping rather than asserting. Pooling buys coverage because a span of
+    weak-but-consistent evidence clears a threshold that no single token in it
+    would, and it costs lead time because the span's verdict is not available
+    until the span has finished.
+    """)
+    return
+
+
+@app.cell
+def _(
+    BRIDGE,
+    FIGURES,
+    INK_MUTED,
+    SERIES,
+    bridge_pick,
+    missing,
+    mo,
+    pd,
+    plt,
+    save,
+    tidy,
+):
+    def bridge_span_figure():
+        frame = pd.read_parquet(bridge_pick.value)
+        rows = []
+        for span in (8, 16, 32, 64, 128):
+            table = BRIDGE.build(frame, span, [0.01, 0.30], draws=1, seed=42)
+            pooled = table[table["step"] == "span pooling only"]
+            base = table[table["step"] == "0. this protocol"]
+            if pooled.empty or base.empty:
+                continue
+            rows.append(
+                {
+                    "span": span,
+                    "warning": float(pooled["warning_256"].iloc[0]),
+                    "baseline": float(base["warning_256"].iloc[0]),
+                    "offset": float(pooled["median_offset"].iloc[0]),
+                    "offset_baseline": float(base["median_offset"].iloc[0]),
+                }
+            )
+        if not rows:
+            return missing("Nothing to sweep: the ladder produced no pooled rung.")
+        swept = pd.DataFrame(rows)
+
+        fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.4))
+        axes[0].plot(swept["span"], swept["warning"], "o-", color=SERIES[0], linewidth=1.8)
+        axes[0].axhline(
+            swept["baseline"].iloc[0], color=INK_MUTED, linestyle="--", linewidth=1
+        )
+        axes[0].set_ylabel("coverage of the run-up")
+        axes[0].set_ylim(bottom=0)
+
+        axes[1].plot(swept["span"], swept["offset"], "o-", color=SERIES[1], linewidth=1.8)
+        axes[1].axhline(
+            swept["offset_baseline"].iloc[0], color=INK_MUTED, linestyle="--", linewidth=1
+        )
+        axes[1].set_ylabel("median first alarm, tokens from the loop")
+
+        for axis in axes:
+            axis.set_xscale("log", base=2)
+            axis.set_xticks(swept["span"])
+            axis.set_xticklabels([str(int(s)) for s in swept["span"]])
+            axis.set_xlabel("tokens per pooled span")
+            tidy(axis, xgrid=False)
+
+        fig.suptitle(
+            "What pooling buys, and what it costs", x=0.005, ha="left",
+            fontsize=10, color=INK_MUTED,
+        )
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return mo.vstack(
+            [
+                save(fig, "protocol_bridge_span", FIGURES),
+                mo.md(
+                    "_Both panels are at the same 1% budget as the rest of this "
+                    "notebook, so only the aggregation changes. The dashed line is "
+                    "the per-token decision, the leftmost rung of the ladder._\n\n"
+                    "_Coverage rises with the span and the alarm moves later, which "
+                    "is the trade the span width controls. Neither curve is a "
+                    "property of the probe; both are properties of how its output "
+                    "is read._"
+                ),
+            ]
+        )
+
+    bridge_span_figure()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## The accumulation rung, written out
+
+    The third rung is the cumulative-sum change detector of Page (1954), the
+    same rule the nearest published work accumulates its classifier scores
+    with. For the mean probe score $x_i$ over span $i$,
+
+    $$S_i = \max\left(0,\ S_{i-1} + (x_i - k)\right), \qquad S_0 = 0$$
+
+    Evidence above the reference level $k$ accumulates and evidence below it
+    decays, and the floor at zero stops a quiet stretch from building up credit
+    that a later rise would have to spend before firing. So an isolated spike
+    dies immediately while a sustained rise compounds, which is the whole point
+    of accumulating rather than thresholding.
+
+    Two choices here are ours rather than the method's, and both are worth
+    stating. The reference level $k$ is measured rather than tuned: it is the
+    median pooled score over healthy answers, so *no evidence* means *behaving
+    like a typical healthy span*. And the firing threshold is solved for the
+    false-alarm budget, exactly as it is for every other row, rather than set
+    from average-run-length arguments as a textbook cumulative sum would. That
+    second choice is what keeps the rungs comparable: every row spends the same
+    share of healthy answers.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## What this settles, and what it does not
+
+    **Most of the distance between published early-warning numbers is
+    convention.** The same probe, unchanged, moves from flagging a small
+    fraction of the run-up and firing after the loop has started, to flagging
+    most of it and firing hundreds of tokens ahead. Nothing was learned in
+    between. Any comparison of lead times across papers that does not fix the
+    operating point, the aggregation and the base rate is comparing reporting
+    choices.
+
+    **The operating point is the largest single term**, which is also the one
+    least often stated plainly. Pooling and accumulation matter, and the base
+    rate matters mainly for precision, but the budget dominates all three.
+
+    **The cost is in the precision column, and rebalancing hides it.** At the
+    loose operating point most alarms on this population are false. The same
+    detector reads far better once the healthy answers are thinned to match the
+    degenerate ones, which is what a balanced evaluation set does. Neither
+    number is wrong; they describe different populations, and only one of them
+    is the population a deployment sees.
+
+    **A rebalanced set cannot resolve a strict budget at all.** Thinned to the
+    number of degenerate answers, one percent of the healthy ones is a single
+    answer, so the threshold is set by the largest of a small sample and lands
+    lower than the same nominal budget on the full population.
+
+    **What this is not.** It is not an evaluation of anyone else's detector, and
+    it cannot be read as one. Their model may well do better than ours on their
+    own data. Two further limits are worth carrying: a span here is a fixed
+    number of tokens rather than a sentence, because the stored scores carry no
+    text, and the reference level of the cumulative sum is a choice. So this is
+    *a* path between two protocols rather than *the* path, and the span sweep
+    above is the evidence that its shape is not an artefact of one setting.
     """)
     return
 
