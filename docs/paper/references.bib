@@ -1,0 +1,258 @@
+% Verification status is recorded per entry.
+%   [checked]   metadata confirmed against the publisher or arXiv landing page
+%   [carried]   taken from the internal literature review, not re-checked here
+%   [partial]   the work exists and its framing is confirmed, but the specific
+%               figures quoted in the text still need checking in the full paper
+
+% ---------------------------------------------------------------- change detection
+
+% [checked] The origin of the cumulative-sum recursion used in Section 6.
+@article{page1954continuous,
+  title   = {Continuous Inspection Schemes},
+  author  = {Page, E. S.},
+  journal = {Biometrika},
+  volume  = {41},
+  number  = {1/2},
+  pages   = {100--115},
+  year    = {1954},
+}
+
+% [carried] Standard reference for change detection more broadly, if a second
+% citation is wanted beside Page.
+@book{basseville1993detection,
+  title     = {Detection of Abrupt Changes: Theory and Application},
+  author    = {Basseville, Mich{\`e}le and Nikiforov, Igor V.},
+  publisher = {Prentice Hall},
+  year      = {1993},
+}
+
+% ---------------------------------------------------------------- degeneration
+
+% [carried] Canonical citation for the positive feedback loop: the probability of
+% a repeated phrase rises with each repetition.
+@inproceedings{holtzman2020curious,
+  title     = {The Curious Case of Neural Text Degeneration},
+  author    = {Holtzman, Ari and Buys, Jan and Du, Li and Forbes, Maxwell and Choi, Yejin},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2020},
+}
+
+% [carried] Defines seq-rep-n and rep/l. The windowed repetition score of
+% Section 3 is seq-rep-2 evaluated on a moving window; rep/l is the standard
+% backward-looking per-token repetition signal.
+@inproceedings{welleck2020neural,
+  title     = {Neural Text Generation with Unlikelihood Training},
+  author    = {Welleck, Sean and Kulikov, Ilia and Roller, Stephen and Dinan, Emily and Cho, Kyunghyun and Weston, Jason},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2020},
+}
+
+% [carried] distinct-n, the complement of the ratio used here.
+@inproceedings{li2016diversity,
+  title     = {A Diversity-Promoting Objective Function for Neural Conversation Models},
+  author    = {Li, Jiwei and Galley, Michel and Brockett, Chris and Gao, Jianfeng and Dolan, Bill},
+  booktitle = {NAACL-HLT},
+  year      = {2016},
+}
+
+% [carried] The moving-average type-token ratio: a fixed window slid one token at
+% a time, introduced to remove the sample-length confound.
+@article{covington2010cutting,
+  title   = {Cutting the {G}ordian Knot: The Moving-Average Type-Token Ratio ({MATTR})},
+  author  = {Covington, Michael A. and McFall, Joe D.},
+  journal = {Journal of Quantitative Linguistics},
+  volume  = {17},
+  number  = {2},
+  pages   = {94--100},
+  year    = {2010},
+}
+
+% [carried] The high-inflow account of repetition.
+@inproceedings{fu2021theoretical,
+  title     = {A Theoretical Analysis of the Repetition Problem in Text Generation},
+  author    = {Fu, Zihao and Lam, Wai and So, Anthony Man-Cho and Shi, Bei},
+  booktitle = {AAAI Conference on Artificial Intelligence},
+  year      = {2021},
+}
+
+% [carried] Names and quantifies the self-reinforcement effect.
+@inproceedings{xu2022learning,
+  title     = {Learning to Break the Loop: Analyzing and Mitigating Repetitions for Neural Text Generation},
+  author    = {Xu, Jin and Liu, Xiaojiang and He, Jianhao and Wang, Dejian and Wu, Yong},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2022},
+}
+
+% [carried] Look-back decoding: a distributional distance monitored online.
+@inproceedings{xu2023lookback,
+  title     = {Look-Back: Improving Text Generation with Look-Back Decoding},
+  author    = {Xu, Nan and Ma, Chunting and Yu, Wenhao and Cai, Deng},
+  booktitle = {Conference on Empirical Methods in Natural Language Processing},
+  year      = {2023},
+}
+
+% [carried] Traces degeneration to repetition in the training data.
+@inproceedings{li2023repetition,
+  title     = {Repetition In Repetition Out: Towards Understanding Neural Text Degeneration from the Data Perspective},
+  author    = {Li, Huayang and Lan, Yixuan and Fu, Zihao and Cai, Deng and Liu, Lemao and Collier, Nigel and Watanabe, Taro and Su, Yixuan},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2023},
+}
+
+% [carried] Structural rather than content repetition, in code.
+@inproceedings{dong2025rethinking,
+  title     = {Rethinking Repetition Problems of {LLM}s in Code Generation},
+  author    = {Dong, Yihong and Liu, Yuchen and Jiang, Xue and Gu, Qiaoyu and Jin, Zhi and Li, Ge},
+  booktitle = {Annual Meeting of the Association for Computational Linguistics},
+  pages     = {965--985},
+  year      = {2025},
+}
+
+% [carried] Repetition in generated code, with the token-limit observation.
+@article{liu2025codecopycat,
+  title   = {Code Copycat Conundrum: Demystifying Repetition in {LLM}-based Code Generation},
+  author  = {Liu, Mingwei and others},
+  journal = {arXiv preprint},
+  year    = {2025},
+}
+
+% ---------------------------------------------------------------- loops from internal states
+
+% [checked] Title and authors confirmed. [partial] The early-detection rates,
+% false-positive rates and lead times quoted in the text come from the internal
+% review and should be confirmed in Section 4 of the paper before submission.
+@article{duan2026circular,
+  title   = {Circular Reasoning: Understanding Self-Reinforcing Loops in Large Reasoning Models},
+  author  = {Duan, Zenghao and Pang, Liang and Wei, Zihao and Duan, Wenbin and Tian, Yuxin and Xu, Shicheng and Deng, Jingcheng and Yin, Zhiyi and Cheng, Xueqi},
+  journal = {arXiv preprint arXiv:2601.05693},
+  year    = {2026},
+}
+
+% [checked] Venue and pages confirmed against the ACL Anthology.
+@inproceedings{xie2025wordsalad,
+  title     = {Word Salad Chopper: Reasoning Models Waste A Ton Of Decoding Budget On Useless Repetitions, Self-Knowingly},
+  author    = {Xie, Wenya and Zhong, Shaochen and Le, Hoang Anh Duy and Xu, Zhaozhuo and Xie, Jianwen and Liu, Zirui},
+  booktitle = {Conference on Empirical Methods in Natural Language Processing},
+  pages     = {33588--33598},
+  year      = {2025},
+}
+
+% [checked] Title and the 95.24% accuracy / 0.87 F1 figures confirmed.
+@article{yu2025breaking,
+  title   = {Breaking the Loop: Detecting and Mitigating Denial-of-Service Vulnerabilities in Large Language Models},
+  author  = {Yu, Junzhe and Liu, Yi and Sun, Huijia and Shi, Ling and Chen, Yuqi},
+  journal = {arXiv preprint arXiv:2503.00416},
+  year    = {2025},
+}
+
+% [checked] Exists and detects loop onset online under a fixed cache budget.
+% [partial] The threshold values and the sliding-window trigger described in the
+% text are from the internal review and need checking in the full paper.
+@article{xu2026loopguard,
+  title   = {{LoopGuard}: Breaking Self-Reinforcing Attention Loops via Dynamic {KV} Cache Intervention},
+  author  = {Xu, Wen and Wu, Yifan and Shi, Ling and Cui, Rui and Liu, Yang and Li, Jian and Ma, Wei and Liu, Yang and Zhu, Hao and Xu, Kai},
+  journal = {arXiv preprint arXiv:2604.10044},
+  year    = {2026},
+}
+
+% [carried] Mechanistic localisation of repetition to specific neurons.
+@inproceedings{hiraoka2025repetition,
+  title     = {Repetition Neurons: How Do Language Models Produce Repetitions?},
+  author    = {Hiraoka, Tatsuya and Inui, Kentaro},
+  booktitle = {NAACL (Short Papers)},
+  year      = {2025},
+}
+
+% [carried] Sparse-autoencoder view of the same phenomenon.
+@inproceedings{yao2025repeat,
+  title     = {Understanding the Repeat Curse in Large Language Models from a Feature Perspective},
+  author    = {Yao, Junchi and others},
+  booktitle = {Findings of the Association for Computational Linguistics},
+  year      = {2025},
+}
+
+% ---------------------------------------------------------------- thresholded rules in deployment
+
+% [carried] The web-scale ancestor of thresholding repetition statistics.
+@article{rae2021scaling,
+  title   = {Scaling Language Models: Methods, Analysis and Insights from Training {G}opher},
+  author  = {Rae, Jack W. and others},
+  journal = {arXiv preprint arXiv:2112.11446},
+  year    = {2021},
+}
+
+% [partial] Only the abstract and public summary were readable. Cite for the
+% existence of a tolerant, periodicity-based alternative to exact matching; do
+% not quote its mechanism in detail without re-checking.
+@misc{specra2025monitor,
+  title  = {Monitor Degenerative Repetition in {LLM} Agents using Randomized {FFT}},
+  author = {{SpecRA authors}},
+  year   = {2025},
+  note   = {OpenReview xVO4BqmzVD},
+}
+
+% ---------------------------------------------------------------- what probes measure
+
+% [checked] EMNLP-IJCNLP 2019, pages 2733--2743. Note this is not a TACL paper.
+@inproceedings{hewitt2019designing,
+  title     = {Designing and Interpreting Probes with Control Tasks},
+  author    = {Hewitt, John and Liang, Percy},
+  booktitle = {Conference on Empirical Methods in Natural Language Processing},
+  pages     = {2733--2743},
+  year      = {2019},
+}
+
+% [checked] Probes at 100% accuracy fall to chance once source identity and
+% response length are residualised out. Accepted at TrustNLP, ACL 2026.
+@article{sahoo2026linear,
+  title   = {Linear Probes Detect Task Format, Not Reasoning Mode in Language Model Hidden States},
+  author  = {Sahoo, Subramanyam and Jain, Vinija and Chadha, Aman and Chaudhary, Divya},
+  journal = {arXiv preprint arXiv:2606.02907},
+  year    = {2026},
+}
+
+% [checked] Author list confirmed as Max Fomin, Elad David, Amit LeVi.
+@inproceedings{fomin2026internal,
+  title     = {Internal-State Probes Read the Situation, Not the Action: Three Negative Results for Pre-Action Misalignment Monitoring},
+  author    = {Fomin, Max and David, Elad and LeVi, Amit},
+  booktitle = {Workshop on Agents in the Wild: Safety, Security, and Beyond (AIWILD), ICML},
+  year      = {2026},
+}
+
+% [partial] Exists; the context-length shift findings quoted in the text are
+% from the internal review.
+@article{kramar2026building,
+  title   = {Building Production-Ready Probes for {G}emini},
+  author  = {Kram{\'a}r, J{\'a}nos and others},
+  journal = {arXiv preprint arXiv:2601.11516},
+  year    = {2026},
+}
+
+% ---------------------------------------------------------------- method components
+
+% [carried] Low-rank adaptation, used for the adapted regime.
+@inproceedings{hu2022lora,
+  title     = {{LoRA}: Low-Rank Adaptation of Large Language Models},
+  author    = {Hu, Edward J. and Shen, Yelong and Wallis, Phillip and Allen-Zhu, Zeyuan and Li, Yuanzhi and Wang, Shean and Wang, Lu and Chen, Weizhu},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2022},
+}
+
+% [carried] Suffix arrays, for the longest repeated substring primitive.
+@article{manber1993suffix,
+  title   = {Suffix Arrays: A New Method for On-Line String Searches},
+  author  = {Manber, Udi and Myers, Gene},
+  journal = {SIAM Journal on Computing},
+  volume  = {22},
+  number  = {5},
+  pages   = {935--948},
+  year    = {1993},
+}
+
+% [carried] Language models as annotators.
+@inproceedings{zheng2023judging,
+  title     = {Judging {LLM}-as-a-Judge with {MT}-Bench and Chatbot Arena},
+  author    = {Zheng, Lianmin and Chiang, Wei-Lin and Sheng, Ying and Zhuang, Siyuan and Wu, Zhanghao and Zhuang, Yonghao and Lin, Zi and Li, Zhuohan and Li, Dacheng and Xing, Eric P. and Zhang, Hao and Gonzalez, Joseph E. and Stoica, Ion},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2023},
+}
