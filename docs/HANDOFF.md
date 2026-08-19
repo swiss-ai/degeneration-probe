@@ -236,6 +236,29 @@ the current rule selects, and what each choice costs in coverage of the run-up.
 The replay does **not** store AUC, so recompute from the stored per-token
 scores. No retraining, no GPU.
 
+**A0. Fix the entropy baseline, before any baselines table is written.**
+The stored entropy baseline is `1/(1+H)` per token and a rollout's score is the
+maximum over tokens, so a single confident token pins it at 1.0. Measured on
+validation: 99.7% of healthy answers contain a token of entropy below 0.01, so
+99.7% saturate at the ceiling and the rollout AUC is 0.675. Replacing the
+aggregation with the maximum of a 128-token trailing mean drops saturation to
+6.1% and raises the AUC to 0.9915, which would make it the strongest baseline in
+the set rather than the weakest.
+
+Treat this as a correction, not an experiment. The conclusion currently written
+in several documents, that entropy is the weakest and noisiest signal, is an
+artefact of the aggregation. Re-derive it properly through the evaluator rather
+than trusting the figures above, which came from a quick proxy: decide whether to
+smooth before or after inverting, choose the window length deliberately, and
+report warning coverage rather than only the ranking, since a high answer-level
+ranking is what the paper argues is easy. Then correct every document that
+repeats the old conclusion.
+
+This also answers the question of whether a heuristic with no model behind it can
+separate degenerate from healthy answers. One that uses only the stored entropy
+reaches an answer-level AUC of 0.99, which is the most direct demonstration
+available that the metric this literature reports is saturated.
+
 **B. Activation self-similarity baseline.** A model-internal scorer that needs
 no training: the cosine similarity between the current hidden state and recent
 previous ones, at the reported layer. This is close to what Yu et al. use, so it
@@ -249,6 +272,21 @@ exact form Yu et al. use before naming it after them.
 `--compare-persistence`. Run it over stored scores at several `m`, report in the
 appendix, and keep `m = 1` in the main text as a stated choice rather than an
 unstated assumption.
+
+**B2. Whether a loop is one region of representation space or a cycle of them.**
+`notebooks/rollout_metric_explorer.py` already fits KMeans per rollout,
+deliberately not across the dataset, to ask whether a rollout's own tokens
+revisit the same region once it starts looping. It is exploratory: a slider, a
+colouring of one trajectory, and no aggregate result. The impression from it is
+that a looping rollout does not collapse into a single cluster but cycles through
+a small number of them, and that has never been measured.
+
+Turning it into a measurement is worth doing if the activation baseline above is
+run, since both read the same cached activations. A candidate statistic: after
+the frontier, the number of distinct clusters visited and the period at which the
+sequence of cluster labels repeats, against the same statistics before the
+frontier and on healthy answers of matched length. Confirm or refute the cycle
+impression before any of it is written down.
 
 **D. Alarm-offset histogram.** The distribution behind the median offset, which
 appears in nearly every table. Draw it before writing the sentence it supports:
