@@ -16,6 +16,9 @@ operating point of its own.
                  degeneration is confident rather than uncertain
     lrs          the longest-repeated-substring match, as a step from the
                  position where the repeat begins
+    rep_l        the standard per-token repetition rate of the generation
+                 literature: whether a token already appeared in the l before
+                 it, smoothed over a trailing window
 
 None of them needs a GPU, so this runs anywhere.
 
@@ -38,7 +41,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from degeneration_probe.evaluation.scores import build_scores, write_scores
 
-BASELINES = ("repetition", "entropy", "lrs")
+BASELINES = ("repetition", "entropy", "lrs", "rep_l")
+# Welleck et al. report rep/l at l = 128, and the trailing average is taken over
+# the same width so the score has one scale rather than two.
+REP_L_LOOKBACK = 128
+REP_L_WINDOW = 128
 
 
 def repetition_scores(values, num_tokens: int) -> np.ndarray:
@@ -74,6 +81,64 @@ def lrs_scores(first_start: Optional[float], length: Optional[float], num_tokens
     return scores
 
 
+def rep_l_scores(
+    token_ids,
+    num_tokens: int,
+    lookback: int = REP_L_LOOKBACK,
+    window: int = REP_L_WINDOW,
+) -> np.ndarray:
+    """The repetition rate this literature already uses at token level.
+
+    Welleck et al. define ``rep/l`` as the share of next-token predictions that
+    already occur in the previous ``l`` tokens. It is backward looking by
+    construction, which is what makes it usable as an online baseline: the
+    windowed repetition score of the labelling pipeline reads the window *ahead*
+    of the token it labels, which is the right choice for annotating a finished
+    rollout and an invalid one for a scorer a live monitor could run.
+
+    Two departures from the original are worth stating. The indicator is taken
+    over the token that was emitted rather than over the model's top-1
+    prediction, because a monitor observes the emitted token and the top-1 is
+    not stored. And the per-token indicator is averaged over a trailing window
+    rather than reported as one number per generation, because the protocol
+    needs a position; a bare indicator is binary and would tie almost every
+    rollout at the top of its range, which is exactly what stops the
+    longest-repeated-substring baseline from spending a false-alarm budget.
+    """
+    ids = np.asarray(list(token_ids)[:num_tokens], dtype=np.int64)
+    length = ids.size
+    if length == 0:
+        return np.zeros(num_tokens, dtype=np.float64)
+
+    # One pass with a sliding multiset: at token t the window holds the ids at
+    # positions [t - lookback, t), so the whole signal costs O(n) rather than
+    # rescanning the lookback at every position.
+    repeated = np.zeros(length, dtype=np.float64)
+    counts: Dict[int, int] = {}
+    for position in range(length):
+        if position:
+            entering = int(ids[position - 1])
+            counts[entering] = counts.get(entering, 0) + 1
+        leaving_index = position - 1 - lookback
+        if leaving_index >= 0:
+            leaving = int(ids[leaving_index])
+            remaining = counts[leaving] - 1
+            if remaining:
+                counts[leaving] = remaining
+            else:
+                del counts[leaving]
+        repeated[position] = 1.0 if counts.get(int(ids[position]), 0) else 0.0
+
+    cumulative = np.concatenate([[0.0], np.cumsum(repeated)])
+    ends = np.arange(length) + 1
+    starts = np.maximum(0, ends - window)
+    scores = (cumulative[ends] - cumulative[starts]) / (ends - starts)
+
+    padded = np.zeros(num_tokens, dtype=np.float64)
+    padded[:length] = scores
+    return padded
+
+
 def _fill_gaps(scores: np.ndarray) -> np.ndarray:
     """Carry the last defined value forward; lead with the first one."""
     if np.isnan(scores).all():
@@ -94,8 +159,14 @@ def build_baseline_scores(
     if onset.empty:
         raise ValueError(f"No rollouts in split {split!r}")
 
+    # Three baselines are precomputed columns of the label store. rep/l is not:
+    # it is a function of the generated ids themselves, which live beside the
+    # text rather than beside the labels.
+    source = "generations" if baseline == "rep_l" else "labels"
     columns = ["prompt_id", "rollout_idx"]
-    if baseline == "repetition":
+    if baseline == "rep_l":
+        columns += ["generated_token_ids"]
+    elif baseline == "repetition":
         columns += ["repetition_score"]
     elif baseline == "entropy":
         columns += ["entropy"]
@@ -110,7 +181,7 @@ def build_baseline_scores(
         labels = pd.concat(
             [
                 pd.read_parquet(path, columns=columns)
-                for path in sorted((build_root / "labels" / domain).glob("*.parquet"))
+                for path in sorted((build_root / source / domain).glob("*.parquet"))
             ],
             ignore_index=True,
         )
@@ -119,7 +190,9 @@ def build_baseline_scores(
         )
         for row in merged.itertuples(index=False):
             tokens = int(row.num_tokens)
-            if baseline == "repetition":
+            if baseline == "rep_l":
+                scores = rep_l_scores(row.generated_token_ids, tokens)
+            elif baseline == "repetition":
                 scores = repetition_scores(row.repetition_score, tokens)
             elif baseline == "entropy":
                 scores = entropy_scores(row.entropy, tokens)
