@@ -247,6 +247,101 @@ starts a fresh attempt beside it, which is harmless.
 
 ---
 
+## Scoring the checkpoints, once the runs are done
+
+Training measures just enough to decide which of a run's checkpoints is worth
+keeping. The reported results need something more expensive: one score for every
+token of every answer, put through the four views. That costs a pass over the
+data, so it is spent once per run, on the checkpoint the rule named.
+
+Two things follow. The first is that this step is not optional: nothing in a
+finished run directory yet contains the numbers a result is read from. The second
+is that the checkpoint to score is the one recorded in `selection_outcomes.json`,
+never the weights left in `final/`. Those are wherever training happened to stop,
+which is typically a few hundred steps past the peak and a third of its value.
+
+### Wait until the runs have finished
+
+```bash
+squeue -u $USER -n degeneration-probe-train
+```
+
+Scoring a run that is still training reads a half-written checkpoint. There is no
+harm in scoring some runs while others are still going, as long as each run
+itself has finished.
+
+### Submit the scoring jobs
+
+```bash
+cd /iopsstor/scratch/cscs/$USER/degeneration-probe
+DRY_RUN=1 ./cluster/score_selected.sh    # see what it would do
+./cluster/score_selected.sh              # do it
+```
+
+It reads each run's own verdict, skips anything unfinished, anything already
+scored, and any run where no checkpoint ever qualified, and submits one job per
+run. Each takes about fifteen minutes.
+
+The dry run prints one line per run so the checkpoints can be eyeballed before
+anything is queued:
+
+```
+would  ..._frontier256_hard_bce_lora-all_s42_cc037d07  checkpoint-150  [val test_indomain]
+would  ..._frontier256_hard_bce_lora-all_s43_ed05b892  checkpoint-200  [val test_indomain]
+```
+
+Two splits are scored, not three. The held-out domains are read once, at the very
+end, for the probe that is actually reported; scoring them for all of these would
+spend the one measurement that is meant to stay untouched. Override with
+`SPLITS="val test_indomain test_heldout_domains"` only if that is the intention.
+
+### Turn the scores into the four views
+
+This part is arithmetic over a table of stored scores. It needs no GPU and takes
+a couple of minutes for the whole batch, but it does need a Python environment
+with the project installed, which the container supplies to jobs and the login
+node does not. If you do not already have one:
+
+```bash
+cd /iopsstor/scratch/cscs/$USER/degeneration-probe
+uv venv && uv pip install -e .
+```
+
+Then:
+
+```bash
+for scores in /iopsstor/scratch/cscs/mdenegri/degeneration-probe/outputs/*/2*/scores; do
+    .venv/bin/python scripts/evaluate_scores.py --run-dir "${scores%/scores}"
+done
+```
+
+Thresholds are chosen on the validation split alone, written to
+`decision_thresholds.json`, and read back unchanged for every other split, so
+validation has to be scored before any test split can be reported.
+
+This step is also fine to leave alone. The scores are already in the owner's
+scratch by then, and turning them into views is a two-minute job on a machine
+that already has the environment. The part that needs your allocation is the
+scoring above.
+
+### Where everything lands
+
+Inside each run's own directory, which is to say wherever the run itself is:
+
+```
+outputs/<run_name>/<attempt>/
+  selection_outcomes.json      which checkpoint was chosen, and why
+  scoring_provenance.json      which weights produced the scores beside it
+  scores/<split>.parquet       one score per token per answer
+  decision_thresholds.json     frozen on validation, reused on every split
+  evaluation/<split>/*.csv     the four views
+```
+
+Nothing needs moving afterwards. A directory of scores is read as the output of
+one scorer, so scoring a second checkpoint into the same place is refused rather
+than silently mixed; `--output-dir` gives a second checkpoint its own place if
+two are ever wanted side by side.
+
 ## When they are done
 
 Nothing further is needed from you. Each run leaves its measurements, its
