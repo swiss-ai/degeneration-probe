@@ -1,0 +1,843 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\title{Degeneration Probe}
+\author{Marco De Negri, Luca Sartori, Lorenzo Baggi}
+\date{July 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Dataset}
+\label{sec:dataset}
+
+Every dataset build in this project is a set of model completions (\emph{rollouts})
+obtained by sampling a fixed pool of prompts and generating, for each prompt,
+$K=10$ independent completions at temperature $0.7$, top-$p$ $0.9$, with a
+hard generation cap of $4096$ tokens. All builds share the exact same prompt
+sample, the same sources, the same per-source sample size, and the same
+random seed ($42$), so that any difference in degeneration behaviour
+observed between builds can be attributed to the model rather than to
+prompt selection.
+
+\subsection{Models}
+
+We generate rollouts from three model checkpoints:
+
+\begin{itemize}
+    \item \textbf{Apertus-8B-Instruct} (\texttt{swiss-ai/Apertus-8B-Instruct-2509}), the publicly released instruction-tuned checkpoint.
+    \item \textbf{Apertus 1.5 - capfilter-linear} (checkpoint \texttt{it8816}), an SFT checkpoint of Apertus 1.5.
+    \item \textbf{Apertus 1.5 - SFT-256k} (checkpoint \texttt{4200}), a second, independently trained SFT checkpoint of Apertus 1.5.
+\end{itemize}
+
+\subsection{Domains}
+
+Prompts are drawn from seven sources spanning mathematics, competitive
+programming, general instruction-following, and medical reasoning. Five
+sources are used in-domain, split into training, validation, and an
+in-domain test set; the remaining two are held out entirely from training
+and used only for zero-shot evaluation on unseen domains:
+
+\begin{itemize}
+    \item \emph{In-domain}: DeepMath-103K, NuminaMath-1.5, IF\_sft\_data\_verified, Llama-Nemotron (code split), AIME 2025
+    \item \emph{Held-out (zero-shot)}: medical-o1-verifiable-problem, Codeforces (restricted to problems rated $\geq 2000$)
+\end{itemize}
+
+\section{Labeling}
+
+Starting from the definition of degeneration alone, two natural detection
+strategies emerge, depending on which side of the model one looks at. Looking
+\emph{inside} the model, degeneration is a collapse of the next-token
+probability distribution onto a single token or a small set of tokens; once
+this happens, the model can become stuck cycling among that narrow set,
+unable to escape back into a higher-entropy, non-degenerate continuation,
+which suggests tracking the entropy of that distribution. Looking only at
+\emph{what is generated}, degenerate text is repetitive, which can be
+detected either by measuring how repetitive the token stream is locally
+(TTR, Section~\ref{sec:ttr-labeling}) or by searching for the exact repeated
+pattern (LRS, Section~\ref{sec:lrs-labeling}).
+
+By manually inspecting a number of generations and their labels, we found
+that none of these metrics is perfect on its own: each produces false
+positives, and none reliably pinpoints the exact onset of degeneration. We
+therefore introduced an LLM judge (Section~\ref{sec:llm-judge-labeling}) to
+validate the structural metrics against something closer to ground truth.
+This analysis confirmed that no single metric can be trusted blindly, so we
+use the LLM judge as the final arbiter, followed by manual inspection of its
+verdicts, which stays affordable since only a small fraction of rollouts are
+ever flagged as degenerating.
+
+\subsection{Entropy}
+\label{sec:entropy-labeling}
+
+Entropy measures, at each generated token position, how concentrated the
+model's next-token probability distribution is: low entropy means the model
+is committing to a narrow set of continuations, which is the mechanism one
+would expect to underlie a degenerate loop. This signal correlates with
+degeneration, but on its own it is noisy and produces many false positives.
+
+\subsubsection{Definition}
+
+Let $\mathbf{z}_t \in \mathbb{R}^{|\mathcal{V}|}$ denote the raw logits
+produced by the model at generation step $t$, where $\mathcal{V}$ is the
+vocabulary. The probability assigned to token $v \in \mathcal{V}$ is
+
+\begin{equation}
+p_t(v)
+=
+\frac{\exp(z_{t,v})}
+{\sum_{u \in \mathcal{V}} \exp(z_{t,u})}.
+\end{equation}
+
+The per-token entropy is the Shannon entropy of this distribution:
+
+\begin{equation}
+H_t
+=
+-\sum_{v \in \mathcal{V}} p_t(v)\log p_t(v).
+\label{eq:token-entropy}
+\end{equation}
+
+Natural logarithms are used, so entropy is measured in \emph{nats}. Entropy
+in bits can be obtained as $H_t/\log 2$. Notice that $H_t$ characterizes the
+entire next-token distribution at step $t$; it is not the surprisal
+$-\log p_t(y_t)$ of the particular token $y_t$ that was sampled.
+
+Crucially, Equation~\ref{eq:token-entropy} is evaluated on the model's raw
+logits, over the full vocabulary, at temperature one. Temperature scaling
+and top-$p$ truncation are applied only afterwards to sample the next token.
+Computing entropy after these transformations would instead measure the
+uncertainty of the truncated sampling distribution and would systematically
+underestimate the model's original uncertainty.
+
+For example, suppose that at one generation step the model assigns
+probabilities $0.9$ and $0.1$ to the only two possible continuations. The
+entropy recorded for that position is
+
+\begin{align}
+H_t
+&=
+-\left(0.9\log 0.9 + 0.1\log 0.1\right) \\
+&\approx 0.3251 \text{ nats}.
+\end{align}
+
+By comparison, a uniform distribution over the same two tokens has entropy
+$\log 2 \approx 0.6931$ nats, whereas a deterministic distribution has
+entropy zero. Thus, lower entropy indicates a more predictable
+continuation.
+
+\subsubsection{Algorithm}
+
+During rollout generation, the model is evaluated once at each step: the raw
+logits from that forward pass are used both to compute entropy and,
+separately, filtered by temperature and top-$p$ to sample the next token, so
+the recorded entropy always reflects the unfiltered distribution the model
+actually produced.
+
+\begin{algorithm}[h]
+\caption{Autoregressive decoding with entropy recording}
+\label{alg:entropy-generation}
+\begin{algorithmic}[1]
+\Function{TokenEntropy}{$\mathbf{z}$}
+    \State $p \gets \Call{Softmax}{\mathbf{z}}$
+    \State \Return $-\sum_{v} p_v \log p_v$
+\EndFunction
+\Statex
+\For{$t = 1, \ldots, \text{maxNewTokens}$}
+    \State $\mathbf{z}_t \gets$ raw logits at step $t$
+    \State $H_t \gets \Call{TokenEntropy}{\mathbf{z}_t}$ \Comment{pre-sampling}
+    \State $\mathbf{z}_t' \gets \Call{ApplyTemperatureAndTopP}{\mathbf{z}_t}$
+    \State $y_t \gets \Call{Sample}{\mathbf{z}_t'}$
+    \State append $y_t$, $H_t$ to their respective sequences
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Consequently, each rollout stores an entropy sequence aligned one-to-one
+with its generated-token sequence:
+
+\begin{equation}
+(y_1,\ldots,y_T)
+\quad\longleftrightarrow\quad
+(H_1,\ldots,H_T).
+\end{equation}
+
+\subsubsection{Interpretation and limitations}
+
+Entropy is a token-level, content-agnostic signal: a drop in entropy means
+the model has become confident about the next token, which can happen for
+entirely legitimate reasons -- completing a well-known formula, continuing
+a structured list, or closing a syntactic pattern -- and not only from a
+degenerate loop. It also says nothing about \emph{which} span of text is
+becoming predictable or where that span begins, unlike TTR and LRS, which
+operate directly on the generated tokens. For these reasons Entropy is the
+weakest and noisiest of the three metrics, confirmed empirically in
+\S\ref{sec:empirical-performance}, and is used only as a complementary,
+exploratory signal rather than as a labeling decision by itself.
+
+\subsection{Type Token Ratio and Repetition Labeling}
+\label{sec:ttr-labeling}
+
+\subsubsection{Definition and computation}
+
+The Type Token Ratio (TTR) is the fraction of distinct elements (types)
+among all elements (tokens) in a sequence: $(A,A,A,A)$ has $\mathrm{TTR}=1/4$,
+while $(A,B,C,D)$ has $\mathrm{TTR}=4/4=1$. Since our goal is to assign high
+scores to repetitive text, we use
+$\mathrm{repetition\_score}=1-\mathrm{TTR}$, so scores near $0$ indicate
+diverse text and scores near $1$ indicate strong repetition.
+
+We compute this score locally rather than over a whole completion, using a
+sliding window of size $W$ over $n$-grams; in our experiments $W=256$ and
+$n=2$ (bigrams). Every token position $t$ defines its own forward-looking
+window $(x_t,\ldots,x_{t+W-1})$, so the result is a per-token sequence
+$(r_0,\ldots,r_{L-1})$ -- one score per position, not one value per
+non-overlapping chunk. Each window contains $W-n+1=255$ bigram occurrences,
+and
+\[
+r_t = 1-\frac{\#\text{ distinct bigrams in the window}}{255}.
+\]
+If every bigram in the window is different, $r_t=0$; if all bigrams are
+identical, $r_t=1-\tfrac1{255}\approx0.996$. Larger values of $r_t$
+therefore correspond to more repetitive regions of the generated text.
+
+\subsubsection{Algorithm}
+
+The score is recomputed independently for each window position:
+
+\begin{algorithm}[h]
+\caption{Sliding-window repetition score}
+\label{alg:ttr-sliding-window}
+\begin{algorithmic}[1]
+\Function{SlidingWindowRepetition}{tokens, $W$, $n$}
+    \State $L \gets$ length of tokens
+    \For{$t = 0, \ldots, L-1$}
+        \If{$t + W > L$} \Comment{Incomplete window}
+            \State $r_t \gets$ undefined
+        \Else
+            \State window $\gets$ tokens$[t : t+W]$
+            \State $r_t \gets 1 - \dfrac{|\{\text{distinct } n\text{-grams in window}\}|}{W-n+1}$
+        \EndIf
+    \EndFor
+    \State \Return $(r_0, \ldots, r_{L-1})$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Undefined labels}
+
+A label requires the full window, i.e.\ $t+W\leq L$; otherwise the
+implementation assigns \texttt{NaN}. With $W=256$, the last $255$ positions
+of a completion have undefined labels, and completions shorter than $256$
+tokens have no valid window at all. Undefined labels are ignored during
+aggregation and masked out during training.
+
+\subsubsection{Rollout-level degeneration decision}
+
+Each completion produces a sequence of token-level repetition labels
+\[
+\mathbf{r}=(r_0,\ldots,r_{L-1}).
+\]
+Ignoring undefined values, we summarize a rollout by its maximum valid
+label,
+\[
+r_{\max} = \max_{t:\,r_t\text{ is defined}} r_t,
+\]
+and classify it as degenerating if $r_{\max}>\tau$ for a threshold $\tau$
+tuned per dataset build rather than fixed a priori
+(\S\ref{sec:empirical-performance}).
+
+\subsubsection{Interpretation and limitations}
+
+The TTR-based repetition score is a lexical, tokenizer-dependent heuristic.
+It measures local \(n\)-gram diversity, not semantic degeneration directly.
+Consequently, a high score can also occur in legitimate text containing
+repeated mathematical expressions, structured enumerations, code templates,
+or recurring formatting.
+
+The fixed window size determines the temporal scale of the detected
+repetition. Short repetitive patterns are strongly reflected in the score,
+whereas repetitions separated by more than one window may not be captured.
+Moreover, different tokenizers can produce different bigram sequences for the
+same text.
+
+For these reasons, the TTR-based score should be interpreted as a cheap,
+continuous proxy for repetition rather than as perfect ground-truth
+annotation. Its completion-level detection performance against the LLM
+judge, how often it fires on naturally-terminated versus token-capped
+rollouts, and how well its own onset agrees with the judge's, are reported
+jointly with Entropy and LRS in \S\ref{sec:empirical-performance}.
+
+\subsection{Longest Repeated Substring (LRS)}
+\label{sec:lrs-labeling}
+
+\subsubsection{Definition}
+
+The repetition score of Section~\ref{sec:ttr-labeling} is a continuous,
+per-token signal: it tells us how repetitive the local context is, but not
+\emph{which} span of text is being repeated, nor where that span begins.
+LRS is designed to answer that more specific question directly, by scanning
+a whole completion for the longest span of tokens that occurs twice without
+overlapping. If a model is stuck in a loop, the text it keeps repeating is,
+by definition, a long substring occurring more than once; if it is not
+looping, the longest substring that happens to repeat by chance is
+typically short.
+
+Formally, given a token sequence $\mathbf{x}=(x_0,\ldots,x_{L-1})$, LRS is
+the largest $\ell$ for which there exist two positions $i<j$ with
+$j-i\geq\ell$ and
+\[
+(x_i,\ldots,x_{i+\ell-1}) = (x_j,\ldots,x_{j+\ell-1}).
+\]
+
+It may seem restrictive to search for a span that repeats only \emph{twice},
+rather than explicitly modeling "the same short unit repeated many times."
+It is not: a short unit repeating many times in a row already satisfies this
+definition, just with a longer $\ell$. If a unit $P$ repeats six times back
+to back, $PPPPPP$, then the first three copies and the last three copies are
+themselves identical, non-overlapping strings, a valid match of length
+$3|P|$. Since LRS always keeps the longest match it finds, it reports this
+combined span rather than a single copy of $P$, with no special-casing
+needed for repeat counts. A second step then decomposes the matched span
+into its own smallest repeating unit and counts how many times that unit
+recurs across the sequence, so the result is reported as, e.g., "unit $P$
+repeated 6 times" rather than as a single long match.
+
+A degenerate loop, however, is rarely a perfectly identical chunk copied
+twice: something small very often changes between repetitions, most
+commonly a number. A model enumerating cases might produce
+\begin{quote}
+\ttfamily\raggedright N = 41: checking divisibility... N = 42: checking divisibility... N = 43: ...
+\end{quote}
+LRS compares token sequences position by position, so it treats the two
+occurrences of the loop body as equal only where their tokens actually
+match. Here the two occurrences agree everywhere except at the single token
+encoding the number (\texttt{41} vs.\ \texttt{42}), so LRS cannot report the
+two full occurrences as one repeat: it can only recover whichever
+contiguous stretch of tokens is identical on both sides. If the number
+sits at the end of the template, this means the reported repeat is
+truncated right before it, understating how much of the rollout is
+actually degenerate. If the number sits in the middle of the template,
+as in this example, the mismatch splits the template in two and breaks the
+match entirely, since no single contiguous span still matches across the
+mismatch -- exactly the failure mode digit normalization (next) exists to
+fix.
+
+\subsubsection{Digit normalization}
+
+We mitigate this by replacing each number -- regardless of how many digits
+it has -- with a single generic placeholder token before matching, so that
+\texttt{"N = 41"} and \texttt{"N = 42"} (or, just as well, \texttt{"N = 41"}
+and \texttt{"N = 4100"}) look identical to the matcher.
+
+\subsubsection{Algorithm}
+
+The core routine finds the longest length $\ell$ for which a non-overlapping
+repeat exists, using binary search over $\ell$: the existence of a repeat
+of length $\ell$ is monotonic, since any valid repeat of length $\ell$
+contains a valid repeat of every shorter length at the same two positions,
+so we can binary search on $\ell$ instead of checking every possible
+length. Each probe hashes every window of the candidate length in constant
+time each (via prefix hashes and precomputed powers of the hash base, so no
+window needs to be rehashed from scratch), and only pays the cost of a
+direct token-by-token comparison when two windows collide on the same hash,
+which a large enough hash modulus makes rare.
+
+\begin{algorithm}[h]
+\caption{Longest Repeated Substring}
+\begin{algorithmic}[1]
+\Function{FindLongestRepeatedSubstring}{tokens, minLength}
+    \State \textbf{if} tokens too short for two windows of size minLength \textbf{then return} no match
+    \State precompute rolling-hash prefix sums over tokens \Comment{$O(n)$, once}
+    \Function{ExistsNonOverlappingRepeat}{$L$}
+        \State buckets $\gets$ empty map from window hash to start positions
+        \For{each start position $i$}
+            \State $h \gets$ hash of the length-$L$ window starting at $i$ \Comment{$O(1)$}
+            \For{each earlier position $p$ in buckets[$h$] at distance $\geq L$}
+                \If{the two windows match token by token}
+                    \State \Return $(p, i)$ \Comment{verified match}
+                \EndIf
+            \EndFor
+            \State add $i$ to buckets[$h$]
+        \EndFor
+        \State \Return not found
+    \EndFunction
+    \State $lo, hi \gets$ minLength, $\lfloor n/2 \rfloor$; best $\gets$ no match
+    \While{$lo \leq hi$}
+        \State $mid \gets \lfloor (lo+hi)/2 \rfloor$
+        \If{\Call{ExistsNonOverlappingRepeat}{$mid$} found a pair}
+            \State best $\gets$ that pair, at length $mid$; $lo \gets mid+1$ \Comment{try longer}
+        \Else
+            \State $hi \gets mid-1$ \Comment{try shorter}
+        \EndIf
+    \EndWhile
+    \State \Return best
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+The digit-normalized variant runs the same routine on a copy of the
+sequence in which every maximal run of digit tokens has been collapsed to a
+single wildcard token, then maps the result back to real token positions.
+
+\subsubsection{Interpretation and limitations}
+\label{sec:lrs-tolerance}
+
+The model can also vary a letter, a variable name, whitespace, punctuation,
+or word choice between iterations, and because LRS only ever looks for
+\emph{exact} matches, any such difference can still break a match or shrink
+it down to whatever fragment is identical on both sides. Unlike numbers,
+there is no fixed, enumerable set of "things that vary" here -- it can be
+anything -- so this remains an open limitation of the exact-match approach.
+
+A natural extension would let the matcher tolerate a handful of differing
+tokens between two occurrences, not just digits. We chose not to, for three
+reasons. First, it makes the algorithm substantially more complex and
+computationally heavier: an exact match admits hashing and a clean binary
+search over candidate lengths, because two windows are equal exactly when
+their hashes are equal, so every comparison is an $O(1)$ hash lookup. An
+approximate match has no such shortcut: a single differing token changes a
+rolling hash completely, regardless of how many other tokens still agree,
+so hash equality carries no information about how close two windows are,
+and every candidate pair would instead need an explicit,
+token-by-token comparison. Second, unlike the decision thresholds we
+calibrate elsewhere in this work (a repeat-count cutoff for LRS itself, a
+repetition-score cutoff for TTR, an entropy-drop cutoff for Entropy,
+\S\ref{sec:empirical-performance}), a token tolerance would not be a
+threshold applied on top of an already-defined score: it would change what
+counts as a match in the first place, before any score exists to threshold,
+so it is not the same kind of parameter as the ones we do calibrate. Third,
+and for the same reason, it has no natural, unit-independent scale to
+calibrate against: a tolerance of one differing token is enormous relative
+to a four-token repeating unit and negligible relative to a four-hundred-token
+one, so the "right" tolerance would have to vary with the length of
+whatever unit is being matched, not just with the model or domain, in a way
+a single scalar threshold does not. We therefore kept LRS an exact-match
+algorithm, with digit normalization as the only, narrowly-motivated
+exception, reserving calibration for the classification threshold applied
+to LRS's output rather than for the matching rule itself.
+
+How often LRS's tuned threshold fires on naturally-terminated versus
+token-capped rollouts, alongside the same check for TTR and Entropy, is
+reported in \S\ref{sec:empirical-performance}.
+
+\subsection{LLM Judge}
+\label{sec:llm-judge-labeling}
+
+\subsubsection{Setup}
+
+We use \textbf{Claude Sonnet 5} as the judge, called either directly through
+the Anthropic API with structured JSON output, or through the Claude Code
+CLI (drawing on subscription usage rather than metered billing). Both paths
+use the same system prompt, user prompt, and output schema, so results are
+directly comparable regardless of which one produced them.
+
+\subsubsection{System prompt and output}
+
+The judge sees only the prompt and the completion text, never the
+heuristic scores above, so its verdict is not biased by them:
+
+\begin{quote}
+\small\ttfamily\raggedright
+You are judging whether a language model's completion degenerated into repetitive, low-information text (looping on a phrase, sentence, or pattern without making progress), as opposed to repetition that is a normal, expected part of the task. You will see both the prompt and the completion -- read the prompt first, since it changes what counts as degeneration.
+
+Two things that look repetitive but are NOT degeneration:
+
+1. Genuine incremental work. Brute-force search, case enumeration, or a step-by-step derivation often produces a fixed template with a changing value each time (e.g. "N = 41: ..." then "N = 42: ..." then "N = 43: ..."). This is fine as long as each occurrence is doing new work -- checking a new candidate, advancing to the next step, covering a new case. A useful test: if you deleted every occurrence but the first, would the completion lose information needed to solve the task? If yes, it's legitimate enumeration, not degeneration. Only flag it if the "progress" is illusory -- e.g. it starts re-checking values it already covered, drifts into a template that stops advancing, or cycles without ever converging on an answer.
+
+2. Instructed repetition. If the prompt itself asks for repeated output (e.g. "repeat X ten times", "write a line for each of the following ..."), producing that repetition is correct instruction-following, not degeneration -- unless the completion overruns what was asked (keeps going well past the requested count) or the repetition itself becomes corrupted or loops in a way the prompt didn't ask for.
+
+Completions are all hard-capped at the same fixed max-token budget. A completion that ends abruptly mid-sentence, mid-word, or mid-token is expected simply because it hit that cap -- this is not, by itself, evidence of degeneration one way or the other. Judge based on the quality and content of the text alone, not on whether or how it was cut off.
+\end{quote}
+
+The judge returns, as structured JSON, a \texttt{reasoning} field (written
+\emph{before} the verdict, so it acts as genuine scratch space rather than a
+post-hoc justification), the boolean verdict \texttt{is\_degenerating}, an
+\texttt{onset\_quote}, a short verbatim quote marking where the pattern
+\emph{first} begins, if degenerating, and a \texttt{confidence} level.
+Before writing \texttt{onset\_quote} into its final answer, the judge must first call a \texttt{verify\_onset\_quote}
+tool with its candidate quote. The tool performs a plain verbatim substring search against the real completion text
+plus a minimum-length check, and reports back whether the candidate was
+found, giving the judge one chance to fix a bad quote before finalizing its
+answer.
+
+\subsubsection{Why we trust it}
+
+The LLM judge is the only metric we have that reliably tells apart real
+degeneration from text that merely \emph{looks} repetitive by construction,
+the clearest case being brute-force problem solving, which is correctly,
+legitimately repetitive (the same template, a new value checked each time),
+precisely because genuine exhaustive enumeration can need far more tokens
+than our fixed generation budget allows and so is truncated identically to
+a real loop, with no way to tell the two apart from the stop reason alone.
+On the small set of judge-confirmed-negative, token-capped rollouts (the
+population this case corresponds to), TTR's tuned threshold fires on the
+large majority of them and LRS's fires on a build-dependent fraction
+(\S\ref{sec:hard-negatives}). This is exactly what point 1 of the system prompt
+above is written to handle: because the judge understands the
+\emph{semantics} of the reasoning, not just the surface repetition of
+tokens, it can tell a loop that keeps re-deriving the same thing apart from
+one that is actually making progress case by case.
+
+\subsubsection{Cost and feasibility}
+
+We only send the judge rollouts that hit the $4096$-token generation cap
+without reaching a natural stop, the population where degeneration
+overwhelmingly concentrates: among the rollouts we send it, the judge
+independently confirms degeneration in 93.0--99.5\% of cases across the
+three dataset builds (97.1\% pooled), i.e.\ \texttt{stop\_reason ==
+"length"} alone is already a strong, if imperfect, proxy for real
+degeneration. This is a small slice of each dataset: 890/36{,}300
+($\sim$2.5\%) rollouts for Apertus-8B-Instruct, 1348/36{,}300 ($\sim$3.7\%) for Apertus 1.5
+capfilter-linear, and 1193/36{,}300 ($\sim$3.3\%) for Apertus 1.5 SFT-256k.
+Keeping the judged population this small keeps the judging cost
+affordable, and, just as important, keeps the resulting set small
+enough to manually read through and spot-check individual verdicts, which
+would not be realistic if every rollout were judged.
+
+\subsubsection{Reliability}
+\label{sec:judge-reliability}
+
+\emph{\texttt{onset\_quote} verbatim rate.} Of the \texttt{onset\_quote}
+values the judge returns, 99.6--100\% are found verbatim in the completion
+text they were judging, checked independently of the judge's own
+\texttt{verify\_onset\_quote} tool call.
+
+One reliability gap is worth noting explicitly: \texttt{onset\_quote} can
+contain a generic placeholder that coincidentally matches unrelated text
+elsewhere in the completion, observed once as the literal word
+\texttt{"test"}, which matched an unrelated "ratio test" phrase in a
+convergence problem. The pipeline guards against this with two checks: the
+\texttt{verify\_onset\_quote} tool lets the judge itself catch and fix an
+under-four-word candidate before finalizing its answer, and, since that
+in-context check only ever sees whatever candidate the model chooses to run
+it on, a binding server-side check independently re-verifies the
+\emph{final} \texttt{onset\_quote} field against the real completion text on
+the same two criteria (length and verbatim presence) before a degenerating
+verdict is accepted. A row that fails the server-side check is re-judged
+automatically on the next run rather than accepted with a bad
+\texttt{onset\_quote}.
+
+A second, unrelated failure mode is a hard error rather than a bad verdict:
+a small fraction of rollouts are refused outright by the Claude Code CLI
+path, subject to its own usage-policy screening (separate from the raw
+Anthropic API). Across all three dataset builds this affects 211/5674
+($\sim$3.7\%) of Claude-Code-CLI judge calls, overwhelmingly concentrated in
+one domain, 91.5\% of refusals come from \texttt{if\_sft\_data\_verified},
+whose prompts often carry unusual formatting constraints (e.g. "respond
+entirely in capital letters", "include at least $N$ placeholder tokens")
+that, combined with degenerate output, can resemble spam to a usage-policy
+classifier. These rows are manually judged rather than retried.
+
+\subsection{Empirical Performance}
+\label{sec:empirical-performance}
+
+Entropy, TTR, and LRS are evaluated below against one shared population and
+protocol. \textbf{Positives} are rollouts that hit the $4096$-token
+generation cap and receive an \texttt{is\_degenerating=True} verdict from
+the LLM judge (\S\ref{sec:llm-judge-labeling}). \textbf{Negatives} are every
+rollout that reaches a natural end-of-sequence, by definition, with no
+judge call needed -- \S\ref{sec:flag-rate-by-termination} shows that all
+three metrics fire far more often on token-capped rollouts than on
+naturally-terminated ones, so treating end-of-sequence as a safe negative
+label costs essentially nothing while removing the need to judge tens of
+thousands of additional rollouts per dataset build. The small number of
+judge-confirmed-negative rollouts among the token-capped population are
+also kept, as informative hard negatives. For every metric and dataset
+build, a decision threshold (a repeat-count cutoff for LRS, a score cutoff
+for TTR and Entropy) is tuned once by maximizing balanced accuracy on one
+deterministic half of the prompts (the calibration set), and every number
+reported below comes from the disjoint other half (the test set).
+
+\subsubsection{Aggregate results}
+
+Every number in this section is at the rollout level, not the token level:
+each rollout is one confusion-matrix instance, classified positive or
+negative by its own metric's already-defined rollout-level decision rule
+($r_{\max}>\tau$ for TTR, the analogous entropy-drop-score cutoff for
+Entropy, a repeat-count cutoff for LRS), evaluated at the threshold given
+in Table~\ref{tab:unified-aggregate}. Table~\ref{tab:unified-aggregate}
+reports, for every metric and dataset
+build, the domain-balanced macro-average of the completion-level confusion
+matrix: each domain's score is computed separately and then averaged with
+equal weight, rather than pooling all rollouts into one confusion matrix
+first. Pooling would let whichever domain happens to contribute the most
+rollouts dominate the result; macro-averaging instead treats every domain
+as equally informative regardless of its size. Two of the seven domains
+(\texttt{aime\_2025},
+\texttt{codeforces}) contribute fewer than $10$ positive test rollouts for
+every metric on at least one build, and a third (\texttt{medical\_o1})
+contributes none at all on two of the three builds -- its single positive
+rollout, out of $6000$, happens to fall on the calibration side of the
+split for those builds by chance. These domains are always reported in the
+per-domain table below, but excluded from the macro-average here, since a
+metric computed on $0$--$8$ positive examples carries no statistical
+weight.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccccc}
+\toprule
+Metric & Dataset build & Threshold & Precision & Recall & Specificity & Bal. Acc. & MCC & Accuracy \\
+\midrule
+Entropy & Apertus-8B-Instruct             & $0.4835$    & 0.061 & 0.731 & 0.529 & 0.630 & 0.103 & 0.535 \\
+Entropy & Apertus 1.5 -- capfilter-linear & $0.4505$    & 0.109 & 0.623 & 0.717 & 0.670 & 0.162 & 0.718 \\
+Entropy & Apertus 1.5 -- SFT-256k         & $0.4837$    & 0.085 & 0.640 & 0.737 & 0.689 & 0.156 & 0.736 \\
+TTR     & Apertus-8B-Instruct             & $0.55$      & 0.157 & 0.717 & 0.840 & 0.778 & 0.277 & 0.835 \\
+TTR     & Apertus 1.5 -- capfilter-linear & $0.65$      & 0.330 & 0.897 & 0.921 & 0.909 & 0.494 & 0.920 \\
+TTR     & Apertus 1.5 -- SFT-256k         & $0.60$      & 0.300 & 0.787 & 0.871 & 0.829 & 0.376 & 0.870 \\
+LRS     & Apertus-8B-Instruct             & $\geq 3$    & 0.388 & 0.834 & 0.957 & 0.895 & 0.547 & 0.953 \\
+LRS     & Apertus 1.5 -- capfilter-linear & $\geq 4$    & 0.595 & 0.915 & 0.978 & 0.946 & 0.718 & 0.976 \\
+LRS     & Apertus 1.5 -- SFT-256k         & $\geq 3$    & 0.377 & 0.812 & 0.955 & 0.884 & 0.520 & 0.951 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Domain-balanced macro-average of completion-level detection
+performance, test split only, for all three structural metrics against the
+LLM judge. Threshold is the entropy-drop-score cutoff (Entropy),
+repetition-score cutoff (TTR), or repeat-count cutoff (LRS) tuned per
+metric and dataset build on a disjoint calibration split
+(\S\ref{sec:empirical-performance}).}
+\label{tab:unified-aggregate}
+\end{table}
+
+Precision is low for every metric under this realistic population --
+$0.061$--$0.109$ for Entropy, $0.157$--$0.330$ for TTR, $0.377$--$0.595$ for
+LRS -- because natural end-of-sequence rollouts vastly outnumber
+token-capped ones in a real dataset, so even a handful of false positives
+per thousand true negatives dominates the denominator. Ranked by balanced
+accuracy and MCC, LRS is the strongest standalone detector on every build,
+TTR is a clear second, and Entropy is the weakest, most exploratory signal:
+its specificity ($0.529$ for Apertus-8B-Instruct) shows that a persistent
+entropy drop is common in ordinary, non-degenerating text, consistent with
+its exploratory role in \S\ref{sec:entropy-labeling}.
+
+\subsubsection{Per-domain results}
+
+Table~\ref{tab:unified-per-domain} breaks the same comparison down by
+domain, for Apertus-8B-Instruct. $n$ is the number of test-split positive
+rollouts in that domain -- identical across all three metrics, since it
+depends only on the judge's verdict, never on any metric's own threshold.
+Domains marked $\dagger$ fall under the $10$-positive-rollout line used for
+the macro-average above and should be read as anecdotal rather than a
+generalizable estimate; \texttt{medical\_o1} has none at all on this build.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+& & \multicolumn{2}{c}{Entropy} & \multicolumn{2}{c}{TTR} & \multicolumn{2}{c}{LRS} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}
+Domain & $n$ & Precision & Bal. Acc. & Precision & Bal. Acc. & Precision & Bal. Acc. \\
+\midrule
+aime\_2025$^\dagger$    & 8   & 0.055 & 0.536 & 0.148 & 0.849 & 0.241 & 0.865 \\
+codeforces$^\dagger$    & 7   & 0.004 & 0.635 & 0.031 & 0.962 & 0.053 & 0.978 \\
+deepmath\_103k          & 60  & 0.036 & 0.624 & 0.066 & 0.774 & 0.299 & 0.935 \\
+if\_sft\_data\_verified & 135 & 0.116 & 0.678 & 0.241 & 0.776 & 0.459 & 0.910 \\
+llama\_nemotron         & 65  & 0.029 & 0.622 & 0.199 & 0.773 & 0.373 & 0.804 \\
+medical\_o1$^\dagger$   & 0   & --    & --    & --    & --    & --    & -- \\
+numinamath\_1\_5        & 116 & 0.063 & 0.597 & 0.122 & 0.791 & 0.422 & 0.932 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Per-domain precision and balanced accuracy, Apertus-8B-Instruct,
+test split. $^\dagger$: fewer than $10$ positive test rollouts, excluded
+from Table~\ref{tab:unified-aggregate}'s macro-average.}
+\label{tab:unified-per-domain}
+\end{table}
+
+Precision and balanced accuracy are shown, rather than the full six-metric
+set of Table~\ref{tab:unified-aggregate}, because together they isolate the
+two effects of interest here: precision shows how much each domain's
+population size drags down the raw hit rate, while balanced accuracy shows
+that the same ranking holds regardless of population size. The domain breakdown shows the aggregate ranking is not driven by one
+unusually easy or unusually hard domain: LRS's balanced accuracy exceeds
+TTR's, which in turn exceeds Entropy's, in every one of the seven domains,
+not just in the pooled or macro-averaged view.
+
+\subsubsection{Threshold-free comparison}
+
+Figure~\ref{fig:roc-comparison} sweeps every possible decision threshold
+for each metric and reports the resulting ROC curve and its area under the
+curve (AUC), as a sanity check that the single calibrated operating point
+above was not a lucky pick. The ranking is consistent with the
+operating-point results: LRS has the highest AUC on every build ($0.943$,
+$0.980$, $0.922$), TTR is second ($0.852$, $0.951$, $0.894$), and Entropy is
+last and closest to the diagonal ($0.695$, $0.732$, $0.776$).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{figures/roc_comparison.pdf}
+\caption{Threshold-free ROC curves for Entropy, TTR, and LRS against the
+LLM judge, test split only, one panel per dataset build.}
+\label{fig:roc-comparison}
+\end{figure}
+
+\subsubsection{Onset agreement}
+
+For rollouts where a metric predicts degeneration and the judge's
+\texttt{onset\_quote} is located verbatim in the completion,
+Table~\ref{tab:unified-onset} reports the signed distance between the
+judge's onset and the metric's own onset (judge onset minus metric onset:
+positive means the metric fires earlier than the judge). All three
+onset-producing rules are now compared on the same underlying positive
+population for the first time, since they all draw from the same
+judge-confirmed positives (\S\ref{sec:empirical-performance}) rather than
+three separately constructed ones.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccc}
+\toprule
+Metric & Dataset build & $n$ & Median signed & Median abs. & IQR (signed) \\
+\midrule
+Entropy     & Apertus-8B-Instruct             & 574  & 283.0 & 339.5 & [$-11.0$, $703.8$] \\
+Entropy     & Apertus 1.5 -- capfilter-linear & 881  & 141.0 & 168.0 & [$-24.0$, $559.0$] \\
+Entropy     & Apertus 1.5 -- SFT-256k         & 689  & 133.0 & 253.0 & [$-41.0$, $725.0$] \\
+TTR (run-4) & Apertus-8B-Instruct             & 622  & 274.0 & 311.0 & [$102.0$, $680.5$] \\
+TTR (run-4) & Apertus 1.5 -- capfilter-linear & 1139 & 160.0 & 165.0 & [$91.0$, $339.5$] \\
+TTR (run-4) & Apertus 1.5 -- SFT-256k         & 846  & 236.5 & 267.0 & [$115.3$, $771.8$] \\
+LRS         & Apertus-8B-Instruct             & 815  & 1.0   & 106.0 & [$-189.0$, $78.5$] \\
+LRS         & Apertus 1.5 -- capfilter-linear & 1267 & 1.0   & 29.0  & [$-24.0$, $32.0$] \\
+LRS         & Apertus 1.5 -- SFT-256k         & 1031 & 1.0   & 70.0  & [$-98.5$, $57.0$] \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Signed onset distance (judge onset minus metric onset, in tokens)
+for rollouts where both are defined, test split only.}
+\label{tab:unified-onset}
+\end{table}
+
+LRS's onset agrees with the judge almost exactly on median (within a single
+token on every build), reflecting that both are, in different ways,
+locating the same first exact (or digit-normalized) repeat. TTR and Entropy
+instead fire well before the judge's chosen onset on median (roughly
+$130$--$280$ tokens early), consistent with each detecting an earlier, more
+gradual signal -- a sustained rise in local repetition or a sustained drop
+in entropy -- rather than the specific point a human reader would call
+unambiguous. All three distributions remain wide (interquartile ranges
+spanning several hundred tokens in most cases), so none of the three
+metrics should be treated as pinpointing onset precisely on any individual
+rollout; they are more useful in aggregate than case by case. Median
+absolute distance is reported alongside the signed one because a near-zero
+median signed distance does not by itself imply pinpoint accuracy: LRS's
+median signed distance is within a single token of zero on every build, yet
+its median absolute distance is still $29$--$106$ tokens, showing that its
+error is unbiased in direction but not negligible in typical size.
+
+\subsubsection{Flag rate by termination reason}
+\label{sec:flag-rate-by-termination}
+
+As a sanity check on treating natural end-of-sequence as a safe negative
+label, Table~\ref{tab:flag-rate-termination} reports, for every metric and
+dataset build, the fraction of rollouts each metric's already-tuned
+threshold flags as positive, split by whether the rollout reached
+end-of-sequence or hit the token cap -- computed over every rollout in the
+dataset, not just the judge-touched subset used elsewhere in this section,
+since no judge call is needed to know a rollout's own termination reason.
+For all three metrics the gap between the two columns is large, confirming
+that a metric firing is a rare event on naturally-terminated text and a
+common one on token-capped text -- exactly the assumption the population
+construction above depends on. Entropy's EOS flag rate ($20.5$--$38.6\%$) is
+an order of magnitude higher than TTR's ($7.0$--$13.3\%$) or LRS's
+($2.1$--$4.8\%$), consistent with it being the noisiest of the three
+signals throughout this section.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcc}
+\toprule
+Metric & Dataset build & EOS flag rate & Token-capped flag rate \\
+\midrule
+Entropy & Apertus-8B-Instruct             & 38.6\% & 69.7\% \\
+Entropy & Apertus 1.5 -- capfilter-linear & 28.6\% & 69.4\% \\
+Entropy & Apertus 1.5 -- SFT-256k         & 20.5\% & 67.6\% \\
+TTR     & Apertus-8B-Instruct             & 12.1\% & 77.3\% \\
+TTR     & Apertus 1.5 -- capfilter-linear & 7.0\%  & 89.6\% \\
+TTR     & Apertus 1.5 -- SFT-256k         & 13.3\% & 82.4\% \\
+LRS     & Apertus-8B-Instruct             & 3.9\%  & 88.9\% \\
+LRS     & Apertus 1.5 -- capfilter-linear & 2.1\%  & 92.4\% \\
+LRS     & Apertus 1.5 -- SFT-256k         & 4.8\%  & 75.4\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Fraction of rollouts flagged positive by each metric's own tuned
+threshold (\S\ref{sec:empirical-performance}), split by termination reason,
+over every rollout in the dataset.}
+\label{tab:flag-rate-termination}
+\end{table}
+
+\subsubsection{Flag rate on hard negatives}
+\label{sec:hard-negatives}
+
+Restricting further to the judge-confirmed-negative rollouts among the
+token-capped population -- the small set of "hard negatives" kept in the
+unified population (\S\ref{sec:empirical-performance}), and the population
+\S\ref{sec:llm-judge-labeling}'s brute-force-solving argument refers to --
+Table~\ref{tab:hard-negatives} reports how often each metric's tuned
+threshold still fires on them. This population is small (6--78 rollouts
+per build, since a rollout must both hit the token cap and be confirmed
+non-degenerate by the judge), so the two smallest builds should be read
+with that caveat in mind. TTR fires on the large majority of hard
+negatives on every build ($79.5$--$100\%$), supporting the idea that
+legitimate, repetitive-looking text such as brute-force enumeration
+reliably trips a local repetition metric. LRS's tuned threshold fires far
+less consistently ($7.7$--$75.0\%$), and Entropy's shows no clear pattern
+($12.5$--$87.2\%$) -- both are noisier indicators of this specific failure
+mode than TTR.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Dataset build & $n$ & LRS flag rate & TTR flag rate & Entropy flag rate \\
+\midrule
+Apertus-8B-Instruct             & 8  & 75.0\% & 100.0\% & 12.5\% \\
+Apertus 1.5 -- capfilter-linear & 6  & 33.3\% & 100.0\% & 83.3\% \\
+Apertus 1.5 -- SFT-256k         & 78 & 7.7\%  & 79.5\%  & 87.2\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Fraction of judge-confirmed-negative, token-capped rollouts
+("hard negatives") each metric's own tuned threshold still flags as
+positive.}
+\label{tab:hard-negatives}
+\end{table}
+
+\subsubsection{Evaluation metric definitions}
+
+For a completion-level confusion matrix with true positives (TP), false
+positives (FP), true negatives (TN), and false negatives (FN):
+\[
+\text{Precision}=\frac{TP}{TP+FP},
+\qquad
+\text{Recall}=\frac{TP}{TP+FN},
+\qquad
+\text{Specificity}=\frac{TN}{TN+FP},
+\]
+\[
+\resizebox{0.92\linewidth}{!}{$\text{Balanced accuracy}=\dfrac{\text{Recall}+\text{Specificity}}{2},
+\qquad
+\text{Accuracy}=\dfrac{TP+TN}{TP+FP+TN+FN}.$}
+\]
+\[
+\resizebox{0.92\linewidth}{!}{$\text{MCC}=\dfrac{TP\cdot TN-FP\cdot FN}{\sqrt{(TP+FP)(TP+FN)(TN+FP)(TN+FN)}}.$}
+\]
+The Matthews correlation coefficient (MCC) folds all four confusion-matrix
+cell counts into a single number in $[-1,1]$, with $0$ corresponding to a
+rule no better than chance and $1$ to perfect prediction; unlike accuracy,
+it stays informative even when positives are rare, which is the case
+throughout this section.
+
+\end{document}

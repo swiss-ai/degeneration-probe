@@ -30,5 +30,8 @@ outputs/
 # notebook-generated figures (rendered prompt/rollout images, not source)
 notebooks/figures/
 
+# paper latex, has independent git
+docs/paper
+
 # marimo's own session/autosave cache
 __marimo__/
