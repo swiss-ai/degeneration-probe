@@ -253,20 +253,26 @@ prefix of every answer it falls to 0.62, and to 0.49, which is chance, when
 compared only against healthy answers of at least 1000 tokens. The apparent
 strength is length.
 
-**The reason is structural and it affects everything reported at the answer
-level.** A positive is by definition an answer that reached the 4096-token cap;
-healthy answers have a median length of 474. Any rollout score formed as a
-maximum over tokens therefore rises with length, and the classes are almost
-perfectly separated by length before any model is consulted.
+**Why, and how far to take it.** A positive is by definition an answer that
+reached the 4096-token cap, and healthy answers have a median length of 474, so
+any rollout score formed as a maximum over tokens rises with length and the
+classes separate before any model is consulted.
 
-Two consequences. First, every answer-level number in this work, including the
-probe's own recall, is confounded with length until a matched comparison shows
-otherwise, and the paper should say so rather than leave it for a reviewer.
-Second, this is the strongest available demonstration that answer-level
-detection is not the question: a scorer that ignores the model, the activations
-and the text, and reads only the token count, ranks whole answers at 0.9992.
-That belongs in the section arguing saturation, stated as a property of the
-label rather than as a result about any scorer.
+Treat this as a caution about what an answer-level number can measure here, not
+as a finding. It is a consequence of how the label is built rather than
+something learned about degeneration, it would move with the cap, and no manual
+inspection has been done, so it does not license the claim that length is
+uninformative about degeneration. The defensible statement is narrow: under this
+label definition, an answer-level ranking cannot discriminate between scorers,
+so it should not be used to rank them.
+
+Two practical instructions follow. Do not report answer-level AUC as a result
+for any scorer, our own included, and say once that it is not reported and why.
+And when Task 0 checks how other work defines a loop, note whether its label
+carries a similar near-cap gate, since at least two recent papers appear to
+require reaching the token limit; if that is general, the caution is about the
+measurement conventions of the area rather than about this corpus alone, which
+is the only framing in which it is worth more than a sentence.
 
 Verify all of the above through the evaluator rather than trusting these
 figures, which came from a quick proxy outside it. Then correct the documents
