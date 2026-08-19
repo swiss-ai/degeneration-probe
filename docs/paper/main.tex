@@ -1,0 +1,780 @@
+\documentclass{article}
+
+\usepackage{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+% Anything still open. Delete the macro before submission: if a \TBD survives to
+% the deadline, that claim comes out of the paper.
+\newcommand{\TBD}[1]{\textcolor{red}{\textbf{[TBD: #1]}}}
+% Space held for a figure that is not drawn yet, with what it has to show.
+\newcommand{\figstub}[2]{%
+  \fbox{\begin{minipage}[c][#1][c]{0.97\linewidth}%
+    \centering\small\color{red}\textbf{[FIGURE]}\\[2pt]\itshape #2%
+  \end{minipage}}}
+
+\title{\TBD{title. Working: Early Warning Is Not a Property of the Probe}}
+
+\author{%
+  \TBD{authors, anonymised for submission}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\TBD{written last, once the storyline is fixed. It has to state the population
+and its natural degeneration rate, the separation of detection from pre-onset
+warning, the size of the pre-onset signal against a causal baseline, the
+decomposition into position, length, prompt and domain, and the held-out
+confirmation of the domain result.}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+\TBD{written last. The order of the argument is settled even if the framing is
+not, and it is: (i) a loop that has started is easy to see and the metric
+everyone reports is saturated, so it cannot rank methods or even choose a layer;
+(ii) the question that matters is whether anything is readable \emph{before} the
+loop, which needs tokens scored by position relative to an onset; (iii) an
+apparent early warning has cheaper explanations than an impending loop, and this
+corpus is built so that each of them is measurable; (iv) what survives is small,
+concentrated in one kind of text, and absent late in an answer.}
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A measurement that separates recognising a loop in progress from seeing
+  it coming, by scoring every token according to its position relative to a
+  semantically located onset, at operating points fixed by a per-answer
+  false-alarm budget (Section~\ref{sec:protocol}).
+  \item A decomposition of the apparent pre-onset signal into absolute position,
+  answer length, prompt-level predisposition and domain, each against a matched
+  null, with the residual reported rather than assumed (Section~\ref{sec:controls}).
+  \item The observation that the pre-onset signal is concentrated in one kind of
+  text rather than general, confirmed on a domain held out of training entirely
+  (Section~\ref{sec:exp-domain}).
+  \item A bridge between this protocol and the reporting conventions of the
+  nearest prior work, holding the scorer fixed, which quantifies how much of the
+  disagreement in published early-warning numbers is a matter of convention
+  (Section~\ref{sec:exp-bridge}).
+  \item The finding that answer-level detection is saturated across almost the
+  whole depth of the network while pre-onset coverage varies by more than an
+  order of magnitude over the same depths, so the metric this literature reports
+  cannot see the choice that determines early warning (Section~\ref{sec:exp-depth}).
+\end{enumerate}
+
+\section{Related work}
+\label{sec:related}
+
+\paragraph{Repetitive degeneration.}
+Repetition is a long-standing failure of neural text generation. It has been
+attributed to a positive feedback loop in which the probability of a phrase
+rises with each repetition \citep{holtzman2020curious}, to high-inflow states in
+the transition dynamics \citep{fu2021theoretical}, to a self-reinforcement effect
+measured directly on sentence probabilities \citep{xu2022learning}, and to
+repetition in the training data \citep{li2023repetition}. It persists in current
+reasoning models, where it consumes the decoding budget
+\citep{xie2025wordsalad,dong2025rethinking}. This work does not propose a
+mechanism. It asks how much of the phenomenon is visible to a linear readout
+before it appears in the text.
+
+\paragraph{Measuring repetition.}
+The standard measures are computed on a finished sequence: \texttt{distinct-n}
+\citep{li2016diversity} and its complement \texttt{seq-rep-n}
+\citep{welleck2020neural} count duplicate $n$-grams in a completed generation.
+Sliding a fixed window along the sequence, as the moving-average type-token ratio
+does \citep{covington2010cutting}, removes the confound between such a ratio and
+the length of the sample. \citet{welleck2020neural} also define \texttt{rep/l},
+the share of tokens already occurring in the previous $l$ tokens, which is the
+literature's per-token repetition signal and is backward looking by
+construction. Section~\ref{sec:baselines} uses both a windowed
+\texttt{seq-rep-2} and \texttt{rep/l}.
+
+\paragraph{Reading a loop from internal states.}
+Loops are visible in hidden states once they have begun.
+\citet{duan2026circular} report accuracy and area under the curve above $0.99$
+separating loop from non-loop states with linear and non-linear classifiers on
+averaged final-layer representations. \citet{xie2025wordsalad} train a linear
+classifier on the hidden state of the token ending each reasoning chunk and
+report roughly $90$ to $94\%$ accuracy at temperature zero. \citet{yu2025breaking}
+detect adversarially induced loops from neuron activation patterns at $95.24\%$
+accuracy. We take these results as settled and reproduce them. Our argument is
+that the task they measure is close to saturated because of the shape of the
+data, so a high answer-level number says little about whether anything is
+readable before the loop begins. \TBD{verify directly that
+\citet{duan2026circular} and \citet{xie2025wordsalad} both read the final layer.
+This sentence is load-bearing for Section~\ref{sec:exp-depth} and currently rests
+on a secondary reading.}
+
+\paragraph{Predicting a loop.}
+The closest work is \citet{duan2026circular}, who accumulate classifier evidence
+with a cumulative-sum change-point rule \citep{page1954continuous} and report
+early detection rates and lead times in tokens. Our results do not contradict
+theirs; they are measured under different conditions, and those conditions are
+what this paper is about. Their prediction experiments use greedy decoding,
+balanced evaluation sets, sentence-level representations, and an operating point
+far looser than one a serving system would accept. We sample, preserve the
+natural base rate, score every token, and fix a budget on healthy answers.
+Section~\ref{sec:exp-bridge} measures what each of those choices is worth.
+\citet{duan2026circular} also report that semantic circularity precedes verbatim
+repetition. We do not dispute that a precursor exists; we ask the narrower
+question of whether it is linearly decodable per token at a false-alarm rate a
+deployment would accept.
+
+\paragraph{Detection strength grows inside a loop.}
+\citet{xie2025wordsalad} frame their result as models being self-aware when
+trapped in repetition. Their own appendix supports a more careful reading: for a
+tracked example the classifier scores the first repetitive chunks at essentially
+zero and reaches certainty only hundreds of chunks later. Being self-aware once
+trapped and being self-aware on the approach are two claims, and the protocol of
+Section~\ref{sec:protocol} is built to report them apart.
+
+\paragraph{What a probe measures.}
+A probe can reach high accuracy on labels that carry no information, so accuracy
+alone does not establish that a representation contains the target
+\citep{hewitt2019designing}. \citet{sahoo2026linear} give a recent example in
+which probes at $100\%$ accuracy fall to chance once source identity and
+response length are residualised out, which is directly relevant here because
+every degenerate answer in our corpus reaches the token cap while healthy answers
+are shorter. \citet{fomin2026internal} draw the distinction between an internal
+readout that describes the current situation and one that predicts what happens
+next, and report negative results for the second across three probe families.
+That distinction is the one we draw between in-pattern and warning coverage; our
+contribution is its instantiation in a setting where the onset can be located, so
+the gap can be measured rather than argued. \citet{kramar2026building} report
+that probes degrade under production distribution shift, particularly on long
+contexts, for which Section~\ref{sec:controls} supplies a concrete mechanism.
+
+\paragraph{Thresholded repetition rules in practice.}
+Rules that threshold a repetition statistic already decide what a corpus keeps
+\citep{rae2021scaling} and when a serving stack stops generating, and recent work
+uses one to label loops and to trigger an intervention \citep{xu2026loopguard}.
+None of them reports a detection rate or a false-alarm rate against an
+independent reference. Appendix~\TBD{ref} measures three of these statistics
+against a semantic label on the population where they are least trustworthy.
+
+\section{Corpus and labels}
+\label{sec:corpus}
+
+\subsection{Generation}
+The corpus is \TBD{36{,}300} answers generated from \texttt{Apertus-8B-Instruct}
+\citep{hernandez2025apertus}, an openly released 8B instruction-tuned model, by sampling
+$K=10$ continuations for each of \TBD{3{,}630} prompts at temperature $0.7$ and
+top-$p$ $0.9$, with a hard cap of $4096$ tokens and a fixed seed. Prompts are
+drawn from seven sources spanning mathematics, competitive programming, general
+instruction following and medical reasoning. Five are used in domain and split by
+prompt into training, validation and an in-domain test set; two are held out
+entirely and read only for zero-shot evaluation.
+
+Two properties of this design are used throughout. Sampling rather than greedy
+decoding matches the generation policy a served model would use, and it produces
+several trajectories per prompt, which is what makes prompt-level effects
+measurable at all (Section~\ref{sec:controls}). Splits are assigned at the prompt
+level, so all $K$ answers to a prompt share a split.
+
+\subsection{What counts as degeneration}
+An answer that ended at an end-of-sequence token is a \textbf{negative}. An
+answer cut off by the token cap is sent to a language-model judge, which reads
+the prompt and the answer and decides whether the text stopped making progress.
+The prompt is essential: an enumeration, a code template, a brute-force search or
+repetition the prompt explicitly requested are all legitimately repetitive, and a
+purely structural rule cannot tell them from a loop.
+
+Treating every naturally terminated answer as a negative is an assumption, and
+Appendix~\TBD{ref} reports the evidence for it. \TBD{state the resulting scope
+plainly: this corpus studies persistent degeneration that runs to the cap, not
+every transient repetitive episode.}
+
+\subsection{The degeneration frontier}
+\label{sec:frontier}
+When the judge finds degeneration it returns a short verbatim quote marking where
+the pattern first begins. Asking for a quote rather than a position is what makes
+the label checkable: a separate step locates the quote in the answer's own token
+stream and records the index of its first token, giving the \textbf{frontier}
+$f_r$ for answer $r$. A quote that cannot be located leaves its answer excluded
+from every split, with the reason recorded, rather than given an invented onset.
+\TBD{report the verbatim rate, the server-side re-verification, the refusal rate
+and where it concentrates.}
+
+Of the \TBD{36{,}300} answers, \TBD{890} reached the cap and \TBD{818} yield a
+usable frontier, a natural degeneration rate of \TBD{2.3\%}. Table~\ref{tab:corpus}
+gives the split populations.
+
+The frontier is treated as a reference point, not as ground truth. It is
+uncertain, and Section~\ref{sec:controls} reports how far the conclusions move
+when it is displaced. \TBD{human validation of a stratified sample, with
+inter-annotator agreement reported beside judge agreement so that judge error can
+be read against task difficulty.}
+
+\begin{table}[t]
+  \caption{Corpus populations. A positive is an answer that reached the token cap
+  and for which a frontier could be located. \TBD{fill}}
+  \label{tab:corpus}
+  \centering
+  \begin{tabular}{lrrrr}
+    \toprule
+    Split & Prompts & Answers & Positives & Rate \\
+    \midrule
+    train                & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    validation           & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    test, in domain      & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    test, held-out domains & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Where loops start, and why it shapes everything}
+\label{sec:onset-shape}
+The single most consequential fact about this corpus is where loops begin. The
+quartiles of the frontier position are \TBD{399}, \TBD{721} and \TBD{1{,}144}
+tokens, and \TBD{about 3\%} of positives begin at the first token. Since every
+positive runs to the cap, roughly \TBD{four fifths} of a positive answer is
+already inside the loop. Any measure that lets those tokens dominate reads as
+nearly perfect for almost any scorer, which is the reason for
+Section~\ref{sec:protocol}.
+
+\section{Probes and training}
+\label{sec:probes}
+
+\subsection{The probe}
+A probe is a learned normalisation followed by one linear map, reading the
+residual stream at a single layer at a single token and emitting a probability:
+\begin{equation}
+  p_t \;=\; \sigma\!\left(w^{\top}\mathrm{LN}\!\left(h^{(\ell)}_t\right) + b\right),
+\end{equation}
+about \TBD{12{,}289} parameters per depth. The score at a token is a function of
+that token's state alone, which is what makes it deployable one token at a time,
+and that state is built only from tokens up to $t$, so a probe never reads text
+the model has not produced.
+
+Hidden states are extracted once with the model frozen and stored, so training
+reads vectors from disk. This makes it affordable to train an independent head at
+\emph{every} layer in one pass and to repeat every comparison at three seeds. The
+heads share no parameters and their losses are summed, which is a rearrangement
+of training them separately rather than an approximation, provided the gradient
+norm is clipped per head and each head keeps its own normalisation. Depth
+therefore becomes an axis inside a run rather than one that multiplies the number
+of runs, which matters because depth moves the results more than any other choice
+studied here (Section~\ref{sec:exp-depth}).
+
+\subsection{Which tokens the probe learns from}
+\label{sec:selection}
+An answer has thousands of tokens and most say nothing. Five strategies form a
+ladder in which each changes exactly one decision relative to the previous one:
+\texttt{all\_tokens} tiles every token; \texttt{rollout\_balanced} subsamples
+negative answers and gives every answer a fixed token budget;
+\texttt{random\_window} makes that budget contiguous; \texttt{frontier\_window}
+anchors the window on the frontier, either centred on it or trailing it; and
+\texttt{frontier\_window\_hard\_negative} additionally biases negative windows
+toward spans that already look repetitive. Window widths of \TBD{64, 128, 256 and
+512} are swept jointly with the rule, since an anchored window trades coverage
+for earliness and its width moves the probe along that same trade-off.
+
+\subsection{What the probe is trained toward}
+\label{sec:targets}
+Three label families share one contract, a per-token target and a mask marking
+positions with no defined target. \textbf{Hard frontier labels} set
+$y_N(t)=1 \iff f_r - t \leq N$ for a horizon $N \geq 0$, so a larger horizon asks
+the probe to fire while the text still looks fine. \textbf{Soft frontier labels}
+replace the step with a decay, linear or exponential over a configured length,
+expressing that closer to the frontier is more degenerate without committing to a
+cut. \textbf{Token-level signals} take the target from a quantity computed
+independently of the frontier, such as the repetition score, which defines a
+target everywhere including on healthy answers and therefore teaches a different
+concept.
+
+\subsection{An equal budget for every recipe}
+The training budget is expressed in optimizer steps and target tokens per step,
+and both are held identical across every recipe in a comparison. The tokens a
+step sees are measured from the training stream rather than inferred from the
+configured window size, because the rules contribute very different amounts per
+example and deriving the budget from the configuration would quietly hand one
+rule several times the budget of another. Batches are composed to a fixed
+positive fraction rather than shuffled, since shuffling a population that is over
+$99\%$ negative leaves most steps with no positive gradient. Class imbalance is
+corrected once, in the loss weight, computed from the population the probe
+actually sees after selection.
+
+\subsection{Adapted representations}
+\label{sec:adapted}
+A second regime attaches low-rank adapters \citep{hu2022lora} to the layers up to
+and including the probed one and trains them jointly with the head, so the
+representation itself can move. An adapted run carries one probe at one depth,
+since adapters below a layer change what every layer above it reads. Its control
+is a frozen run at that same depth trained the same way, not one head of a
+many-headed run. \TBD{the adapted runs are being repeated under the corrected
+stopping rule; report only the matched comparison.}
+
+\subsection{Which checkpoint and which depth are reported}
+\label{sec:selection-rule}
+A run keeps a checkpoint every \TBD{50} steps, and a rule decides which one each
+depth is judged on: a depth becomes eligible once its coverage inside the loop
+clears a floor, and among eligible steps the one with the best coverage of the
+run-up is kept. Depth is then chosen as the eligible depth reaching the highest
+such coverage. Both choices are made on validation data and reported as part of
+the result.
+
+Selecting on answer-level recall instead is a mistake we can quantify, because
+that quantity saturates within the first few evaluations: it selects checkpoints
+that are \TBD{6.8} times worse on coverage of the run-up, with a first alarm
+\TBD{81} tokens later. This is the first of several places where the saturation
+of answer-level metrics has practical consequences.
+
+\section{Evaluation protocol}
+\label{sec:protocol}
+
+\subsection{Scores as the interface}
+Evaluation never receives a model. It receives one score per token, so a probe
+and a non-learned baseline go through an identical judgement by construction, and
+a metric can be changed or added without recomputing a score. Scoring is
+exhaustive: every token of every answer in a split, with no subsampling of
+negatives and no cap, since a cap can only understate a false-alarm rate. The
+protocol is checked against synthetic scorers with hand-computable answers: a
+perfect oracle stepping at the frontier, oracles delayed and advanced by a fixed
+number of tokens, a constant scorer, noise, and a noisy oracle that spikes on
+negatives.
+
+\subsection{Operating points}
+Rather than choosing a threshold, we fix the share of \emph{healthy answers}
+allowed to raise a false alarm, at $1\%$, $5\%$ and $10\%$, and solve for the
+threshold that spends exactly that. Thresholds are chosen on validation and
+reused unchanged everywhere else, enforced by the reporting tool rather than by
+discipline. A budget framing matches the deployment question, which is how much
+false-alarm cost is acceptable, and that question cannot be settled here.
+
+A budget smaller than the share of healthy answers tied at a scorer's highest
+score cannot be spent at all: the threshold is forced past the top of the range
+and nothing fires anywhere, positives included. That is not a hypothetical, and
+Section~\ref{sec:exp-baselines} reports which baselines it affects.
+
+\subsection{The first alarm, and the four views}
+For an answer $r$, a threshold $\tau$ and a persistence $m$, the first alarm is
+\begin{equation}
+  a_r(\tau,m) \;=\; \min\{\,t : p_r(t') \geq \tau \ \ \forall\, t' \in [t,\,t+m)\,\},
+\end{equation}
+or $\infty$ if no such $t$ exists. Four views follow.
+
+\textbf{Detection} asks whether the alarm is finite on a degenerate answer. It
+exists to confirm a scorer is not broken, not to rank scorers.
+
+\textbf{Coverage} splits the tokens of a degenerate answer at the frontier.
+\emph{In-pattern coverage} is the share of tokens at or after $f_r$ that are
+flagged, the easy half and a floor to clear rather than a result. \emph{Warning
+coverage} is the share flagged in a band of $128$ or $256$ tokens immediately
+before $f_r$. The \emph{healthy token rate} is reported alongside both, since
+flagging every token maximises them.
+
+\textbf{Lead time} is the signed distance $a_r - f_r$, with negative meaning
+early. It is reported with the share of answers that fired before the frontier
+and the count that never fired, because the distribution is bimodal and a median
+over it alone is misleading.
+
+\textbf{Persistence} distinguishes a scorer that decided from one that twitched,
+and is read in opposite directions on the two populations.
+
+The reason coverage is split rather than pooled is Section~\ref{sec:onset-shape}:
+the in-pattern tail dominates the positive token population and is trivially
+separable, so a single blended figure reads close to perfect for almost any probe
+and says nothing about the part of the problem that is hard.
+
+\subsection{Baselines}
+\label{sec:baselines}
+Three structural signals computed by the labelling pipeline are scored through
+the same protocol: a windowed repetition score, the longest repeated substring as
+a step at the position the repeat begins, and the model's own predictive entropy,
+inverted.
+
+The windowed repetition score is \texttt{seq-rep-2} \citep{welleck2020neural}
+evaluated on a moving window \citep{covington2010cutting} rather than on the whole
+sequence. Its window looks \emph{ahead} of the token it labels. That is the right
+choice for annotating a finished answer, where nothing is causal, and an invalid
+one for a scorer a live monitor could run, because at token $t$ the tokens after
+$t$ do not exist. We therefore report it in both directions and use the trailing
+version in every comparison. To settle whether the shift rather than the
+causality is what moves the numbers, we add \texttt{rep/l}
+\citep{welleck2020neural}, the literature's per-token repetition signal, which is
+backward looking by construction. \TBD{report that the two causal baselines
+agree, and that the trailing windowed score is the stronger of the two and
+therefore the one the probe is compared against.}
+
+\subsection{Controls}
+\label{sec:controls}
+Four explanations other than an impending loop predict the same headline numbers.
+Each is removed by a matched comparison rather than argued away.
+
+\textbf{Position.} A probe's score rises with position on its own. Run-up tokens
+are therefore compared against healthy tokens at the same absolute position,
+grouped into bands.
+
+\textbf{Length.} Every positive reaches the cap while healthy answers are much
+shorter, so healthy answers are grouped by their own length before their
+false-alarm rates are compared, with the share of each population reaching each
+length reported beside the rates.
+
+\textbf{Prompt predisposition.} Because $K$ answers share a prompt, healthy
+answers whose prompt also produced a degenerate answer can be compared against
+healthy answers from prompts that never looped. A probe reading imminence should
+score them alike, since nothing went wrong in either.
+
+\textbf{Domain.} Every quantity is reported per domain with its population sizes,
+and any cell backed by fewer than ten positives is marked anecdotal rather than
+quoted as a rate. \TBD{intervals bootstrapped over prompts rather than over
+answers, since the $K$ answers to a prompt are not independent.}
+
+\TBD{permuted-onset control: frontiers permuted among degenerate answers,
+preserving the onset distribution so the control matches the real condition in
+its positional statistics. This is the control task of \citet{hewitt2019designing}
+for this setting, and it separates a signal about degeneration from what
+supervised training extracts from any sufficiently flexible representation. The
+corpus for it is built; the runs are pending.}
+
+\section{Experiments}
+\label{sec:experiments}
+
+The programme runs in stages, each ending in a decision the next one needs. Test
+splits are read only in the final stage, and no threshold and no choice of recipe
+is ever made against them.
+
+\textbf{S0, model-free signals.} What can be done with no model at all, and the
+bar every later result has to clear (Section~\ref{sec:exp-baselines}).
+
+\textbf{S1, which tokens to learn from.} The five selection strategies of
+Section~\ref{sec:selection} crossed with window width, three seeds each, read on
+coverage of the run-up and on depth rather than on detection
+(Section~\ref{sec:exp-selection}).
+
+\textbf{S2, what to train toward.} The horizon of the hard frontier label, the
+shape and length of a soft decay, a regression target computed independently of
+the frontier, and the two ways of correcting class imbalance
+(Section~\ref{sec:exp-targets}).
+
+\textbf{S3, whether adapters earn their cost.} The adapted regime of
+Section~\ref{sec:adapted} against a frozen control at the same depth, trained the
+same way. \TBD{in progress under the corrected stopping rule.}
+
+\textbf{S4, the held-out test, once.} The winning configuration scored on the two
+test splits with the thresholds already frozen on validation, applied unchanged.
+
+Two further experiments sit outside the ladder. \textbf{Transfer} scores a frozen
+head against other models' own corpora, both other checkpoints of the same
+architecture and other model families, and trains a probe directly on those
+families \TBD{in progress}. \textbf{The protocol bridge}
+(Section~\ref{sec:exp-bridge}) holds one scorer fixed and turns the reporting
+conventions that separate this protocol from the nearest prior work.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Model-free signals, and which of them can be operated}
+\label{sec:exp-baselines}
+
+\begin{table}[t]
+  \caption{Model-free baselines on validation at fixed per-answer false-alarm
+  budgets. The forward-looking row is reported for reference only and is not a
+  causal scorer. \TBD{fill; add the budget columns actually reported.}}
+  \label{tab:baselines}
+  \centering
+  \small
+  \begin{tabular}{lrrrrrrr}
+    \toprule
+    Scorer & AUC & Recall & Precision & In-pattern & Warning$_{256}$ & Median offset & Fired early \\
+    \midrule
+    windowed rep-2, forward (reference)  & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    windowed rep-2, trailing             & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \texttt{rep/l}, $l=128$              & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    longest repeated substring           & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    inverted entropy                     & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{state three things here: the cost of the forward window, measured; which
+scorers cannot spend a $1\%$ budget and the share of healthy answers tied at
+their ceiling that explains it; and the bar the probe has to clear, which is the
+stronger of the two causal baselines.}
+
+\subsection{Detection saturates; coverage of the run-up does not}
+\label{sec:exp-depth}
+
+\begin{figure}[t]
+  \centering
+  \figstub{4.2cm}{Depth on the horizontal axis, one panel per quantity: answer-level
+  recall at a $1\%$ budget, in-pattern coverage, and warning coverage. Median and
+  seed range over three seeds, each depth read at the checkpoint its own rule
+  selects. The first panel is nearly flat and near one; the others move by an
+  order of magnitude and peak in a broad intermediate region.}
+  \caption{Answer-level detection is saturated across depth while coverage of the
+  run-up is not. \TBD{caption to state the two ranges and the peak region.}}
+  \label{fig:depth}
+\end{figure}
+
+\begin{table}[t]
+  \caption{Selected depths for a representative frozen recipe. \TBD{fill}}
+  \label{tab:depth}
+  \centering
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Layer & Recall & In-pattern & Warning$_{256}$ & Median offset \\
+    \midrule
+    \TBD{early}  & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{}       & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{middle} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{}       & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{late}   & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{the claim is not that intermediate layers are better, which is known. It is
+that the quantity this literature reports is invariant to a choice that changes
+the quantity it does not report by an order of magnitude, so a paper probing the
+final layer and reporting near-perfect accuracy has no way to notice.}
+
+\subsection{Which tokens to learn from}
+\label{sec:exp-selection}
+
+\begin{table}[t]
+  \caption{Token selection. Each row is a strategy at one width, averaged over
+  three seeds with the spread across seeds. \TBD{fill from the paper notebook.}}
+  \label{tab:selection}
+  \centering
+  \small
+  \begin{tabular}{llrrrr}
+    \toprule
+    Strategy & Width & Recall & In-pattern & Warning$_{256}$ & Median offset \\
+    \midrule
+    \texttt{all\_tokens}                    & --      & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \texttt{rollout\_balanced}              & \TBD{}  & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \texttt{random\_window}                 & \TBD{}  & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \texttt{frontier\_window}, centred      & \TBD{}  & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \texttt{frontier\_window}, trailing     & \TBD{}  & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \texttt{frontier\_window\_hard\_negative} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{the ladder splits into two groups rather than five: rules that sample
+broadly, and rules anchored on the frontier. The anchored rules fire earlier and
+cover less, and the mechanism is that they separate degenerate from healthy
+better \emph{at matched distance before the frontier}, not that they read the
+loop better. State the null used: healthy answers have no frontier, so they
+borrow one drawn from the frontier distribution of the degenerate answers,
+without which the comparison measures score drift with position.}
+
+\subsection{What to train toward}
+\label{sec:exp-targets}
+
+\begin{table}[t]
+  \caption{Label family and horizon. \TBD{fill}}
+  \label{tab:targets}
+  \centering
+  \small
+  \begin{tabular}{llrrrr}
+    \toprule
+    Family & Setting & Recall & In-pattern & Warning$_{256}$ & Median offset \\
+    \midrule
+    hard frontier & horizon $0$        & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    hard frontier & horizon \TBD{}     & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    hard frontier & horizon \TBD{}     & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    soft frontier & \TBD{decay/length} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    token signal  & repetition score   & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{the horizon is the one target choice that reliably moves coverage of the
+run-up, and it does so monotonically in every family it was swept in, while
+in-pattern coverage falls slightly and the healthy token rate does not rise. Note
+explicitly that this corrects an earlier reading in which the horizon appeared to
+do nothing, which came from watching the median alarm rather than the coverage.}
+
+\subsection{What the pre-onset signal is made of}
+\label{sec:exp-controls}
+
+\begin{figure}[t]
+  \centering
+  \figstub{4.6cm}{One panel per control. Left: flag rate against absolute position,
+  for run-up tokens and for healthy tokens, on a log scale. Middle: false-alarm
+  rate by healthy-answer length band. Right: the two healthy populations of the
+  prompt-sibling test as cumulative distributions.}
+  \caption{Most of the apparent pre-onset signal is position, length and prompt.
+  \TBD{caption to state where the residual survives and where it vanishes.}}
+  \label{fig:controls}
+\end{figure}
+
+\begin{table}[t]
+  \caption{Run-up tokens against healthy tokens at matched absolute position.
+  \TBD{fill}}
+  \label{tab:position}
+  \centering
+  \small
+  \begin{tabular}{lrrr}
+    \toprule
+    Position band & Run-up flag rate & Healthy flag rate & Ratio \\
+    \midrule
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{report the residual honestly, including the band where it disappears, and
+the prompt-sibling result including the fact that adaptation does not reduce it.}
+
+\subsection{The signal is concentrated in one kind of text}
+\label{sec:exp-domain}
+
+\begin{figure}[t]
+  \centering
+  \figstub{4.2cm}{Domains on the horizontal axis ordered by where their loops begin,
+  one line per candidate configuration, two panels: coverage of the run-up, and
+  coverage inside the loop. The two panels order the domains differently.}
+  \caption{Coverage of the run-up is concentrated in one domain, which is not the
+  easiest domain once inside the loop. \TBD{caption to state the share of flagged
+  run-up tokens that domain supplies.}}
+  \label{fig:domain}
+\end{figure}
+
+\begin{table}[t]
+  \caption{Per domain, on validation and on a domain held out of training
+  entirely. \TBD{fill; mark anecdotal cells.}}
+  \label{tab:domain}
+  \centering
+  \small
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Domain & Positives & Median onset & In-pattern & Warning$_{256}$ & Median offset & False-alarm rate \\
+    \midrule
+    \multicolumn{7}{l}{\emph{in domain}} \\
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \midrule
+    \multicolumn{7}{l}{\emph{held out}} \\
+    \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{the held-out domain is the out-of-sample test of the concentration claim,
+and it was run after the claim was made on validation. State which halves of the
+in-domain result replicate and which do not.}
+
+\subsection{Converting between protocols}
+\label{sec:exp-bridge}
+
+\begin{table}[t]
+  \caption{One scorer, read under successively different reporting conventions.
+  No weight changes between rows. \TBD{fill}}
+  \label{tab:bridge}
+  \centering
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    & Warning$_{256}$ & Median offset & Precision & Realised FPR \\
+    \midrule
+    this protocol                       & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    $+$ pooling into spans              & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    $+$ cumulative-sum accumulation     & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    $+$ their operating point           & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    $+$ a balanced evaluation set       & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The accumulation rung uses the one-sided cumulative-sum recursion
+\citep{page1954continuous},
+\begin{equation}
+  S_i \;=\; \max\!\left(0,\; S_{i-1} + (x_i - k)\right),\qquad S_0 = 0,
+\end{equation}
+where $x_i$ is the mean probe score over span $i$ and $k$ is a reference level
+measured as the median pooled score over healthy answers. The firing threshold is
+solved for the false-alarm budget, as for every other row, which is what keeps
+the rows comparable.
+
+\TBD{state the ordering of the terms and, most importantly, that the precision
+column is where the cost of a loose operating point appears and that a balanced
+evaluation set removes it from view. Add the observation that a balanced set
+thinned to the number of positives cannot resolve a strict budget at all.}
+
+This measures one scorer under other reporting choices. It is not an evaluation
+of another detector and says nothing about what another model would do on this
+data.
+
+\subsection{Transfer}
+\label{sec:exp-transfer}
+
+\begin{table}[t]
+  \caption{A frozen head scored against other models' own corpora, and probes
+  trained directly on those corpora. \TBD{fill; the cross-family rows are
+  pending a rebuild.}}
+  \label{tab:transfer}
+  \centering
+  \small
+  \begin{tabular}{llrrr}
+    \toprule
+    Target & Relation & Recall & In-pattern & Warning$_{256}$ \\
+    \midrule
+    \TBD{} & same architecture, other weights & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{} & other family, transferred head   & \TBD{} & \TBD{} & \TBD{} \\
+    \TBD{} & other family, probe trained on it & \TBD{} & \TBD{} & \TBD{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\TBD{keep the two questions apart: whether a learned direction survives a change
+of weights, and whether the phenomenon is readable at all in another family. Only
+the second is answered by training on that family.}
+
+\section{Limitations}
+\label{sec:limitations}
+
+\TBD{to be written, covering at least: one model family for the main results; the
+number of positives behind the domain claim; the frontier as a judge-produced
+reference point without human validation; the scope of the task as persistent
+degeneration that reaches the cap; and the fact that the selection of depth and
+checkpoint is made on the same validation split as everything else.}
+
+\section{Conclusion}
+\TBD{written last.}
+
+\begin{ack}
+\TBD{withheld for submission.}
+\end{ack}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+
+\section{Structural repetition rules, measured}
+\TBD{the deployed-rules result: detection against the judge, firing rate on
+naturally terminated text, and firing rate on capped answers the judge confirms
+are not degenerate. State that a disagreement bounds the joint error of rule and
+judge, and that these numbers come from a different protocol than the probe
+results and must not be placed in one table with them.}
+
+\section{Corpus documentation}
+\TBD{why an end-of-sequence answer is treated as a negative, why only capped
+answers are judged, judge reliability and refusals, and the three-build
+comparison.}
+
+\section{Additional results}
+\TBD{persistence, all window widths, soft decay shapes, every depth and
+checkpoint, per-domain intervals, and the adapted regime in full.}
+
+\end{document}
