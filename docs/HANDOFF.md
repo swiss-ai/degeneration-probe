@@ -236,28 +236,47 @@ the current rule selects, and what each choice costs in coverage of the run-up.
 The replay does **not** store AUC, so recompute from the stored per-token
 scores. No retraining, no GPU.
 
-**A0. Fix the entropy baseline, before any baselines table is written.**
-The stored entropy baseline is `1/(1+H)` per token and a rollout's score is the
-maximum over tokens, so a single confident token pins it at 1.0. Measured on
-validation: 99.7% of healthy answers contain a token of entropy below 0.01, so
-99.7% saturate at the ceiling and the rollout AUC is 0.675. Replacing the
-aggregation with the maximum of a 128-token trailing mean drops saturation to
-6.1% and raises the AUC to 0.9915, which would make it the strongest baseline in
-the set rather than the weakest.
+**A0. Two corrections to the baselines, before any baselines table is written.**
 
-Treat this as a correction, not an experiment. The conclusion currently written
-in several documents, that entropy is the weakest and noisiest signal, is an
-artefact of the aggregation. Re-derive it properly through the evaluator rather
-than trusting the figures above, which came from a quick proxy: decide whether to
-smooth before or after inverting, choose the window length deliberately, and
-report warning coverage rather than only the ranking, since a high answer-level
-ranking is what the paper argues is easy. Then correct every document that
-repeats the old conclusion.
+*The entropy baseline saturates.* It is `1/(1+H)` per token, and a rollout is
+scored by the maximum over its tokens. On validation, 99.7% of healthy answers
+contain a token of entropy below 0.01, so 99.7% sit at the ceiling and no budget
+can be spent at any level. Fix the aggregation. A trailing average is the
+obvious candidate; choose the window deliberately and decide whether to smooth
+before or after inverting.
 
-This also answers the question of whether a heuristic with no model behind it can
-separate degenerate from healthy answers. One that uses only the stored entropy
-reaches an answer-level AUC of 0.99, which is the most direct demonstration
-available that the metric this literature reports is saturated.
+*Do not conclude from that that windowed entropy is a strong detector.* It looks
+like one and is not. Measured on validation, a trailing-mean version reaches an
+answer-level AUC of 0.99, but **answer length alone reaches 0.9992**, the
+windowed entropy scores slightly worse than length, and on an equal-length
+prefix of every answer it falls to 0.62, and to 0.49, which is chance, when
+compared only against healthy answers of at least 1000 tokens. The apparent
+strength is length.
+
+**The reason is structural and it affects everything reported at the answer
+level.** A positive is by definition an answer that reached the 4096-token cap;
+healthy answers have a median length of 474. Any rollout score formed as a
+maximum over tokens therefore rises with length, and the classes are almost
+perfectly separated by length before any model is consulted.
+
+Two consequences. First, every answer-level number in this work, including the
+probe's own recall, is confounded with length until a matched comparison shows
+otherwise, and the paper should say so rather than leave it for a reviewer.
+Second, this is the strongest available demonstration that answer-level
+detection is not the question: a scorer that ignores the model, the activations
+and the text, and reads only the token count, ranks whole answers at 0.9992.
+That belongs in the section arguing saturation, stated as a property of the
+label rather than as a result about any scorer.
+
+Verify all of the above through the evaluator rather than trusting these
+figures, which came from a quick proxy outside it. Then correct the documents
+that describe entropy as simply the weakest signal, since the conclusion happens
+to be right while the reasoning behind it was never tested.
+
+What this does **not** touch is the token-level work. Warning coverage is
+measured within degenerate answers against healthy tokens at matched absolute
+position, so it already controls for the confound above. Keep that separation
+visible.
 
 **B. Activation self-similarity baseline.** A model-internal scorer that needs
 no training: the cosine similarity between the current hidden state and recent
