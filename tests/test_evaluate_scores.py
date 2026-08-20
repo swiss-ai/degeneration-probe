@@ -7,6 +7,7 @@ check.
 """
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -121,3 +122,30 @@ def test_the_persistence_trade_off_is_tabulated_on_validation_only(run_dir):
 def test_a_missing_score_table_says_which_step_produces_it(tmp_path):
     with pytest.raises(FileNotFoundError, match="Run score_rollouts.py first"):
         evaluate_scores.freeze_thresholds(tmp_path, [0.05], persistence=1)
+
+
+def test_onset_labels_are_not_guessed_for_a_foreign_corpus(tmp_path):
+    """A cross-corpus directory must not borrow its run's own build."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from evaluate_scores import _discover_onset_labels
+
+    attempt = tmp_path / "run" / "20260101T000000"
+    (attempt).mkdir(parents=True)
+    (attempt / "resolved_config.json").write_text(
+        json.dumps({"dataset": {"build_root": "/builds/own"}})
+    )
+
+    # A depth of the run itself reads the build the run was trained on.
+    own = attempt / "layers" / "layer_15"
+    own.mkdir(parents=True)
+    assert _discover_onset_labels(own) == Path(
+        "/builds/own/onset_labels/onset_labels.parquet"
+    )
+
+    # A depth scored against another model's corpus refuses to guess, because which
+    # rollouts the judge could not rule on differs between corpora.
+    for marker in ("cross_model", "lora_transplant"):
+        foreign = attempt / marker / "some-other-build" / "layer_15"
+        foreign.mkdir(parents=True)
+        assert _discover_onset_labels(foreign) is None

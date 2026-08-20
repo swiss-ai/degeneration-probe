@@ -24,6 +24,15 @@ from typing import Iterable, Optional, Union
 import numpy as np
 import pandas as pd
 
+# A capped answer whose onset could not be resolved is not a healthy answer. The
+# judge either could not be run on it or its quote could not be located, so
+# nothing is known about it, and counting it among the negatives spends part of a
+# false-alarm budget on an answer that is probably a positive. Training already
+# excludes these, because a capped answer with no frontier has no defined target.
+# `not_degenerating` is deliberately absent: the judge did run on those and ruled
+# them healthy, so they belong among the negatives.
+UNJUDGED_RESOLUTIONS = ("judge_failed", "not_found")
+
 SCORE_COLUMNS = [
     "prompt_id",
     "rollout_idx",
@@ -79,8 +88,15 @@ def build_scores(records: Iterable[dict]) -> pd.DataFrame:
     for column in ("prompt_id", "domain", "split", "stop_reason"):
         if column in frame:
             frame[column] = frame[column].astype(str)
+    # float32, not float16. Half precision has a spacing of about 5e-4 just
+    # below one, so every score within that distance of the top of the range
+    # collapses onto it. Ties at a scorer's ceiling are what make a small
+    # false-alarm budget unspendable, so storing at half precision manufactures
+    # the very failure the protocol reports: the windowed entropy baseline moves
+    # from 0.2% of healthy answers tied at its ceiling to 1.2%, which is the
+    # difference between a 1% budget that can be spent and one that cannot.
     frame["scores"] = [
-        np.asarray(values, dtype=np.float16) for values in frame["scores"]
+        np.asarray(values, dtype=np.float32) for values in frame["scores"]
     ]
     frame = frame[SCORE_COLUMNS]
     validate_scores(frame)
@@ -103,15 +119,61 @@ def write_scores(frame: pd.DataFrame, path: Union[str, Path]) -> Path:
     return path
 
 
+def unjudged_rollouts(onset_labels_path: Union[str, Path]) -> set:
+    """The rollouts no class can be assigned to, as (prompt_id, rollout_idx).
+
+    Read from the onset label table rather than inferred from a score table,
+    because the distinction that matters is *why* a capped answer has no frontier
+    and only the label table records that.
+    """
+    labels = pd.read_parquet(
+        onset_labels_path, columns=["prompt_id", "rollout_idx", "onset_resolution"]
+    )
+    unjudged = labels[labels["onset_resolution"].isin(UNJUDGED_RESOLUTIONS)]
+    return {
+        (str(row.prompt_id), int(row.rollout_idx))
+        for row in unjudged.itertuples(index=False)
+    }
+
+
+def drop_unjudged(frame: pd.DataFrame, unjudged: set) -> tuple:
+    """Remove the rollouts nothing is known about, and say how many went.
+
+    Returns the frame and the count dropped, so a caller can report it rather
+    than change a population silently.
+    """
+    if not unjudged:
+        return frame, 0
+    keys = [
+        (str(prompt), int(index))
+        for prompt, index in zip(frame["prompt_id"], frame["rollout_idx"])
+    ]
+    keep = np.array([key not in unjudged for key in keys])
+    return frame[keep].reset_index(drop=True), int((~keep).sum())
+
+
 def read_scores(
-    path: Union[str, Path], *, split: Optional[str] = None, validate: bool = True
+    path: Union[str, Path],
+    *,
+    split: Optional[str] = None,
+    validate: bool = True,
+    unjudged: Optional[set] = None,
 ) -> pd.DataFrame:
-    """Load a score table, optionally restricted to one split."""
+    """Load a score table, optionally restricted to one split.
+
+    ``unjudged`` names rollouts to leave out of the population entirely. Pass the
+    result of :func:`unjudged_rollouts`; ``None`` keeps every scored rollout, which
+    counts a capped answer the judge could not rule on as healthy.
+    """
     frame = pd.read_parquet(path)
     if split is not None:
         frame = frame[frame["split"] == split].reset_index(drop=True)
         if frame.empty:
             raise ValueError(f"No scored rollouts for split {split!r} in {path}")
+    if unjudged:
+        frame, _ = drop_unjudged(frame, unjudged)
+        if frame.empty:
+            raise ValueError(f"Every scored rollout in {path} is unjudged")
     frame["scores"] = [np.asarray(values, dtype=np.float32) for values in frame["scores"]]
     if validate:
         validate_scores(frame)

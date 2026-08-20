@@ -33,13 +33,66 @@ from degeneration_probe.evaluation.protocol import (
     view_c_lead_time,
     view_d_persistence,
 )
-from degeneration_probe.evaluation.scores import read_scores
+from degeneration_probe.evaluation.scores import read_scores, unjudged_rollouts
 from degeneration_probe.utils.file_utils import load_json, save_json
 
 SCORES_DIR = "scores"
 EVALUATION_DIR = "evaluation"
 THRESHOLDS_FILE = "decision_thresholds.json"
 TUNING_SPLIT = "val"
+
+
+# A directory under one of these holds scores computed on a corpus other than the
+# one the run was trained on, so the run's own configuration names the wrong build.
+FOREIGN_CORPUS_MARKERS = ("cross_model", "lora_transplant")
+
+
+def _discover_onset_labels(run_dir: Path) -> Optional[Path]:
+    """The onset label table for the build a run was trained against.
+
+    Returns nothing in the two cases where a guess would be wrong rather than
+    merely absent. A scorer with no run configuration beside it, such as a
+    model-free baseline, has nothing to read. And a directory of scores computed
+    against another model's corpus sits below a run whose configuration names the
+    training build, not the corpus the scores describe; which rollouts a judge
+    could not rule on differs between corpora, so reading the wrong table drops the
+    wrong rollouts. Both ask the caller to name the table instead.
+    """
+    parts = set(run_dir.parts)
+    if parts & set(FOREIGN_CORPUS_MARKERS):
+        return None
+    for candidate in (run_dir, *run_dir.parents):
+        config = candidate / "resolved_config.json"
+        if config.is_file():
+            build_root = load_json(config).get("dataset", {}).get("build_root")
+            if build_root:
+                return Path(build_root) / "onset_labels" / "onset_labels.parquet"
+    return None
+
+
+def population_shortfall(
+    onset_labels: Path, split: str, unjudged: set, scored: int
+) -> Optional[dict]:
+    """How far a scored table falls short of the split it claims to cover.
+
+    Scoring is meant to be exhaustive: no negative subsampled, no rollout capped,
+    whatever the training configuration said, because a missing negative can only
+    understate a false-alarm rate and the false-alarm rate is what every operating
+    point here is solved from. That guarantee was documented and never checked, and
+    a short table is invisible once it reaches the evaluator, which has nothing to
+    compare it against. This supplies the comparison.
+    """
+    labels = pd.read_parquet(
+        onset_labels, columns=["prompt_id", "rollout_idx", "split", "onset_resolution"]
+    )
+    in_split = labels[labels["split"] == split]
+    expected = sum(
+        (str(row.prompt_id), int(row.rollout_idx)) not in unjudged
+        for row in in_split.itertuples(index=False)
+    )
+    if scored >= expected:
+        return None
+    return {"scored": int(scored), "corpus": int(expected), "missing": int(expected - scored)}
 
 
 def _scores_path(run_dir: Path, split: str) -> Path:
@@ -50,14 +103,21 @@ def _scores_path(run_dir: Path, split: str) -> Path:
 
 
 def freeze_thresholds(
-    run_dir: Path, budgets: Sequence[float], persistence: int
+    run_dir: Path,
+    budgets: Sequence[float],
+    persistence: int,
+    unjudged: Optional[set] = None,
+    shortfall: Optional[dict] = None,
 ) -> List[Threshold]:
     """Choose operating points on validation data and record them."""
-    frame = read_scores(_scores_path(run_dir, TUNING_SPLIT), split=TUNING_SPLIT)
+    frame = read_scores(
+        _scores_path(run_dir, TUNING_SPLIT), split=TUNING_SPLIT, unjudged=unjudged
+    )
     thresholds = choose_thresholds(frame, budgets, persistence=persistence)
     payload = {
         "tuned_on": TUNING_SPLIT,
         "persistence": persistence,
+        "population_shortfall": shortfall,
         "thresholds": [threshold.__dict__ for threshold in thresholds],
     }
     save_json(payload, run_dir / THRESHOLDS_FILE)
@@ -76,7 +136,10 @@ def load_frozen_thresholds(run_dir: Path) -> tuple[List[Threshold], int]:
 
 
 def compare_persistence(
-    run_dir: Path, budgets: Sequence[float], candidates: Sequence[int]
+    run_dir: Path,
+    budgets: Sequence[float],
+    candidates: Sequence[int],
+    unjudged: Optional[set] = None,
 ) -> pd.DataFrame:
     """What each persistence window would cost and buy, on validation only.
 
@@ -86,7 +149,9 @@ def compare_persistence(
     of lead time. This puts that trade-off in one table instead of leaving it
     to be guessed.
     """
-    frame = read_scores(_scores_path(run_dir, TUNING_SPLIT), split=TUNING_SPLIT)
+    frame = read_scores(
+        _scores_path(run_dir, TUNING_SPLIT), split=TUNING_SPLIT, unjudged=unjudged
+    )
     rows = []
     for persistence in candidates:
         thresholds = choose_thresholds(frame, budgets, persistence=persistence)
@@ -131,8 +196,9 @@ def report_split(
     thresholds: Sequence[Threshold],
     persistence: int,
     min_positives: int,
+    unjudged: Optional[set] = None,
 ) -> Path:
-    frame = read_scores(_scores_path(run_dir, split), split=split)
+    frame = read_scores(_scores_path(run_dir, split), split=split, unjudged=unjudged)
     result = evaluate(frame, thresholds, persistence=persistence, min_positives=min_positives)
     out = run_dir / EVALUATION_DIR / split
     out.mkdir(parents=True, exist_ok=True)
@@ -187,20 +253,73 @@ def main() -> None:
         action="store_true",
         help="Report against the frozen thresholds without choosing them again.",
     )
+    parser.add_argument(
+        "--onset-labels",
+        type=Path,
+        default=None,
+        help="The onset label table. Rollouts the judge could not rule on are left "
+        "out of the population. Discovered from the run's resolved_config.json when "
+        "not given.",
+    )
+    parser.add_argument(
+        "--keep-unjudged",
+        action="store_true",
+        help="Count capped answers with no resolved onset among the healthy ones. "
+        "Only for reproducing a number measured before they were excluded.",
+    )
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
 
+    unjudged = set()
+    if not args.keep_unjudged:
+        labels_path = args.onset_labels or _discover_onset_labels(run_dir)
+        if labels_path is None:
+            foreign = set(run_dir.parts) & set(FOREIGN_CORPUS_MARKERS)
+            reason = (
+                f"these scores were computed against another model's corpus, so the "
+                f"build named in the run's own configuration is the wrong one"
+                if foreign
+                else f"{run_dir} has no resolved_config.json to read a build root from"
+            )
+            raise SystemExit(
+                f"Cannot tell which rollouts the judge could not rule on: {reason}. "
+                "Pass --onset-labels naming the table for the corpus these scores "
+                "describe, or --keep-unjudged to count them as healthy and say so."
+            )
+        unjudged = unjudged_rollouts(labels_path)
+        print(f"Excluding {len(unjudged)} rollouts with no judged outcome ({labels_path})")
+
     if args.compare_persistence:
-        comparison = compare_persistence(run_dir, args.budgets, args.compare_persistence)
+        comparison = compare_persistence(
+            run_dir, args.budgets, args.compare_persistence, unjudged=unjudged
+        )
         (run_dir / EVALUATION_DIR).mkdir(parents=True, exist_ok=True)
         comparison.to_csv(run_dir / EVALUATION_DIR / "persistence_comparison.csv", index=False)
         print("Persistence trade-off, on validation only:")
         print(comparison.round(4).to_string(index=False))
 
+    shortfall = None
+    if not args.keep_unjudged and labels_path is not None:
+        scored = len(read_scores(_scores_path(run_dir, TUNING_SPLIT), split=TUNING_SPLIT,
+                                unjudged=unjudged, validate=False))
+        shortfall = population_shortfall(labels_path, TUNING_SPLIT, unjudged, scored)
+        if shortfall:
+            print(
+                f"\n  WARNING: this table covers {shortfall['scored']} of the "
+                f"{shortfall['corpus']} rollouts in {TUNING_SPLIT}, so "
+                f"{shortfall['missing']} are missing. Every threshold below is solved "
+                "over a population that is short, and a missing negative can only "
+                "understate a false-alarm rate. Re-score the split before reporting "
+                "from it.\n"
+            )
+
     if args.reuse_thresholds:
         thresholds, persistence = load_frozen_thresholds(run_dir)
     else:
-        thresholds = freeze_thresholds(run_dir, args.budgets, args.persistence)
+        thresholds = freeze_thresholds(
+            run_dir, args.budgets, args.persistence, unjudged=unjudged,
+            shortfall=shortfall,
+        )
         persistence = args.persistence
         print(f"\nFrozen on {TUNING_SPLIT} (m={persistence}) -> {run_dir / THRESHOLDS_FILE}")
         for threshold in thresholds:
@@ -223,7 +342,9 @@ def main() -> None:
     if splits is None:
         splits = sorted(path.stem for path in (run_dir / SCORES_DIR).glob("*.parquet"))
     for split in splits:
-        report_split(run_dir, split, thresholds, persistence, args.min_positives)
+        report_split(
+            run_dir, split, thresholds, persistence, args.min_positives, unjudged=unjudged
+        )
 
 
 if __name__ == "__main__":

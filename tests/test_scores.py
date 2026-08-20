@@ -83,3 +83,80 @@ def test_an_interrupted_write_leaves_no_partial_table(tmp_path, monkeypatch):
         write_scores(frame, path)
     assert not path.exists()
     assert not list(tmp_path.glob(".tmp_scores_*"))
+
+
+def _score_row(prompt_id, rollout_idx, *, positive, stop_reason, onset, tokens=8):
+    return {
+        "prompt_id": prompt_id,
+        "rollout_idx": rollout_idx,
+        "domain": "d",
+        "split": "val",
+        "stop_reason": stop_reason,
+        "num_tokens": tokens,
+        "onset_position": onset,
+        "is_positive": positive,
+        "scores": np.linspace(0.0, 1.0, tokens, dtype=np.float32),
+    }
+
+
+def test_unjudged_rollouts_selects_only_the_unruled(tmp_path):
+    from degeneration_probe.evaluation.scores import unjudged_rollouts
+
+    labels = pd.DataFrame(
+        {
+            "prompt_id": ["a", "b", "c", "d", "e"],
+            "rollout_idx": [0, 1, 2, 3, 4],
+            "onset_resolution": ["ok", "judge_failed", "not_found", "not_degenerating", None],
+        }
+    )
+    path = tmp_path / "onset_labels.parquet"
+    labels.to_parquet(path, index=False)
+    # not_degenerating was ruled on and stays a negative; ok is a positive; a
+    # null resolution is an answer that ended at an end-of-sequence token.
+    assert unjudged_rollouts(path) == {("b", 1), ("c", 2)}
+
+
+def test_drop_unjudged_reports_how_many_went():
+    from degeneration_probe.evaluation.scores import drop_unjudged
+
+    frame = pd.DataFrame(
+        [
+            _score_row("a", 0, positive=True, stop_reason="length", onset=2.0),
+            _score_row("b", 1, positive=False, stop_reason="length", onset=None),
+            _score_row("c", 2, positive=False, stop_reason="eos", onset=None),
+        ]
+    )
+    kept, dropped = drop_unjudged(frame, {("b", 1)})
+    assert dropped == 1
+    assert list(kept["prompt_id"]) == ["a", "c"]
+    # An empty exclusion set must not copy or reindex anything.
+    same, none_dropped = drop_unjudged(frame, set())
+    assert none_dropped == 0
+    assert len(same) == 3
+
+
+def test_read_scores_excludes_unjudged_rollouts(tmp_path):
+    from degeneration_probe.evaluation.scores import build_scores, read_scores, write_scores
+
+    frame = build_scores(
+        [
+            _score_row("a", 0, positive=True, stop_reason="length", onset=2.0),
+            _score_row("b", 1, positive=False, stop_reason="length", onset=None),
+            _score_row("c", 2, positive=False, stop_reason="eos", onset=None),
+        ]
+    )
+    path = write_scores(frame, tmp_path / "val.parquet")
+    assert len(read_scores(path, split="val")) == 3
+    trimmed = read_scores(path, split="val", unjudged={("b", 1)})
+    assert list(trimmed["prompt_id"]) == ["a", "c"]
+
+
+def test_read_scores_refuses_a_wholly_unjudged_table(tmp_path):
+    from degeneration_probe.evaluation.scores import build_scores, read_scores, write_scores
+
+    frame = build_scores(
+        [_score_row("b", 1, positive=False, stop_reason="length", onset=None)]
+    )
+    path = write_scores(frame, tmp_path / "val.parquet")
+    with pytest.raises(ValueError, match="unjudged"):
+        read_scores(path, split="val", unjudged={("b", 1)})

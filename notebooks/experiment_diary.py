@@ -1330,6 +1330,66 @@ def _(
 
 @app.cell
 def _(mo):
+    mo.md(r"""
+    ### What selecting on an answer-level metric would cost
+
+    The rule selects on coverage of the run-up. The alternative is to select on
+    the quantity this literature reports, and the cost of doing so is measurable
+    without training anything, because the replay already holds a realised recall
+    and a realised false-alarm rate at every depth and every saved step. With the
+    split's populations, 108 degenerate answers and 3,532 negatives, those two
+    give the whole confusion matrix, so accuracy and F1 come out of the replay
+    arithmetic. AUC does not: it needs the score distribution rather than one
+    operating point, and per-token scores exist at only one checkpoint per run.
+
+    Eighty-eight frozen multi-layer runs, candidate set held identical at every
+    saved step of every depth, so only the objective changes:
+
+    | objective | warning coverage | times worse | alarm later | in-pattern | accuracy |
+    |---|---|---|---|---|---|
+    | warning coverage 256 (reference) | 0.0372 | 1.0 | 0 | 0.707 | 0.9901 |
+    | accuracy | 0.0183 | **2.4** | 10 | 0.619 | 0.9904 |
+    | answer recall | 0.0115 | **3.4** | 25 | 0.509 | 0.9901 |
+    | F1 | 0.0213 | 1.9 | 8 | 0.648 | 0.9904 |
+    | the deployed rule | 0.0336 | 1.1 | 0 | 0.696 | 0.9901 |
+
+    All medians over the 88 runs. The last row is the rule as it actually runs,
+    with its eligibility floor and its patience, against an unconstrained argmax
+    of its own objective: it gives up 1.1x, which is the price of stopping early
+    and is worth knowing separately from the price of the objective.
+
+    **What the trade actually buys.** Accuracy at the checkpoint chosen for
+    warning coverage is 0.9901. Accuracy at the checkpoint chosen for accuracy is
+    0.9904. So selecting on accuracy gives up a factor of 2.4 in coverage of the
+    run-up to gain **0.0003** in accuracy.
+
+    Two statistics say why, and they are the sharpest form of the argument:
+
+    - Within a single run, **1,179 of 1,240** candidate checkpoint-and-depth
+      combinations sit within one accuracy point of the best. Ninety-five percent
+      of the grid is indistinguishable.
+    - Over the same grid, warning coverage spans a median fold range of
+      **692x**.
+
+    At the reported depth alone, over the 40 saved checkpoints of one run, answer
+    recall runs from 0.9907 to 1.0000 while warning coverage runs from 0.0042 to
+    0.0437, a factor of ten.
+
+    An AUC row is pending: it needs a checkpoint-by-checkpoint scoring pass, which
+    is running at the reported depth.
+
+    ```bash
+    # every saved checkpoint of one depth, each into its own directory with its
+    # own provenance, so the checkpoint behind each number can be named
+    sbatch --time=08:00:00 cluster/score_selected_depths.sbatch \
+      outputs/<run>/latest "15:50 15:100 15:150 ... 15:2000" val
+    ```
+    """)
+    return
+
+
+@app.cell
+def _(mo):
     mo.md("""
     ---
     # Part 2. The experiments
@@ -1871,7 +1931,21 @@ def _(
             "id": "S0",
             "title": "How far do model-free signals get?",
             "runs": [],
-            "shell": ["sbatch cluster/baselines.sbatch"],
+            "shell": [
+                # The four scorers the labelling pipeline and the token ids can
+                # supply. No GPU, so this one runs anywhere.
+                "python scripts/score_baselines.py --build-root $BUILD --out-dir outputs/baselines",
+                "for b in repetition repetition_trailing rep_l lrs entropy; do"
+                " python scripts/evaluate_scores.py --run-dir outputs/baselines/$b; done",
+                # Activation self-similarity needs the cached hidden states, so
+                # it reads roughly 30 GB per split and goes through Slurm.
+                "sbatch cluster/activation_similarity.sbatch --split val",
+                "for d in outputs/baselines/actsim_*; do"
+                " python scripts/evaluate_scores.py --run-dir $d --splits val; done",
+                # What persistence would buy, on validation only.
+                "python scripts/evaluate_scores.py --run-dir outputs/baselines/repetition_trailing"
+                " --splits val --compare-persistence 1 4 16 64",
+            ],
             "axes": [],
         },
         {
@@ -2388,7 +2462,14 @@ def _(BY_ID, config_of, finished_rows, load_baseline_view, load_view, pd):
         return pd.DataFrame(records)
 
     def is_baseline(name):
-        return name in {"repetition", "entropy", "lrs"}
+        """Whether a configuration name belongs to a model-free scorer.
+
+        Matched by prefix rather than by an explicit list, so a scorer added to
+        `outputs/baselines/` appears on every table without being registered in
+        two places. The activation-similarity variants carry their layer and
+        window in the name, which is why they cannot be enumerated here.
+        """
+        return name.startswith(("repetition", "entropy", "lrs", "rep_l", "actsim"))
 
     # Columns read in the order the views are defined in, not in whatever order
     # the files happened to be loaded.
@@ -3378,16 +3459,32 @@ def _(mo):
     ---
     # S0. How far do model-free signals get?
 
-    Before asking what a probe can do, it is worth knowing what can be done with
-    no model at all. Three scorers go through the identical evaluator, see the
-    same answers, get their thresholds frozen the same way, and are reported in
-    the same four views.
+    Before asking what a probe can do, it is worth knowing what can be done
+    without training anything. Every scorer here goes through the identical
+    evaluator, sees the same answers, gets its thresholds frozen the same way,
+    and is reported in the same four views.
 
-    - **repetition**, a repetition score over a sliding window.
+    Which window a scorer reads is the axis that separates them, because a
+    monitor running alongside generation cannot see tokens that do not exist yet.
+
+    - **repetition**, one minus the type-token ratio over bigrams on a 256-token
+      window placed *ahead* of the token it labels. This is what the labelling
+      pipeline computes, and it is reported for reference only. No live system
+      could run it.
+    - **repetition_trailing**, the same statistic over the 256 tokens *ending* at
+      the token it labels. This is the causal form, and it is the one every
+      comparison uses.
+    - **rep_l**, the per-token repetition rate of the generation literature,
+      backward looking by construction, at l = 128.
     - **lrs**, the longest repeated substring, as a step at the position the
       repeat begins.
-    - **entropy**, the model's own predictive entropy, inverted, on the grounds
-      that a loop is confident rather than uncertain.
+    - **entropy**, the model's own predictive entropy averaged over the trailing
+      128 tokens and inverted, on the grounds that a loop is confident rather
+      than uncertain.
+    - **actsim**, the cosine similarity between the current hidden state and the
+      most similar recent one. Model-internal but untrained, so it is the sharpest
+      floor for a probe: it asks whether a learned direction beats simply noticing
+      that the residual stream has begun revisiting where it has been.
 
     This is the bar every later result has to clear.
     """)
@@ -3403,15 +3500,36 @@ def _(show_commands):
 @app.cell
 def _(mo):
     mo.md("""
-    **Before the table:** `repetition` is the only one of these three that can
-    actually spend a false-alarm budget. `lrs` and `entropy` both score an
-    answer by its single highest-scoring token, and almost every answer has
-    one: 81% of healthy answers tie at the top of `lrs`'s range, 98.6% for
-    `entropy`. A 1% budget cannot break a tie that size, so both scorers get
-    pushed to a threshold above their whole range and fire on nothing,
-    positives included. Their rows below read zero everywhere on purpose —
-    that is not a bug and not a sign they are secretly flawless, it means they
-    need a different aggregation before they can compete on this table at all.
+    **Before the table: which scorers can be operated at all.**
+
+    An answer is predicted positive when its first alarm is finite, which at
+    persistence 1 means its highest-scoring token reaches the threshold. So the
+    share of *healthy* answers tied at the very top of a scorer's range is a hard
+    floor on the false-alarm rate that scorer can be asked for. When that share
+    exceeds the budget, no threshold isolates a small enough slice: the solver
+    pushes the threshold past the top of the range and nothing fires anywhere,
+    positives included.
+
+    Those rows read zero across the board, and the accuracy column still reads
+    0.9703, which is just the share of the split that is negative. A row of
+    zeros beside a respectable accuracy is the signature of a scorer that never
+    fired, not of one that was almost right.
+
+    The evaluator reports this directly rather than leaving it to be inferred:
+    each entry in `decision_thresholds.json` carries `tied_at_ceiling` and a
+    `saturated` flag.
+
+    | scorer | healthy tied at ceiling | 1% | 5% | 10% |
+    |---|---|---|---|---|
+    | `repetition` (forward) | 0.03% | yes | yes | yes |
+    | `repetition_trailing` | 0.03% | yes | yes | yes |
+    | `rep_l`, l = 128 | 1.53% | **no** | yes | yes |
+    | `lrs` | 81.06% | **no** | **no** | **no** |
+    | `entropy`, trailing 128 | 0.03% | yes | yes | yes |
+
+    `lrs` is a step function to exactly 1.0, so four fifths of healthy answers
+    reach its ceiling and it cannot be operated at any budget in use here. It
+    stays on the table as the reason the protocol reports this quantity at all.
     """)
     return
 
@@ -3561,6 +3679,228 @@ def _(BASELINE_ROOT, mo, np, pd):
         )
 
     lookahead_cost()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### Why the entropy baseline needs a window
+
+    Inverted entropy is $1/(1+H)$, which is monotone decreasing in $H$ and lands
+    in $(0, 1]$ without needing a population to normalise against. Read per token
+    it is unusable, for a reason that has nothing to do with degeneration: a
+    single token drawn at near-zero entropy is completely ordinary in healthy
+    text. A closing bracket, the second half of a tokenised word, the digit after
+    a decimal point. Every one of those is near-certain, and one is enough to put
+    an answer at the top of the range.
+
+    On validation, **98.6% of healthy answers** contain a token whose entropy is
+    exactly zero to machine precision, so 98.6% tie at the ceiling and no budget
+    can be spent at any level.
+
+    Two things fix it, and both were needed.
+
+    **Average before inverting.** The score becomes $1/(1 + \bar{H}_w)$, where
+    $\bar{H}_w$ is the mean entropy over the trailing $w$ tokens. This asks
+    whether the model has been confident for a while, which is the property a
+    loop actually has, rather than whether it was ever confident once. Smoothing
+    the entropy and inverting afterwards is preferred over the reverse only
+    because the average is then taken on the quantity the model reports, in nats.
+    The two orders agree to four decimal places.
+
+    The width is not a free parameter. It is the narrowest one that brings the
+    tied share under a 1% budget, which also happens to be the lookback `rep_l`
+    already uses, so the two per-token signals share a scale.
+
+    | trailing width | healthy tied at ceiling | 1% budget spendable |
+    |---|---|---|
+    | none (per token) | 98.56% | no |
+    | 32 | 4.78% | no |
+    | 64 | 1.70% | no |
+    | **128** | **0.23%** | **yes** |
+    | 256 | 0.06% | yes |
+
+    **Store the scores at single precision.** Half precision has a spacing of
+    about $5 \times 10^{-4}$ just below one, so every score within that distance
+    of the top of the range collapses onto it. That is enough to move the
+    windowed entropy score from 0.23% of healthy answers tied at its ceiling to
+    1.25%, which is the difference between a 1% budget that can be spent and one
+    that cannot. Ties at a ceiling are exactly what the protocol reports as a
+    failure, so storing at half precision manufactures the failure. Scores are
+    written as `float32`.
+
+    Nothing else on the table was close enough to the ceiling for the storage
+    width to matter. The probe scores never approach it, and the ties in `rep_l`
+    and `lrs` are real: `rep_l` is a mean of indicators that can be exactly one,
+    and `lrs` is a literal step to one.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### What an answer-level number is measuring on this corpus
+
+    Every positive is by definition an answer that reached the 4096-token cap,
+    and healthy answers have a median length of 475. Any rollout score formed as
+    a maximum over tokens therefore rises with length, and the classes separate
+    before any model is consulted.
+
+    The size of this is easy to underestimate. **Answer length alone reaches an
+    answer-level AUC of 0.9992 on validation.** The windowed entropy score
+    reaches 0.9917 at $w = 128$ and 0.9960 at $w = 256$, so on the whole
+    population it scores slightly *worse* than a ruler.
+
+    Two controls separate length from what a scorer knows.
+
+    Restricting the healthy population to long answers weakens the effect but
+    does not remove it, and length still wins on every one of those populations:
+
+    | healthy answers kept | windowed entropy | length alone |
+    |---|---|---|
+    | all | 0.9843 | 0.9982 |
+    | at least 1000 tokens | 0.9588 | 0.9918 |
+    | at least 1500 tokens | 0.9167 | 0.9639 |
+    | at least 2000 tokens | 0.7528 | 0.8846 |
+
+    Judging every answer on an equal-length prefix removes it entirely. Scored on
+    its first 128, 256 or 474 tokens, the windowed entropy score reaches AUC 0.45,
+    0.48 and 0.53. That is chance.
+
+    **What this licenses, and what it does not.** It is a consequence of how the
+    label is built rather than something learned about degeneration, it would move
+    with the cap, and no manual inspection has been done. It does not support the
+    claim that length is uninformative about degeneration. The defensible
+    statement is narrow: under this label definition an answer-level ranking is
+    partly a ranking by length, so it must not be used to choose a threshold, a
+    depth or a recipe.
+
+    Answer-level figures are still reported, because the paper claims they are
+    saturated and that claim has to be made with the quantity in hand. Which of
+    them is saturated and which is not turns out to depend on the metric, and is
+    measured in Part 6: accuracy and AUC are, average precision is not, and
+    accuracy on a balanced set is inverted. Nothing is ever selected on any of
+    them.
+
+    This does not touch the token-level work. Warning coverage is measured inside
+    degenerate answers against healthy tokens at matched absolute position, so it
+    already controls for the confound above. Keeping that separation visible is
+    the whole reason coverage is split at the frontier rather than pooled.
+
+    **The same gate appears in the literature.** Two of the four recent loop
+    detectors require the generation to reach its token limit before a loop
+    counts: Yu et al. only score a response that hits `max_new_tokens`, and
+    LoopGuard requires length at least 2480 against a 2500-token maximum. Duan et
+    al. and Xie et al. do not. So this is a caution about the measurement
+    conventions of the area, not about this corpus alone.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Activation self-similarity: the floor a probe really has to clear
+
+    A repetition counter is a floor, but a weak one, because it reads the text
+    rather than the model. The sharper question is whether a *trained* direction
+    beats simply noticing that the model's own hidden states have started
+    revisiting where they have already been.
+
+    That needs no training. At each token, take the cosine similarity between the
+    current hidden state and each of the previous ones inside a trailing window,
+    and keep the largest. It is scored through the same interface as everything
+    else, so it lands in the same four views.
+
+    Read at one layer, so the cost is one strided read per rollout rather than a
+    forward pass. The cache stores `[33, tokens, 4096]` per answer with the layer
+    axis outermost, so a single layer is one contiguous block and asking for six
+    of them costs little more than asking for one.
+
+    **This is not Yu et al.'s detector, and should not be named for it.** Theirs
+    collects per-token maxima of activation similarity across the decoder's MLP
+    layers, sorts them, concatenates the sorted and unsorted vectors, and passes
+    the result to a three-layer network that scores a whole response after a
+    400-token warm-up. What is shared is the primitive, not the method.
+
+    The minimum lag matters and is swept rather than assumed. Neighbouring
+    residual streams are similar for reasons unrelated to a loop, so a scorer
+    comparing a token only to its immediate predecessor reports that similarity
+    everywhere. Lags of 1, 16 and 64 are computed in the same pass.
+
+    One detail worth not rediscovering: the first `min_lag` tokens have nothing
+    behind them to be similar to, and they are scored at the *bottom* of the
+    range rather than at zero similarity. Zero cosine maps to the middle of the
+    unit interval, which would make every answer alarm on its own opening tokens.
+
+    On a three-answer smoke test the signal is real: healthy answers sit at a
+    median of 0.91, and inside a loop the median is 0.992, with the pre-onset
+    stretch of the same answer at 0.905.
+    """)
+    return
+
+
+@app.cell
+def _(BASELINE_ROOT, mo, pd):
+    def persistence_sweep(scorer="repetition_trailing"):
+        """What requiring m consecutive tokens above threshold buys."""
+        path = BASELINE_ROOT / scorer / "evaluation" / "persistence_comparison.csv"
+        if not path.is_file():
+            return mo.md(
+                f"_`{scorer}` has no persistence comparison yet. Run "
+                "`evaluate_scores.py --compare-persistence 1 4 16 64`._"
+            )
+        frame = pd.read_csv(path)
+        keep = [
+            column
+            for column in (
+                "persistence",
+                "target_negative_fpr",
+                "tau",
+                "median_offset",
+                "never_fired_positives",
+            )
+            if column in frame.columns
+        ]
+        return mo.ui.table(frame[keep], selection=None)
+
+    mo.vstack(
+        [
+            mo.md(
+                """
+                ### What persistence would buy
+
+                Every number reported anywhere in this project uses persistence
+                $m = 1$: one token at or above the threshold is an alarm. That is
+                the most twitchy rule available, and it is a stated choice rather
+                than an assumption, so it is worth knowing what the alternative
+                is worth.
+
+                Requiring $m$ consecutive tokens above the threshold lets the
+                threshold itself relax at the same false-alarm budget, because a
+                sustained run is rarer than a spike. The alarm then arrives
+                *earlier*, not later.
+                """
+            ),
+            persistence_sweep(),
+            mo.md(
+                """
+                At a 10% budget the trailing repetition score's median alarm moves
+                from 31 tokens after the frontier at $m = 1$ to 6 tokens before it
+                at $m = 64$. `rep_l` gains something else: at $m = 64$ it can
+                spend a 1% budget for the first time, because requiring 64
+                consecutive tokens above threshold breaks the ties at its ceiling
+                that block it at $m = 1$.
+
+                So $m = 1$ is conservative rather than flattering. Persistence
+                belongs in the appendix as a sweep, and the main results stay at
+                $m = 1$ so that one fewer thing varies between them.
+                """
+            ),
+        ]
+    )
     return
 
 
@@ -7530,6 +7870,280 @@ def _(mo):
 def _(mo):
     mo.md("""
     ---
+    # Part 6. What the nearest prior work actually measures
+
+    Every figure this project attributes to another paper was checked against
+    that paper's own text, not against a summary of it. The reason to record it
+    here is that two of the claims are load-bearing: the paper argues that the
+    metric this area reports is saturated, and that the works nearest to it read
+    the final layer. Both needed checking before anything was built on them.
+
+    `docs/paper/references.bib` carries the verified figures as comments on each
+    entry, so none of this has to be re-derived from a secondary reading.
+
+    ## What the four nearest detectors measure, and where
+
+    | | unit measured | representation | decoding | needs the token cap |
+    |---|---|---|---|---|
+    | Duan et al. 2026 | **sentence** (statement loops), token (numerical) | mean of last-layer states | greedy | no |
+    | Xie et al. 2025 | **chunk**, at the double-newline boundary | output of the final block | temperature 0 | no |
+    | Yu et al. 2025 | **whole response** | MLP activation similarity, **every** decoder layer | temperature 0 | **yes**, `max_new_tokens` |
+    | LoopGuard 2026 | per decoding step, window 256 | none, it is a text statistic | not stated | **yes**, length $\geq$ 2480 of 2500 |
+
+    Two consequences follow, and both changed how the paper is written.
+
+    **"Answer-level" is wrong as a description of this literature.** Only Yu et
+    al. classify a whole response. Duan et al. work per sentence and per token,
+    Xie et al. per chunk. The saturation claim is real but it is about accuracy
+    on *units drawn from inside the loop*, whatever the unit is, because in every
+    case the unit population is dominated by tokens already deep in the pattern.
+    That is the phrasing to use.
+
+    **The final-layer claim holds only for the probes.** Duan et al. take the
+    mean of last-layer hidden states, and Xie et al. read the output of the final
+    transformer block. Both confirmed. Yu et al. do not: they build features from
+    activation similarities across every decoder layer and feed them to a
+    three-layer network, so they are a different kind of method rather than a
+    counterexample. The depth argument is scoped to work that trains a probe on a
+    hidden state.
+
+    Duan et al. do run a layer-wise analysis, but it is descriptive, reporting
+    cosine similarity and L2 distance across depth. Probe quality is never
+    reported as a function of depth, which is what the depth result here is about.
+
+    ## Is the reported metric actually saturated? Measured at their units
+
+    Measured rather than asserted, at each of the three granularities, on
+    validation, from the same stored per-token scores everything else uses. A unit
+    is positive when it begins at or after the frontier; units from healthy
+    answers are all negative. AUC is on the natural population. Accuracy is the
+    best achievable on an equal-sized subsample of the two classes, which is the
+    most generous reading of what a balanced test set reports.
+
+    The units match the granularities of the nearest prior work. The *operators*
+    do not reimplement anyone's detector, and
+    `degeneration_probe/analysis/unit_levels.py` states where they differ: the
+    chunk reading is faithful, the sentence reading is a proxy, and the answer
+    reading is this project's own maximum over tokens.
+
+    ```bash
+    python scripts/unit_level_saturation.py --split val   --build-root $BUILD --tokenizer $TOKENIZER_JSON   --scores "recipe/S1 #1 rollout_balanced W=128 @L15=outputs/<run>/latest/layers/layer_15/scores/val.parquet" ...
+    ```
+
+    Names split at the last `=`, because a recipe label contains one. Written to
+    `outputs/analysis/unit_level_saturation_val.csv`, which is what
+    `notebooks/paper.py` reads.
+
+    **Twelve leading recipes, each at the depth it was selected at.** Selection
+    strategy, window width, label family, horizon and class balance all vary
+    across these rows.
+
+    | recipe | sent. AUC | sent. acc | chunk AUC | chunk acc | answer AUC | answer acc |
+    |---|---|---|---|---|---|---|
+    | S1 #1 rollout_balanced W=128 @L15 | 0.9962 | 0.9711 | 0.9956 | 0.9679 | 0.9998 | **1.0000** |
+    | S1 #2 frontier_window W=256 @L15 | 0.9943 | 0.9688 | 0.9946 | 0.9645 | 0.9996 | 0.9907 |
+    | S2b #1 soft exp/256 @L15 | 0.9936 | 0.9676 | 0.9942 | 0.9628 | 0.9996 | 0.9907 |
+    | S2a #2 all_tokens h=1024 @L15 | 0.9932 | 0.9689 | 0.9938 | 0.9629 | 0.9997 | 0.9954 |
+    | S2b #2 soft linear/256 @L15 | 0.9930 | 0.9668 | 0.9937 | 0.9607 | 0.9995 | 0.9907 |
+    | S2b #3 soft exp/128 @L15 | 0.9928 | 0.9668 | 0.9935 | 0.9597 | 0.9995 | 0.9907 |
+    | S2a #1 frontier W=512 h=256 @L15 | 0.9925 | 0.9657 | 0.9933 | 0.9592 | 0.9994 | 0.9907 |
+    | S2a #3 frontier W=512 trail h=512 @L15 | 0.9909 | 0.9633 | 0.9916 | 0.9554 | 0.9993 | 0.9907 |
+    | S1 #3 hard_negative W=128 @L4 | 0.9892 | 0.9580 | 0.9834 | 0.9429 | 0.9991 | 0.9954 |
+    | S2d #2 pos_weight off @L4 | 0.9892 | 0.9585 | 0.9833 | 0.9389 | 0.9988 | **1.0000** |
+    | S2d #3 positive_fraction 0.5 @L4 | 0.9886 | 0.9580 | 0.9806 | 0.9319 | 0.9984 | **1.0000** |
+    | S2d #1 pos_weight on @L4 | 0.9878 | 0.9556 | 0.9802 | 0.9337 | 0.9984 | 0.9907 |
+
+    Range across all twelve: **0.0084** sentence AUC, **0.0154** chunk,
+    **0.0014** answer. At answer level three of the twelve reach accuracy exactly
+    1.0000. Warning coverage separates these same twelve recipes clearly, which is
+    what the stages above are about, so this is the claim in its strongest form:
+    the quantity cannot rank the recipes at all.
+
+    **One recipe, read at every depth it was scored at.**
+
+    | depth | sent. AUC | sent. acc | chunk AUC | chunk acc | answer AUC | answer acc |
+    |---|---|---|---|---|---|---|
+    | layer 12 | 0.9924 | 0.9648 | 0.9930 | 0.9616 | 0.9991 | 0.9861 |
+    | layer 8 | 0.9890 | 0.9589 | 0.9898 | 0.9573 | 0.9984 | 0.9954 |
+    | layer 20 | 0.9886 | 0.9592 | 0.9888 | 0.9518 | 0.9984 | 0.9907 |
+    | layer 4 | 0.9878 | 0.9556 | 0.9802 | 0.9337 | 0.9984 | 0.9907 |
+    | layer 30 | 0.9841 | 0.9501 | 0.9713 | 0.9300 | 0.9876 | 0.9722 |
+
+    Range 0.0083 sentence AUC, 0.0217 chunk, 0.0115 answer, over depths whose
+    coverage of the run-up differs by an order of magnitude. Most of even that
+    comes from layer 30; layers 4 to 20 span 0.0046 at sentence level.
+
+    **Model-free scorers, for scale.**
+
+    | scorer | sent. AUC | chunk AUC | answer AUC |
+    |---|---|---|---|
+    | entropy, trailing 128 | 0.9150 | 0.9042 | **0.9915** |
+    | repetition, trailing | 0.8983 | 0.8821 | 0.8943 |
+    | repetition, forward | 0.8775 | 0.8699 | 0.9027 |
+    | rep_l, l=128 | 0.8695 | 0.8223 | 0.8676 |
+    | lrs | 0.6968 | 0.6645 | 0.5947 |
+
+    **What this settles.** The quantity is not uninformative: it separates a probe
+    from a text statistic by twenty to thirty points, and the model-free rows
+    spread over 0.22 to 0.40 AUC where the probe rows spread over 0.001 to 0.02.
+    It is saturated across exactly the choices that decide early warning while
+    remaining sensitive to whether a scorer works at all. So it belongs in the
+    protocol as a floor to clear, and it cannot be used as a ranking or to select
+    a depth.
+
+    **The numbers land where the published ones do**, which is the evidence for
+    taking those results as settled and reproducing them rather than disputing
+    them. Xie et al. report 89.8 to 93.5% accuracy at chunk level and these
+    recipes reach 93.2 to 96.8%. Duan et al. report 0.998 to 1.000 AUC at sentence
+    level and these reach 0.988 to 0.996. Yu et al. report 95.24% accuracy per
+    response and these reach 99.1 to 100%.
+
+    **The answer unit is the one length contaminates.** Windowed entropy reads
+    0.9915 AUC per answer and 0.90 to 0.92 per sentence or chunk. It is the only
+    scorer whose ranking improves markedly as the unit grows, which is what a
+    length artefact looks like: a maximum over tokens accumulates with length, and
+    only the answer unit is free to grow. The shorter units do not have that
+    freedom, which is a second reason to prefer them.
+
+    Two caveats on the measurement. The probe rows cover 3,634 of the 3,640
+    validation answers, because that is what the probe score files hold. And these
+    probe numbers are **unattributed**: the score directories carry no
+    `scoring_provenance.json`, so the checkpoint behind them cannot be named.
+    `scripts/audit_score_provenance.py` reports 371 of 377 scored directories in
+    that state, five of which are model-free baselines with no checkpoint to
+    record.
+
+    ## Which answer-level metric is saturated, and which is not
+
+    The saturation claim is about the quantity other work reports, so it has to be
+    made with that quantity in hand rather than asserted about it. Measured on our
+    own probes, at answer level, on validation: 108 degenerate answers of 3,634.
+
+    Start with the floor. The positive rate is 2.97%, so **a scorer that fires on
+    nothing already scores 0.9703 accuracy**. That is the number every accuracy below
+    has to be read against, and it is most of the way to the best probe.
+
+    **The twelve leading recipes, each at its own selected depth:**
+
+    | | AUC | AP | accuracy | balanced acc |
+    |---|---|---|---|---|
+    | best | 0.9998 | 0.9929 | 0.9986 | 1.0000 |
+    | worst | 0.9984 | 0.9552 | 0.9934 | 0.9907 |
+    | **range** | **0.0014** | **0.0377** | **0.0052** | 0.0093 |
+
+    One recipe across five depths: AUC range 0.0115, AP range **0.1662**, accuracy
+    range 0.0107.
+
+    **Two of the three are saturated, and one is not.** Accuracy is nearly inert: the
+    whole distance between firing on nothing and the best probe is 2.8 points, and the
+    longest-repeated-substring scorer, which never fires at any budget in use here,
+    scores 0.9703 and therefore lands within 2.8 points of the best probe. AUC moves
+    by 0.0014 across twelve recipes that differ in selection rule, window width, label
+    family, horizon and class balance.
+
+    Average precision is the exception, and it is worth understanding why. With
+    positives at 3% of the split, AUC is dominated by the enormous mass of easy
+    negatives, while average precision reads the top of the ranking, which is the only
+    part anything is decided on. It spans 27 times the AUC range across recipes and 14
+    times it across depths.
+
+    **Does the one with dynamic range actually rank correctly?** Against warning
+    coverage 256, the rule's own objective:
+
+    | metric | Spearman, recipes | picks | cost | Spearman, depths | cost |
+    |---|---|---|---|---|---|
+    | AUC | 0.580 | S1 #1 | 1.50x | 0.400 | 1.16x |
+    | accuracy | 0.607 | S1 #1 | 1.50x | 0.700 | 1.16x |
+    | balanced accuracy | **-0.509** | S1 #1 | 1.50x | 0.205 | 1.39x |
+    | average precision | 0.657 | **S2a #2** | **1.00x** | 0.400 | 1.16x |
+
+    Average precision picks the best recipe. It does not repeat that on the depth
+    axis, where it chooses layer 12 against warning coverage's layer 4, and its rank
+    correlation is 0.657 and 0.400, which is not the agreement of a substitute. The
+    recipe hit is best read as inside the noise: the top two recipes are separated by
+    0.0001 in warning coverage.
+
+    **Balanced accuracy is worse than uninformative, it is inverted.** Its rank
+    correlation with warning coverage is negative, because three of the recipes with
+    the *lowest* coverage of the run-up reach exactly 1.0000. That matters beyond this
+    project: Duan et al. and Xie et al. both report accuracy on balanced test sets.
+
+    So the claim to make is narrower and stronger than "answer-level metrics are
+    saturated". The metrics this literature reports, accuracy and AUC, are saturated
+    and mis-rank, and accuracy on a balanced set anti-correlates with what is wanted.
+    Average precision keeps its dynamic range and nobody reports it.
+
+    **A bug found while adding these.** The sweep behind every threshold-based metric
+    here allowed a cut *inside* a group of equal scores, which no threshold can do,
+    and so flattered accuracy and average precision wherever ties were common. All
+    four metrics now run off one tie-aware sweep over distinct score values, checked
+    against scikit-learn and against brute force with heavy ties. The probe figures
+    did not move, since a float32 score is effectively continuous; a step-function
+    scorer like the longest repeated substring is where it would have shown.
+
+    ## Figures confirmed
+
+    - Duan et al.: early detection rate 0.64 to 0.76, false positive rate 0.24 to
+      0.34, 36.5 to 51.4 sentences and **1305.9 to 1870.2 tokens** of lead.
+      Linear, SVM and MLP classifiers reach 0.991 to 0.999 accuracy and 0.998 to
+      1.000 AUC. Greedy decoding. Balanced test sets of at least 50 loop and 50
+      non-loop cases per model, with 50 non-loop instances held for calibration.
+      Loop labels are $k \cdot l > 500$ tokens, or more than three sentence
+      repetitions.
+    - Xie et al.: at temperature 0 on Qwen-7B, **89.77 to 93.52% accuracy and
+      95.84 to 98.63 AUROC** across four benchmarks. At temperature 0.6 accuracy
+      falls as low as 77.96%. Chunks are labelled by embedding similarity at 0.99
+      using all-MiniLM-L6-v2. Their appendix tracks one problem over 221 chunks
+      with the classifier score rising from 1.19e-10 to 1.000, which is the
+      evidence that detection strength grows *inside* a loop rather than before it.
+    - Yu et al.: 95.24% accuracy, 0.87 F1, 2.59% false positive rate, 82.88%
+      recall, averaged over six models. A **400-token warm-up** is required before
+      the detector can fire, chosen as the 78th percentile of response length.
+      Roughly 680 test responses.
+    - LoopGuard: type-token ratio at most 0.2, compression ratio at most 0.12,
+      length at least 2480. Sliding window of **256 tokens**. Online trigger is a
+      debounced three-way vote plus a top-1 probability streak, 0.9 for six steps.
+    - Kramár et al.: the short-to-long-context shift is the paper's stated
+      problem, and it proposes architectures for it.
+
+    ## Figures that did not hold
+
+    - Duan et al.'s token lead time tops out at **1870**, not 2000.
+    - Xie et al.'s AUROC tops out at **98.63**, not 99, and the accuracy range
+      comes from one model across four benchmarks rather than from several models.
+    - `rep_l` is not "the share of tokens already occurring in the previous $l$
+      tokens". Welleck et al. define it on the model's **argmax next-token
+      prediction**. At temperature 0.7 the two differ, so the baseline here is a
+      variant and says so where it is introduced.
+
+    ## Metadata that was wrong
+
+    Four entries had invented authors or titles, which is worth knowing as a
+    pattern rather than as four separate slips.
+
+    - LoopGuard's given names were wrong throughout. The authors are Dongjie Xu,
+      Hao Wu, Weijie Shi, Yue Cui and others.
+    - The Look-back paper had both a wrong title and wrong authors. It is
+      "Look-back Decoding for Open-Ended Text Generation" by Xu, Zhou,
+      Celikyilmaz and Ma, EMNLP 2023, pages 1039 to 1050.
+    - "Learning to Break the Loop" had four of six authors wrong.
+    - Tian Lan appeared as "Yixuan Lan"; Bin Gu appeared as "Qiaoyu Gu".
+
+    ## What could not be checked
+
+    SpecRA is behind a bot check on OpenReview. Its authors, venue and acceptance
+    status are unverified and none of its mechanism should be quoted. Its public
+    summary claims *theoretical* false-positive bounds, so the claim that no
+    deployed rule reports a false-alarm rate against an independent reference has
+    to be narrowed to empirical rates.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ---
     # Appendix
 
     ## Running any of this
@@ -7593,6 +8207,20 @@ def _(mo):
     through `sbatch`. File listings, `git`, the unit tests and
     `evaluate_scores.py` are fine directly.
 
+    **Ask for the walltime a job needs, not a round number.** The queue is the
+    binding constraint, and a short job is backfilled into a gap that a long one
+    waits behind, so padding a limit costs hours of waiting rather than buying
+    safety. Measured from completed jobs, a scoring pass is about **eight minutes
+    of container and model startup plus three minutes per layer or checkpoint**:
+    three layers land in 14 to 18 minutes, seven in 25. So eight pairs fit inside
+    40 minutes and forty do not fit inside three hours.
+
+    Split a long list rather than raising the limit. Forty checkpoints as four
+    jobs of ten, each asking 45 minutes, start far sooner than one job asking
+    three hours, and the first results arrive while the rest are still queued.
+    `sacct -u $USER --format=JobID,JobName%34,Elapsed,State,Timelimit` is where the
+    numbers above come from, and is the thing to re-check before assuming them.
+
     **Two Python environments.** `.venv/bin/python` at the repo root runs the
     tests and the cheap analysis scripts. Cluster jobs run inside a container
     described by `cluster/env.toml`, built from `cluster/Dockerfile` via
@@ -7622,6 +8250,31 @@ def _(mo):
     checkpoints both call them, which is what makes the two agree by
     construction rather than by care.
 
+    **Scores are stored at single precision, and that is load-bearing.** Half
+    precision has a spacing of about $5 	imes 10^{-4}$ just below one, so any
+    score within that distance of the top of the range collapses onto it. Ties at
+    a scorer's ceiling are what make a small false-alarm budget unspendable, so
+    half precision manufactures the failure the protocol reports. The cast lives
+    in three places and all three matter: `build_scores`, and the record built by
+    each of `score_baselines.py` and `score_rollouts.py`.
+
+    **The labelling pipeline's repetition score reads the window *ahead* of the
+    token it labels**, over $[t,\ t+256)$. That is correct for annotating a
+    finished answer and impossible for a live monitor. Use
+    `repetition_trailing` for any comparison against a probe; `repetition` stays
+    on the tables as the reference row that shows what the lookahead is worth.
+    Nobody else made this mistake, so it is not a criticism of the literature.
+
+    **`llama_nemotron` is code.** It is the `code` split of the Llama-Nemotron
+    SFT set, which the domain name does not say. So the in-domain corpus contains
+    a code source and `codeforces`, held out, is a second one. The held-out
+    result is a test of generalisation across sources *within code*, not across
+    kinds of text.
+
+    **`test_indomain` has never been scored for any probe.** The baselines have
+    it, because a model-free scorer fits nothing and so cannot leak. Do not touch
+    it for a probe without deciding to spend it.
+
     **Known traps.**
 
     - A trailing window with horizon 0 contains no positive token. The dataset
@@ -7648,10 +8301,107 @@ def _(mo):
     - `run_info.json` does not record the positive fraction or the decay length,
       so those are read back out of `resolved_config.json`.
 
+    **A capped answer the judge could not rule on belongs to neither class, and
+    two code paths used to disagree about that.** The onset table marks 72 capped
+    answers with no resolved onset: 63 `judge_failed`, 1 `not_found`, and 8
+    `not_degenerating`. Only the last 8 were actually ruled on, and they are
+    legitimately negative. The other 64 are unknown.
+
+    The pinned evaluation population already left the unknown ones out, so a probe
+    reads 3,634 validation answers, 108 degenerate and 3,526 negative, and every
+    probe number and every replayed checkpoint has always been measured on that.
+    The model-free baselines did not: they build their population from the onset
+    label table directly, which put 6 unjudged answers from `if_sft_data_verified`
+    among the healthy ones on validation.
+
+    Those 6 are not borderline. All reached the 4096-token cap, and their peak
+    trailing repetition score has a median of 0.804, above the median of the
+    confirmed positives (0.741) and above the 99th percentile of answers that ended
+    at an end-of-sequence token (0.756). At a 1% budget the trailing repetition
+    score raised 35 false alarms and 4 of them were these answers; for windowed
+    entropy it was 5 of 35. So more than a tenth of the tightest operating point
+    was being spent on answers that are probably positives, which lifted the
+    threshold and suppressed everything measured above it.
+
+    Excluding them moved the baselines and nothing else:
+
+    | at a 1% budget | trailing repetition | windowed entropy |
+    |---|---|---|
+    | recall | 0.4815 to 0.4907 | 0.5370 to **0.6852** |
+    | in-pattern | 0.4303 to 0.4328 | 0.1582 to 0.2283 |
+    | warning 256 | 0.0291 to 0.0313 | 0.0039 to 0.0055 |
+    | never fired | 56 to 55 | 50 to **34** |
+
+    Small for a scorer whose healthy scores are spread out, large for one whose
+    scores bunch near the ceiling.
+
+    The exclusion now lives in one place, `read_scores`, keyed on the resolution
+    rather than on whether an answer reached the cap, so the two paths cannot
+    diverge again. `evaluate_scores.py` finds the label table from the run's own
+    configuration and refuses to run when it cannot, rather than quietly keeping
+    the old population; `--keep-unjudged` reproduces a number measured before the
+    change.
+
+    **Scoring inherits a filter that belongs to training, and it is not
+    exhaustive.** `score_rollouts.py` builds its rollout list from the training
+    dataset, which drops any rollout the label family cannot label: first when
+    `derive_targets` returns nothing, then when the resulting target array holds no
+    finite value. Both are right for training, since there is nothing to learn from
+    such a rollout. Neither is right for scoring, where a probe can score any token
+    and the false-alarm rate is a rate over the whole healthy population.
+
+    For the frontier families the two effects coincide harmlessly: the dropped
+    rollouts are the capped ones with no resolved onset, which is why a probe table
+    holds 3,634 of 3,640 validation answers and why those tables were already on the
+    right population. For the `token_signal` family it does real damage. The
+    labelling pipeline's repetition score is NaN wherever a full 256-token window
+    does not fit, so an answer shorter than the window has no score anywhere, and
+    **846 validation answers, all of them negative, are silently dropped**. That is a
+    quarter of the healthy population and it is biased toward short answers, which
+    are the easiest negatives. Every threshold solved on such a table is solved over
+    a population missing its easy cases.
+
+    Nine score directories are affected, all of them the regression recipe under
+    LoRA-all across three seeds, so nothing reported here reads from them. The
+    in-flight LoRA reruns include that arm and will reproduce it unless scoring stops
+    reusing the training dataset's filter.
+
+    `evaluate_scores.py` now compares a scored table against the split it claims to
+    cover, prints how many rollouts are missing, and records the shortfall in
+    `decision_thresholds.json` so the fact travels with the numbers instead of being
+    invisible. That guarantee was stated in a docstring and never checked.
+
+        **A cross-corpus directory must be told which corpus it describes.** Scores
+    under `cross_model/` or `lora_transplant/` were computed against another model's
+    build, while the `resolved_config.json` above them names the build the run was
+    *trained* on. Which rollouts a judge could not rule on differs between corpora,
+    so reading the nearer configuration drops the wrong rollouts: applying the
+    Apertus exclusions to the Apertus 1.5 tables removed 5 and 6 legitimate
+    rollouts, one of them a positive, which moves a recall denominator.
+
+    Those tables already leave their own unjudged rollouts out at scoring time, so
+    the correct additional exclusion for them is empty: 3,621 of 3,640 scored for
+    one target and 3,595 of 3,640 for the other. `evaluate_scores.py` now refuses to
+    guess a label table for any path under those two markers and asks for
+    `--onset-labels`, rather than silently reading the one next door.
+
+    The 72 directories under `cross_model/_superseded_pilot1024/` have no label table
+    at all. They are evaluated with `--keep-unjudged` so they stay internally
+    consistent, and they are on a superseded build, so nothing in the paper should
+    read from them.
+
+        **Count a population by resolution, not by stop reason.** On validation the
+    number of answers that ended at an end-of-sequence token is 3,526, which is
+    exactly the pinned negative count, so the two agree by coincidence. On
+    `test_indomain` they do not: 3,514 against the correct 3,520, because that
+    split holds 6 answers the judge ruled healthy and 13 it could not rule on, and
+    only the second group should go.
+
     **Where else to look.** `notebooks/inspect_runs.py` is the inventory of
     every run regardless of experiment. `notebooks/rollout_metric_explorer.py`
     plots a single answer's metrics against its frontier, which is the fastest
-    way to sanity-check a label by eye.
+    way to sanity-check a label by eye. `notebooks/paper.py` builds every table
+    and figure the paper prints, so no number in it is typed by hand.
     """)
     return
 

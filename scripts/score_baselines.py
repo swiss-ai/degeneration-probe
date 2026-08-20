@@ -11,9 +11,15 @@ Monotone is all that is required: rank metrics are invariant to it, and every
 threshold is chosen on validation data anyway, so the transform sets no
 operating point of its own.
 
-    repetition   a windowed repetition score, rising as text repeats
-    entropy      the model's own predictive entropy, inverted, since
-                 degeneration is confident rather than uncertain
+    repetition   the labelling pipeline's windowed repetition score, whose
+                 window reads ahead of the token it labels. Reported for
+                 reference only: a live monitor cannot see those tokens
+    repetition_trailing
+                 the same statistic over the window that ends at the token it
+                 labels, which is the causal form of it
+    entropy      the model's own predictive entropy, averaged over a trailing
+                 window and inverted, since degeneration is confident rather
+                 than uncertain
     lrs          the longest-repeated-substring match, as a step from the
                  position where the repeat begins
     rep_l        the standard per-token repetition rate of the generation
@@ -41,11 +47,22 @@ if str(REPO_ROOT) not in sys.path:
 
 from degeneration_probe.evaluation.scores import build_scores, write_scores
 
-BASELINES = ("repetition", "entropy", "lrs", "rep_l")
+BASELINES = ("repetition", "repetition_trailing", "entropy", "lrs", "rep_l")
 # Welleck et al. report rep/l at l = 128, and the trailing average is taken over
 # the same width so the score has one scale rather than two.
 REP_L_LOOKBACK = 128
 REP_L_WINDOW = 128
+# Entropy is averaged over a trailing window before it is inverted. Without a
+# window the score is a per-token quantity whose maximum over a rollout is
+# reached by any single confident token, and almost every healthy answer
+# contains one: 98.6% of healthy validation answers sit exactly at the ceiling,
+# which leaves no false-alarm budget to spend at any level. 128 is the narrowest
+# width that brings that share under 1%, and it is the width rep/l already uses,
+# so the two model-free per-token signals share a scale.
+ENTROPY_WINDOW = 128
+# The labelling pipeline computes 1 - TTR over bigrams on a 256-token window, so
+# the trailing form uses the same width and the two differ only in direction.
+REPETITION_WINDOW = 256
 
 
 def repetition_scores(values, num_tokens: int) -> np.ndarray:
@@ -56,17 +73,93 @@ def repetition_scores(values, num_tokens: int) -> np.ndarray:
     return _fill_gaps(np.clip(scores, 0.0, 1.0))
 
 
-def entropy_scores(values, num_tokens: int) -> np.ndarray:
+def entropy_scores(values, num_tokens: int, window: int = ENTROPY_WINDOW) -> np.ndarray:
     """Inverted predictive entropy: a loop is confident, not uncertain.
 
     ``1 / (1 + H)`` is monotone decreasing in entropy and lands in (0, 1]
     without needing a population to normalize against, so a score does not
     change meaning when the split it was computed on does.
+
+    The entropy is averaged over the trailing ``window`` tokens before it is
+    inverted. A single token drawn at near-zero entropy is ordinary in healthy
+    text, so a per-token score reaches its ceiling almost everywhere and no
+    threshold can isolate a small share of healthy answers. Averaging first asks
+    whether the model has been confident for a while, which is the property a
+    loop actually has. Smoothing the entropy and inverting afterwards is
+    preferred over the reverse only because the average is then taken on the
+    quantity the model reports, in nats; the two orders agree to four decimal
+    places on validation.
     """
     entropy = np.full(num_tokens, np.nan, dtype=np.float64)
     supplied = np.asarray(list(values)[:num_tokens], dtype=np.float64)
     entropy[: supplied.size] = supplied
-    return _fill_gaps(1.0 / (1.0 + np.clip(entropy, 0.0, None)))
+    filled = _fill_gaps(np.clip(entropy, 0.0, None))
+    return 1.0 / (1.0 + _trailing_mean(filled, window))
+
+
+def _trailing_mean(values: np.ndarray, window: int) -> np.ndarray:
+    """The mean over the ``window`` positions ending at each one, inclusive.
+
+    Short prefixes average over what exists rather than over zeros, so the
+    opening tokens are not handed an artificially low value.
+    """
+    if window < 1:
+        raise ValueError(f"a trailing window must be at least one token, got {window}")
+    cumulative = np.concatenate([[0.0], np.cumsum(values)])
+    ends = np.arange(values.size) + 1
+    starts = np.maximum(0, ends - window)
+    return (cumulative[ends] - cumulative[starts]) / (ends - starts)
+
+
+def trailing_repetition_scores(
+    token_ids, num_tokens: int, window: int = REPETITION_WINDOW
+) -> np.ndarray:
+    """The windowed repetition score, over the window that has already happened.
+
+    The labelling pipeline scores position ``t`` with ``1 - TTR`` over the
+    bigrams of ``tokens[t : t + window]``. That is the right choice when
+    annotating a finished answer, where no token is privileged, and an
+    impossible one for a monitor running alongside generation, which at ``t``
+    has only the tokens up to ``t``. This is the same statistic over
+    ``tokens[t - window + 1 : t + 1]``.
+
+    Bigram counts are carried in a sliding multiset, so the whole signal costs
+    one pass rather than a rescan of the window at every position.
+    """
+    ids = np.asarray(list(token_ids)[:num_tokens], dtype=np.int64)
+    length = ids.size
+    scores = np.zeros(num_tokens, dtype=np.float64)
+    if length < 2:
+        return scores
+
+    counts: Dict[tuple, int] = {}
+    distinct = 0
+    for position in range(1, length):
+        entering = (int(ids[position - 1]), int(ids[position]))
+        previous = counts.get(entering, 0)
+        counts[entering] = previous + 1
+        if previous == 0:
+            distinct += 1
+
+        # The window holds the bigrams starting at [position - window + 1,
+        # position - 1], so one leaves as soon as the span is full.
+        leaving_index = position - window
+        if leaving_index >= 0:
+            leaving = (int(ids[leaving_index]), int(ids[leaving_index + 1]))
+            remaining = counts[leaving] - 1
+            if remaining:
+                counts[leaving] = remaining
+            else:
+                del counts[leaving]
+                distinct -= 1
+
+        total = min(position, window - 1)
+        scores[position] = 1.0 - distinct / total if total else 0.0
+
+    # Position 0 carries no bigram; it borrows the first defined value rather
+    # than reading as maximally diverse text.
+    scores[0] = scores[1]
+    return np.clip(scores, 0.0, 1.0)
 
 
 def lrs_scores(first_start: Optional[float], length: Optional[float], num_tokens: int) -> np.ndarray:
@@ -162,9 +255,10 @@ def build_baseline_scores(
     # Three baselines are precomputed columns of the label store. rep/l is not:
     # it is a function of the generated ids themselves, which live beside the
     # text rather than beside the labels.
-    source = "generations" if baseline == "rep_l" else "labels"
+    token_sourced = {"rep_l", "repetition_trailing"}
+    source = "generations" if baseline in token_sourced else "labels"
     columns = ["prompt_id", "rollout_idx"]
-    if baseline == "rep_l":
+    if baseline in token_sourced:
         columns += ["generated_token_ids"]
     elif baseline == "repetition":
         columns += ["repetition_score"]
@@ -192,6 +286,8 @@ def build_baseline_scores(
             tokens = int(row.num_tokens)
             if baseline == "rep_l":
                 scores = rep_l_scores(row.generated_token_ids, tokens)
+            elif baseline == "repetition_trailing":
+                scores = trailing_repetition_scores(row.generated_token_ids, tokens)
             elif baseline == "repetition":
                 scores = repetition_scores(row.repetition_score, tokens)
             elif baseline == "entropy":
@@ -215,7 +311,7 @@ def build_baseline_scores(
                     if pd.notna(row.onset_position)
                     else None,
                     "is_positive": positive,
-                    "scores": scores.astype(np.float16),
+                    "scores": scores.astype(np.float32),
                 }
             )
     return build_scores(records)

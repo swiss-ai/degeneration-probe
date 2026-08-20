@@ -203,7 +203,7 @@ def score_split(
                     "num_tokens": int(length),
                     "onset_position": float(onset) if pd.notna(onset) else None,
                     "is_positive": bool(labels["is_positive"]) and pd.notna(onset),
-                    "scores": scores.astype(np.float16),
+                    "scores": scores.astype(np.float32),
                 }
             )
     return build_scores(records)
