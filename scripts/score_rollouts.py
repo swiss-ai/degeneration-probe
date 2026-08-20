@@ -20,7 +20,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -128,7 +128,7 @@ def rollout_metadata(config: ExperimentConfig) -> pd.DataFrame:
 
 
 @torch.no_grad()
-def score_split(
+def _score_records(
     probe,
     config: ExperimentConfig,
     tokenizer,
@@ -136,8 +136,8 @@ def score_split(
     split: str,
     metadata: pd.DataFrame,
     batch_size: int,
-) -> pd.DataFrame:
-    """Run the probe over one split and return its score table."""
+) -> List[dict]:
+    """One record per rollout, each carrying ``[tokens, depths]`` of scores."""
     if tokenizer is None:
         dataset = create_cached_dataset(
             config.dataset,
@@ -179,6 +179,12 @@ def score_split(
         )
         logits = probe(**model_inputs)["probe_logits"]
         probabilities = torch.sigmoid(logits.float()).cpu().numpy()
+        # A probe over several depths returns one logit per depth from the same
+        # pass, so the trailing axis indexes the head rather than the token.
+        # Squeezed away for one depth, which keeps every single-depth caller
+        # reading the same two-dimensional array it always did.
+        if probabilities.ndim == 2:
+            probabilities = probabilities[..., None]
         for row in range(probabilities.shape[0]):
             start = int(batch["prompt_length"][row])
             length = (
@@ -186,7 +192,7 @@ def score_split(
                 if "features" in batch
                 else int(batch["attention_mask"][row].sum()) - start
             )
-            scores = probabilities[row, start : start + length]
+            scores = probabilities[row, start : start + length, :]
             prompt_id = batch["prompt_id"][row]
             rollout_idx = int(batch["rollout_idx"][row])
             labels = lookup.loc[(prompt_id, rollout_idx)]
@@ -206,7 +212,59 @@ def score_split(
                     "scores": scores.astype(np.float32),
                 }
             )
+    return records
+
+
+def score_split(
+    probe,
+    config: ExperimentConfig,
+    tokenizer,
+    *,
+    split: str,
+    metadata: pd.DataFrame,
+    batch_size: int,
+) -> pd.DataFrame:
+    """Run the probe over one split and return its score table."""
+    records = _score_records(
+        probe, config, tokenizer, split=split, metadata=metadata, batch_size=batch_size
+    )
+    for record in records:
+        record["scores"] = record["scores"][:, 0]
     return build_scores(records)
+
+
+def score_split_by_layer(
+    probe,
+    config: ExperimentConfig,
+    tokenizer,
+    *,
+    split: str,
+    metadata: pd.DataFrame,
+    batch_size: int,
+    layers: Sequence[int],
+) -> Dict[int, pd.DataFrame]:
+    """The same split scored at several depths, from a single pass over it.
+
+    A score file holds one score per token, so the depths cannot share one; what
+    they can share is the forward pass that produced them, which is the whole
+    cost. Scoring each depth separately would recompute an identical pass per
+    depth and discard all but one column of it.
+    """
+    records = _score_records(
+        probe, config, tokenizer, split=split, metadata=metadata, batch_size=batch_size
+    )
+    width = records[0]["scores"].shape[-1] if records else len(layers)
+    if width != len(layers):
+        raise ValueError(
+            f"the probe returned {width} depths but {len(layers)} were named; "
+            "the scores would be filed under the wrong layers"
+        )
+    frames = {}
+    for index, layer in enumerate(layers):
+        frames[int(layer)] = build_scores(
+            [{**record, "scores": record["scores"][:, index]} for record in records]
+        )
+    return frames
 
 
 def run(

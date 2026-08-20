@@ -462,6 +462,51 @@ def _lora_layers(config: LoraConfig, probe_layer: int) -> list[int]:
     return [int(layer) for layer in config.layers]
 
 
+class LiveMultiLayerProbe(nn.Module):
+    """Several depths read from one live forward pass.
+
+    The cached multi-layer probe already maps ``[batch, tokens, layers, hidden]``
+    to one logit per depth; the only thing missing without a cache is the
+    features. A single pass with ``output_hidden_states=True`` produces every
+    depth at once, so the depths cost one pass between them rather than one
+    each -- which is the whole expense when the model has to be run rather than
+    read from disk.
+
+    Scoring only. Training a depth per pass is what the cached regime is for.
+    """
+
+    def __init__(self, model: PreTrainedModel, heads: nn.Module, layers: Sequence[int]) -> None:
+        super().__init__()
+        self.model = model
+        self.heads = heads
+        # Slot 0 of a model's hidden states is the embedding output, so decoder
+        # block L is at slot L + 1 -- the same convention the cache is written
+        # under, which is what lets a head trained on one read the other.
+        self.slots = [int(layer) + 1 for layer in layers]
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.heads.parameters()).device
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs):
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+        states = outputs.hidden_states
+        for slot in self.slots:
+            if slot >= len(states):
+                raise ValueError(
+                    f"depth {slot - 1} needs hidden-state slot {slot}, but the model "
+                    f"produced {len(states)} ({len(states) - 1} decoder blocks)"
+                )
+        features = torch.stack([states[slot] for slot in self.slots], dim=-2)
+        return self.heads(features=features.to(self.device))
+
+
 def setup_probe(
     model: PreTrainedModel,
     probe_config: ProbeConfig,

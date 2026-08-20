@@ -46,9 +46,19 @@ if str(REPO_ROOT) not in sys.path:
 from degeneration_probe.config import DatasetConfig, ModelConfig
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.evaluation.scores import write_scores
-from degeneration_probe.probes.linear_probe import setup_cached_probe, setup_probe
+from degeneration_probe.probes.linear_probe import (
+    LiveMultiLayerProbe,
+    setup_cached_probe,
+    setup_probe,
+)
 from degeneration_probe.utils.model_utils import load_model_and_tokenizer, resolve_torch_dtype
-from scripts.score_rollouts import SCORES_DIR, load_run_config, rollout_metadata, score_split
+from scripts.score_rollouts import (
+    SCORES_DIR,
+    load_run_config,
+    rollout_metadata,
+    score_split,
+    score_split_by_layer,
+)
 
 
 def load_dataset_config(path: Path) -> DatasetConfig:
@@ -96,13 +106,21 @@ def run(
         checkpoint_dir = checkpoint_dir / f"layer_{layer:02d}"
         config.training.probe.layers = None
         config.training.probe.layer = layer
-    elif config.training.probe.layers is not None:
-        raise ValueError(
-            f"this run trained {len(config.training.probe.layers)} depths at once. "
-            "Name one with --layer, since a scores file holds one score per token "
-            "and cannot represent several probes."
+    # Naming no depth on a multi-depth run scores all of them, filing each under
+    # its own layer directory. They share the forward pass, which is the cost.
+    all_layers = layer is None and config.training.probe.layers is not None
+    if all_layers:
+        # A multi-depth checkpoint is a directory of per-depth ones.
+        layers = sorted(
+            int(d.name.split("_")[1])
+            for d in checkpoint_dir.glob("layer_*")
+            if (d / "probe_config.json").is_file()
         )
-    if not (checkpoint_dir / "probe_config.json").is_file():
+        if not layers:
+            raise FileNotFoundError(f"No per-depth probe checkpoints under {checkpoint_dir}")
+        config.training.probe.layers = layers
+        config.training.probe.layer = layers[0]
+    elif not (checkpoint_dir / "probe_config.json").is_file():
         raise FileNotFoundError(f"No probe checkpoint at {checkpoint_dir}")
     # Test the artifact rather than the config: adapter weights are what would
     # actually be loaded onto the target model, and they are fitted to the
@@ -154,35 +172,66 @@ def run(
         )
         if hasattr(model, "config"):
             model.config.use_cache = False
-        _, probe = setup_probe(
-            model,
-            config.training.probe,
-            config.training.lora,
-            checkpoint_path=checkpoint_dir,
-            seed=config.training.runtime.seed,
+        if all_layers:
+            heads = setup_cached_probe(
+                config.training.probe,
+                hidden_size=int(model.config.hidden_size),
+                checkpoint_path=checkpoint_dir,
+                seed=config.training.runtime.seed,
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            )
+            probe = LiveMultiLayerProbe(model, heads, config.training.probe.layers)
+        else:
+            _, probe = setup_probe(
+                model,
+                config.training.probe,
+                config.training.lora,
+                checkpoint_path=checkpoint_dir,
+                seed=config.training.runtime.seed,
+            )
+        depths = len(config.training.probe.layers) if all_layers else 1
+        print(
+            f"Scoring with {checkpoint_dir} (adapted features from {config.model.name}, "
+            f"{depths} depth(s) per pass)"
         )
-        print(f"Scoring with {checkpoint_dir} (adapted features from {config.model.name})")
 
     parts = [run_dir, "cross_model", dataset_config.short_name]
     if layer is not None:
         parts.append(f"layer_{layer:02d}")
-    output_dir = output_dir or Path(*parts)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = output_dir or Path(*parts)
 
     metadata = rollout_metadata(config)
     written = []
     for split in splits:
-        frame = score_split(
-            probe, config, tokenizer, split=split, metadata=metadata, batch_size=batch_size
-        )
-        path = write_scores(frame, output_dir / SCORES_DIR / f"{split}.parquet")
-        tokens = int(frame["num_tokens"].sum())
-        positives = int(frame["is_positive"].sum())
-        print(
-            f"  {split:<22} {len(frame):>6} rollouts ({positives} positive), "
-            f"{tokens:>10,} tokens -> {path}"
-        )
-        written.append(path)
+        if all_layers:
+            # One pass, then a file per depth: a score file holds one score per
+            # token, so the depths cannot share a file, only the pass.
+            frames = score_split_by_layer(
+                probe,
+                config,
+                tokenizer,
+                split=split,
+                metadata=metadata,
+                batch_size=batch_size,
+                layers=config.training.probe.layers,
+            )
+        else:
+            frames = {
+                layer: score_split(
+                    probe, config, tokenizer, split=split, metadata=metadata, batch_size=batch_size
+                )
+            }
+        for depth, frame in sorted(frames.items()):
+            target = base_dir / f"layer_{depth:02d}" if all_layers else base_dir
+            target.mkdir(parents=True, exist_ok=True)
+            path = write_scores(frame, target / SCORES_DIR / f"{split}.parquet")
+            tokens = int(frame["num_tokens"].sum())
+            positives = int(frame["is_positive"].sum())
+            print(
+                f"  {split:<22} layer {depth:>2} {len(frame):>6} rollouts "
+                f"({positives} positive), {tokens:>10,} tokens -> {path}"
+            )
+            written.append(path)
     return written
 
 
