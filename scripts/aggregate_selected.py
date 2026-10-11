@@ -54,6 +54,8 @@ def recipe_name(axes: Dict) -> str:
         name += f" soft {axes.get('decay')}"
     elif axes.get("label") == "token_signal":
         name += f" regression"
+    if axes.get("lora") not in (None, "none"):
+        name += " +LoRA"
     return name
 
 
