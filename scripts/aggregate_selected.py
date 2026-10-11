@@ -1,0 +1,155 @@
+"""Gather the per-depth evaluations of every scored run into one table.
+
+Scoring a run at its selected checkpoints leaves one evaluation directory per
+depth and split, each holding the four views as separate files. This reads all
+of them and writes a flat table with one row per (run, depth, split, budget),
+carrying the recipe axes, the selected step and whether the depth was
+selectable, the detection figures (precision, recall, accuracy, AUC), the
+coverage figures (post-onset and the pre-onset bands at 32, 64, 128 and 256
+tokens) and the timing figures (lead, early share, never-fired count).
+
+    python scripts/aggregate_selected.py
+    python scripts/aggregate_selected.py --summary     # also print recipe x layer means at 1%
+
+Writes <outputs>/analysis/selected_metrics.csv. A second file,
+selected_metrics_by_recipe.csv, averages the seeds of each recipe at each depth
+and split, over selectable depths only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import pandas as pd
+
+DEFAULT_ROOT = Path(
+    "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs"
+)
+SPLITS = ["val", "test_indomain", "test_heldout_domains"]
+AXES = ["model", "dataset", "features", "selection", "window", "anchor", "label", "horizon", "decay", "lora"]
+
+DETECTION = ["precision", "recall", "f1", "accuracy", "negative_fpr", "positives", "negatives"]
+COVERAGE = [
+    "in_pattern_recall",
+    "warning_recall_32",
+    "warning_recall_64",
+    "warning_recall_128",
+    "warning_recall_256",
+    "token_false_positive_rate",
+]
+TIMING = ["median_offset", "fired_before_frontier", "never_fired_positives", "detected_positives"]
+
+
+def recipe_name(axes: Dict) -> str:
+    selection = axes.get("selection")
+    name = "all_tokens" if selection == "all_tokens" else f"{selection} W={axes.get('window')}"
+    if axes.get("anchor"):
+        name += f" {axes['anchor']}"
+    if axes.get("label") == "frontier_hard":
+        name += f" K={axes.get('horizon')}"
+    elif axes.get("label") == "frontier_soft":
+        name += f" soft {axes.get('decay')}"
+    elif axes.get("label") == "token_signal":
+        name += f" regression"
+    return name
+
+
+def read_depth(evaluation: Path, split: str) -> Optional[pd.DataFrame]:
+    folder = evaluation / split
+    if not (folder / "view_a_detection.csv").is_file():
+        return None
+    a = pd.read_csv(folder / "view_a_detection.csv")
+    b = pd.read_csv(folder / "view_b_coverage.csv")
+    c = pd.read_csv(folder / "view_c_lead_time.csv")
+    summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
+    rank = summary.get("rank_metrics", {})
+    frame = a[["target_negative_fpr", "tau"] + [col for col in DETECTION if col in a.columns]]
+    frame = frame.merge(b[["target_negative_fpr"] + [col for col in COVERAGE if col in b.columns]], on="target_negative_fpr", how="left")
+    frame = frame.merge(c[["target_negative_fpr"] + [col for col in TIMING if col in c.columns]], on="target_negative_fpr", how="left")
+    frame["rollout_auc"] = rank.get("rollout_auc")
+    frame["rollout_ap"] = rank.get("rollout_ap")
+    frame["persistence"] = summary.get("persistence")
+    frame.insert(0, "split", split)
+    return frame
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--outputs-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--subdir", default="selected")
+    parser.add_argument("--summary", action="store_true", help="print recipe x layer means at the 1%% budget")
+    args = parser.parse_args()
+
+    rows: List[pd.DataFrame] = []
+    incomplete: List[str] = []
+    for selection_file in sorted(args.outputs_root.glob(f"*/2*/checkpoint_selection.json")):
+        attempt = selection_file.parent
+        info = json.loads((attempt / "run_info.json").read_text(encoding="utf-8"))
+        axes = info.get("axes", {})
+        seed = next((t.split(":", 1)[1] for t in info.get("tags", []) if t.startswith("seed:")), None)
+        meta = {
+            "run_name": info.get("run_name", attempt.parent.name),
+            "attempt": attempt.name,
+            "recipe": recipe_name(axes),
+            "seed": seed,
+            **{axis: axes.get(axis) for axis in AXES},
+        }
+        depths = json.loads(selection_file.read_text(encoding="utf-8"))["depths"]
+        for depth in depths:
+            layer = int(depth["layer"])
+            evaluation = attempt / args.subdir / f"layer_{layer:02d}" / "evaluation"
+            for split in SPLITS:
+                frame = read_depth(evaluation, split)
+                if frame is None:
+                    incomplete.append(f"{meta['run_name']} layer {layer} {split}")
+                    continue
+                for key, value in meta.items():
+                    frame[key] = value
+                frame["layer"] = layer
+                frame["selected_step"] = int(depth["selected_step"])
+                frame["selectable"] = bool(depth["selectable"])
+                rows.append(frame)
+
+    if not rows:
+        raise SystemExit("no evaluations found yet")
+    table = pd.concat(rows, ignore_index=True)
+    lead = ["run_name", "attempt", "recipe", "seed"] + AXES + ["layer", "selected_step", "selectable", "split", "target_negative_fpr", "tau"]
+    table = table[lead + [c for c in table.columns if c not in lead]]
+    out_dir = args.outputs_root / "analysis"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    table.to_csv(out_dir / "selected_metrics.csv", index=False)
+
+    metrics = [c for c in table.columns if c not in lead and c != "persistence"]
+    by_recipe = (
+        table[table["selectable"]]
+        .groupby(["recipe", "model", "layer", "split", "target_negative_fpr"])[metrics]
+        .agg(["mean", "std", "count"])
+    )
+    by_recipe.columns = [f"{m}_{s}" for m, s in by_recipe.columns]
+    by_recipe = by_recipe.reset_index()
+    by_recipe.to_csv(out_dir / "selected_metrics_by_recipe.csv", index=False)
+
+    runs = table[["run_name", "attempt"]].drop_duplicates()
+    print(f"{len(runs)} runs, {len(table)} rows -> {out_dir / 'selected_metrics.csv'}")
+    print(f"recipe x layer means -> {out_dir / 'selected_metrics_by_recipe.csv'}")
+    if incomplete:
+        print(f"{len(incomplete)} (run, depth, split) evaluations missing, e.g. {incomplete[0]}")
+
+    if args.summary:
+        pd.set_option("display.width", 220)
+        at_one = by_recipe[by_recipe["target_negative_fpr"] == 0.01]
+        for split in SPLITS:
+            part = at_one[at_one["split"] == split]
+            if part.empty:
+                continue
+            best = part.sort_values("warning_recall_256_mean", ascending=False).groupby("recipe").head(1)
+            cols = ["recipe", "layer", "warning_recall_256_mean", "warning_recall_256_std", "warning_recall_128_mean", "in_pattern_recall_mean", "recall_mean", "precision_mean", "rollout_auc_mean", "never_fired_positives_mean", "warning_recall_256_count"]
+            print(f"\n== {split}, budget 1%, best selectable layer per recipe (means over seeds) ==")
+            print(best[cols].sort_values("warning_recall_256_mean", ascending=False).round(4).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
