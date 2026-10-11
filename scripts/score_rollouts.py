@@ -143,7 +143,9 @@ def _score_records(
             config.dataset,
             split=split,
             label_config=config.training.label,
-            probe_layer=config.training.probe.layer,
+            # One depth or every depth the run trained: the loader reads them from
+            # the same file either way, and the probe returns one logit per depth.
+            probe_layer=config.training.probe.probed_layers,
             training=False,
         )
         collate = cached_collate_fn

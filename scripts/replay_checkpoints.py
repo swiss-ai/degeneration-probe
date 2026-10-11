@@ -185,7 +185,7 @@ def replay(
 
     for index, record in enumerate(records):
         features = load_probe_layers(
-            config.dataset.build_root,
+            config.dataset.activations_dir,
             record.domain,
             record.prompt_id,
             record.rollout_idx,
