@@ -1,0 +1,30 @@
+# Same image as Dockerfile, built from the local working tree instead of a
+# clone of the GitHub repository, so it needs no credentials on the build node.
+# Build context is the repository root; .containerignore keeps it small.
+FROM nvcr.io/nvidia/pytorch:25.06-py3
+
+COPY --from=ghcr.io/astral-sh/uv:0.6.6 /uv /uvx /bin/
+
+WORKDIR /workspace/degeneration-probe
+COPY pyproject.toml README.md cluster/constraints.txt ./
+COPY degeneration_probe ./degeneration_probe
+
+RUN uv pip install -e . --system --break-system-packages --constraint constraints.txt
+
+# The base image ships a torchao older than peft accepts, and peft raises on
+# it while attaching adapters rather than skipping the backend. A newer torchao
+# cannot import against this image's torch, so the only workable state is not
+# having it at all. Nothing in this project uses it.
+RUN uv pip uninstall torchao --system --break-system-packages || true
+RUN python -c "import importlib.util; assert importlib.util.find_spec('torchao') is None, 'torchao is still installed'"
+
+RUN python -c "\
+import torch, transformers, peft, wandb; \
+from transformers import Trainer, TrainingArguments, LlamaConfig, LlamaForCausalLM; \
+from peft import LoraConfig, get_peft_model; \
+get_peft_model(LlamaForCausalLM(LlamaConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=2, vocab_size=128)), LoraConfig(target_modules=['q_proj'], r=4)); \
+print('torch', torch.__version__, '| transformers', transformers.__version__, '| peft', peft.__version__, '| lora dispatch OK')"
+
+ENV CUDA_CACHE_DISABLE=1
+
+CMD ["/bin/bash"]

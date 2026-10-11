@@ -1,0 +1,19 @@
+# Versions of the image the S4 probes were trained in (W&B requirements, Aug 2026).
+# Pins what uv would otherwise float past the base image's NumPy 1.26.
+accelerate==1.14.0
+anthropic==0.121.0
+claude-agent-sdk==0.2.134
+datasets==5.0.1
+hydra-core==1.3.5
+marimo==0.23.16
+numpy==1.26.4
+omegaconf==2.3.1
+openai==2.53.0
+pandas==2.2.3
+peft==0.20.0
+pyarrow==25.0.0
+safetensors==0.8.0
+scikit-learn==1.6.1
+tokenizers==0.22.2
+transformers==5.14.1
+wandb==0.28.1
