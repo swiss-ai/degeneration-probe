@@ -139,16 +139,25 @@ def main() -> None:
         print(f"{len(incomplete)} (run, depth, split) evaluations missing, e.g. {incomplete[0]}")
 
     if args.summary:
+        # The depth is chosen on validation and then read, unchanged, on the test
+        # splits: choosing it per split would turn a test split into a second
+        # validation set.
         pd.set_option("display.width", 220)
         at_one = by_recipe[by_recipe["target_negative_fpr"] == 0.01]
+        chosen = (
+            at_one[at_one["split"] == "val"]
+            .sort_values("warning_recall_256_mean", ascending=False)
+            .groupby(["recipe", "model"])
+            .head(1)[["recipe", "model", "layer"]]
+        )
+        report = at_one.merge(chosen, on=["recipe", "model", "layer"])
+        cols = ["warning_recall_256_mean", "warning_recall_256_std", "warning_recall_128_mean", "in_pattern_recall_mean", "fired_before_frontier_mean", "median_offset_mean", "never_fired_positives_mean", "rollout_auc_mean", "warning_recall_256_count"]
         for split in SPLITS:
-            part = at_one[at_one["split"] == split]
+            part = report[report["split"] == split]
             if part.empty:
                 continue
-            best = part.sort_values("warning_recall_256_mean", ascending=False).groupby("recipe").head(1)
-            cols = ["recipe", "layer", "warning_recall_256_mean", "warning_recall_256_std", "warning_recall_128_mean", "in_pattern_recall_mean", "recall_mean", "precision_mean", "rollout_auc_mean", "never_fired_positives_mean", "warning_recall_256_count"]
-            print(f"\n== {split}, budget 1%, best selectable layer per recipe (means over seeds) ==")
-            print(best[cols].sort_values("warning_recall_256_mean", ascending=False).round(4).to_string(index=False))
+            print(f"\n== {split}, budget 1%, depth chosen on validation per recipe (means over seeds) ==")
+            print(part[["recipe", "model", "layer"] + cols].sort_values("warning_recall_256_mean", ascending=False).round(4).to_string(index=False))
 
 
 if __name__ == "__main__":
