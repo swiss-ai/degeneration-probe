@@ -95,6 +95,9 @@ def _(mo):
     - Partita su Apertus la LoRA per tutti i 31 layer, 3 seed, 93 run: stessa ricetta, rank 16 su q e v di tutti i blocchi fino al layer letto, 3,000 step, validation sul val completo ogni 100 step, nessun early stopping. Serve il profilo frozen vs adapted lungo la profondita' e verifica se l'adattamento sposta il layer migliore. La selezione del checkpoint usa le metriche registrate in training, con la stessa regola e lo stesso fallback.
     - Tutta la catena e' ora in coda con dipendenze: per Llama e Mistral training, replay e scoring; per i LoRA training e scoring adapted (`cluster/score_adapted_selected.sbatch`, che seleziona il checkpoint dalla storia di training e scora il layer del run sui tre split). Un timeout del training blocca il job dipendente, che va rimesso in coda dopo la ripresa.
 
+    - Scoring Apertus completato per 75 run (mancano i 3 rollout_balanced, in coda dietro il loro replay). Letti al layer scelto su validation, budget 1%, Warn 256 medio su 3 seed: frontier W=512 centered K=256 0.074 val / 0.086 test in-domain / 0.167 held-out; all_tokens K=1024 0.073 / 0.095 / 0.159; all_tokens K=256 0.070 / 0.087 / 0.147; frontier W=512 trailing K=512 0.069 / 0.081 / 0.159. Le prime quattro ricette sono le stesse sui tre split, sempre al layer 15; in coda frontier W=64 (0.024 / 0.015 / 0.048). Il test in-domain ha 117 positivi, l'held-out 26: su quest'ultimo i numeri sono indicativi. Tabelle complete in outputs/analysis/selected_metrics.csv e selected_metrics_by_recipe.csv su store.
+    - I run LoRA vanno a 9-13 s/step con validation completa in circa 90 s: 10-12 ore per 3,000 step, al limite del walltime massimo della partizione (12 ore). I timeout si riprendono con `cluster/resume_timed_out.sh`, che rimette in coda training e scoring dipendente.
+
     **Prossimi passi**
 
     - Al termine della sweep: resume dei run in timeout, replay, selezione, scoring su val, test in-domain e held-out.
