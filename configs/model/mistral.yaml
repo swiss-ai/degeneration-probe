@@ -1,0 +1,4 @@
+short_name: mistral
+name: mistralai/Mistral-7B-Instruct-v0.1
+tokenizer_name: mistralai/Mistral-7B-Instruct-v0.1
+dtype: bfloat16

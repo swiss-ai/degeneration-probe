@@ -43,10 +43,17 @@ read_key() {
 HF_TOKEN="$(read_key ~/keys/.hf_token)"
 export HF_TOKEN
 
+# The evaluation population is pinned per dataset, so a run is replayed against
+# the rollouts of the build it was trained on rather than the default (Apertus).
+DATASET=$(.venv/bin/python -c "import json,sys; print(json.load(open(sys.argv[1]))['dataset']['short_name'])" "$RUN_DIR/resolved_config.json")
+ROLLOUTS=configs/dataset/validation_rollouts_${DATASET}.csv
+[[ -f $ROLLOUTS ]] || { echo "No pinned validation rollouts for $DATASET at $ROLLOUTS" >&2; exit 1; }
+echo "Rollouts: $ROLLOUTS"
+
 srun --environment=$REPO/cluster/env.toml bash -c "
     set -euo pipefail
     cd $REPO
     start=\$SECONDS
-    python scripts/replay_checkpoints.py --run-dir '$(realpath "$RUN_DIR")' --every $EVERY
+    python scripts/replay_checkpoints.py --run-dir '$(realpath "$RUN_DIR")' --every $EVERY --rollouts $ROLLOUTS
     echo \"ELAPSED replay: \$((SECONDS - start)) s\"
 "

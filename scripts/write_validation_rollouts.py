@@ -40,9 +40,9 @@ from degeneration_probe.data.dataset import load_degeneration_records
 IDENTITY = ["domain", "prompt_id", "rollout_idx"]
 
 
-def build(config_name: str = "main") -> tuple[pd.DataFrame, ExperimentConfig]:
+def build(config_name: str = "main", overrides: list[str] | None = None) -> tuple[pd.DataFrame, ExperimentConfig]:
     with initialize_config_dir(config_dir=str(REPO_ROOT / "configs"), version_base=None):
-        composed = compose(config_name=config_name)
+        composed = compose(config_name=config_name, overrides=list(overrides or []))
     experiment = ExperimentConfig.from_dict(OmegaConf.to_container(composed, resolve=True))
     # Evaluation never thins its population, whatever a run was trained on.
     experiment.dataset.sampling.evaluation_negative_rollouts_per_positive = None
@@ -69,9 +69,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-name", default="main")
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        help="Hydra overrides, for example model=llama3p1 dataset=degeneration-dataset-llama3p1-8b-instruct",
+    )
     args = parser.parse_args()
 
-    frame, experiment = build(args.config_name)
+    frame, experiment = build(args.config_name, args.overrides)
     out = args.out or (
         REPO_ROOT
         / "configs"
