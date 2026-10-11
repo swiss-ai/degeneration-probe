@@ -18,9 +18,13 @@ whether that depth may compete for "best layer" afterwards.
     python scripts/select_checkpoints.py
     python scripts/select_checkpoints.py --pairs   # one "layer:step ..." line per run
 
-Reads <outputs>/<run>/<attempt>/checkpoint_replay.parquet, writes a row per depth
-to <outputs>/analysis/checkpoint_selection.csv and a per-run
-checkpoint_selection.json beside each replay.
+Reads <outputs>/<run>/<attempt>/checkpoint_replay.parquet, or, for a run that
+cannot be replayed (an adapted run, whose checkpoints each need a forward pass),
+the selection_history.parquet its monitoring pass wrote during training: both
+carry the same record per (step, depth). Writes a row per depth to
+<outputs>/analysis/checkpoint_selection.csv and a per-run checkpoint_selection.json
+beside the source table. ``--run-dir`` restricts the pass to one attempt and
+writes only its json.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ DEFAULT_ROOT = Path(
     "/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs"
 )
 REPLAY_FILE = "checkpoint_replay.parquet"
+HISTORY_FILE = "selection_history.parquet"
 SELECTION_FILE = "checkpoint_selection.json"
 GATE = "in_pattern_recall"
 
@@ -88,24 +93,43 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=None, help="default <outputs-root>/analysis/checkpoint_selection.csv")
     parser.add_argument("--pairs", action="store_true", help="also print one 'layer:step ...' line per run")
     parser.add_argument("--only-latest", action="store_true", help="one attempt per run: the one 'latest' points at")
+    parser.add_argument("--run-dir", type=Path, default=None, help="select one attempt only, writing just its json")
+    parser.add_argument(
+        "--source",
+        choices=["auto", "replay", "history"],
+        default="auto",
+        help="auto reads the replay when there is one and the training-time history otherwise",
+    )
     args = parser.parse_args()
 
     objective = f"warning_recall_{args.band}"
     rows: List[Dict] = []
     missing: List[str] = []
-    for run_root in sorted(p for p in args.outputs_root.iterdir() if p.is_dir() and p.name != "analysis"):
-        attempts = sorted(p for p in run_root.glob("2*") if p.is_dir())
-        if args.only_latest and (run_root / "latest").exists():
-            attempts = [(run_root / "latest").resolve()]
+    if args.run_dir is not None:
+        run_root = args.run_dir.resolve().parent
+        groups = [(run_root, [args.run_dir.resolve()])]
+    else:
+        groups = []
+        for run_root in sorted(p for p in args.outputs_root.iterdir() if p.is_dir() and p.name != "analysis"):
+            attempts = sorted(p for p in run_root.glob("2*") if p.is_dir())
+            if args.only_latest and (run_root / "latest").exists():
+                attempts = [(run_root / "latest").resolve()]
+            groups.append((run_root, attempts))
+    for run_root, attempts in groups:
         for attempt in attempts:
-            replay = attempt / REPLAY_FILE
-            if not replay.is_file():
+            replay, recorded = attempt / REPLAY_FILE, attempt / HISTORY_FILE
+            if args.source == "replay" or (args.source == "auto" and replay.is_file()):
+                source = replay
+            else:
+                source = recorded
+            if not source.is_file():
                 missing.append(f"{run_root.name}/{attempt.name}")
                 continue
             meta = load_run(attempt)
             if meta is None:
                 continue
-            history = pd.read_parquet(replay)
+            meta["source"] = source.name
+            history = pd.read_parquet(source)
             if objective not in history.columns or GATE not in history.columns:
                 raise KeyError(f"{replay} lacks {objective!r} or {GATE!r}")
             per_run = []
@@ -115,11 +139,17 @@ def main() -> None:
                 rows.append(row)
                 per_run.append({k: (v.item() if hasattr(v, "item") else v) for k, v in row.items()})
             (attempt / SELECTION_FILE).write_text(
-                json.dumps({"floor": args.floor, "objective": objective, "depths": per_run}, indent=2, default=str),
+                json.dumps({"floor": args.floor, "objective": objective, "source": source.name, "depths": per_run}, indent=2, default=str),
                 encoding="utf-8",
             )
 
     table = pd.DataFrame(rows)
+    if args.run_dir is not None:
+        if table.empty:
+            raise SystemExit(f"nothing to select from under {args.run_dir}")
+        print(f"{len(table)} depths selected from {table['source'].iloc[0]} -> {args.run_dir / SELECTION_FILE}")
+        print(table[["layer", "selected_step", "selectable", "best_in_pattern"]].to_string(index=False))
+        return
     out = args.out or args.outputs_root / "analysis" / "checkpoint_selection.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(out, index=False)
@@ -130,7 +160,7 @@ def main() -> None:
         print(f"  selectable depths: {int(table['selectable'].sum())} / {len(table)}")
         print(table.groupby("selectable")["layer"].agg(["count", "min", "max"]).to_string())
     if missing:
-        print(f"{len(missing)} attempts without a replay (not selected):")
+        print(f"{len(missing)} attempts without a replay or a training history (not selected):")
         for name in missing:
             print(f"  {name}")
     if args.pairs and len(table):

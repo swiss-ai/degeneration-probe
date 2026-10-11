@@ -38,6 +38,12 @@ read_key() {
 HF_TOKEN="$(read_key ~/keys/.hf_token)"
 export HF_TOKEN
 
+# A run queued behind its replay has no selection yet; decide it here, from the
+# replay, so the chain needs no separate step.
+if [[ ! -f $RUN_DIR/checkpoint_selection.json ]]; then
+    .venv/bin/python scripts/select_checkpoints.py --run-dir "$RUN_DIR" --source replay
+fi
+
 srun --environment=$REPO/cluster/env.toml bash -c "
     set -euo pipefail
     cd $REPO
