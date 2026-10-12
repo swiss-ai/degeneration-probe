@@ -38,6 +38,10 @@ COVERAGE = [
     "warning_recall_64",
     "warning_recall_128",
     "warning_recall_256",
+    "preonset_coverage_32",
+    "preonset_coverage_64",
+    "preonset_coverage_128",
+    "preonset_coverage_256",
     "token_false_positive_rate",
 ]
 TIMING = ["median_offset", "fired_before_frontier", "never_fired_positives", "detected_positives"]

@@ -427,6 +427,8 @@ def view_b_coverage(frame: pd.DataFrame, thresholds: Sequence[Threshold]) -> pd.
         positive_rollouts = 0
         warning_tokens = {band: 0 for band in WARNING_BANDS}
         warning_hits = {band: 0 for band in WARNING_BANDS}
+        preonset_tokens = {band: 0 for band in WARNING_BANDS}
+        preonset_hits = {band: 0 for band in WARNING_BANDS}
         for row in frame.itertuples(index=False):
             scores = np.asarray(row.scores, dtype=np.float64)
             above = scores >= threshold.tau
@@ -440,6 +442,12 @@ def view_b_coverage(frame: pd.DataFrame, thresholds: Sequence[Threshold]) -> pd.
                     run_up = above[coverage_window(above.size, onset, band)]
                     warning_tokens[band] += int(run_up.size)
                     warning_hits[band] += int(np.count_nonzero(run_up))
+                    # Everything before the band: the part of the answer that
+                    # is still healthy by the band's own definition, so a flag
+                    # there is a flag the band's coverage does not account for.
+                    before = above[: max(onset - band, 0)]
+                    preonset_tokens[band] += int(before.size)
+                    preonset_hits[band] += int(np.count_nonzero(before))
             else:
                 negative_rollouts += 1
                 negative_tokens += int(above.size)
@@ -472,6 +480,21 @@ def view_b_coverage(frame: pd.DataFrame, thresholds: Sequence[Threshold]) -> pd.
                 **{
                     f"warning_recall_{band}": _safe_ratio(
                         warning_hits[band], warning_tokens[band]
+                    )
+                    for band in WARNING_BANDS
+                },
+                # Coverage of the tokens that precede each band, pooled over
+                # the degenerate rollouts the same way. Read next to the band's
+                # coverage: a scorer whose flags sit in the band and not before
+                # it is one that found the approach, where one that covers both
+                # alike was flagging the rollout, not its onset.
+                **{
+                    f"preonset_tokens_{band}": preonset_tokens[band]
+                    for band in WARNING_BANDS
+                },
+                **{
+                    f"preonset_coverage_{band}": _safe_ratio(
+                        preonset_hits[band], preonset_tokens[band]
                     )
                     for band in WARNING_BANDS
                 },
