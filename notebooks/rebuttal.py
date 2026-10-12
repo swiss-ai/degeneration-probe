@@ -105,6 +105,10 @@ def _(mo):
     - Llama e Mistral frozen stanno sulla soglia: Llama ha 3, 2 e 0 layer selezionabili sui tre seed (post-onset massima 0.30), Mistral 10 sul seed 42 con il migliore al layer 3. Il layer scelto da questi sweep e' rumore intorno a 0.3: per la LoRA su Llama e Mistral serve una scelta esplicita del layer, non la selezione dallo sweep frozen.
     - File su store: 627k miei, di cui 298k nei run frozen Apertus (circa 2,900 file di checkpoint per run, 30 checkpoint x 31 layer). Il replay contiene gia' le metriche di ogni checkpoint; i checkpoint non selezionati sono riaddestrabili.
 
+    - Archiviazione dei checkpoint Apertus completata senza errori: per ogni run restano i checkpoint selezionati e un archivio tar con gli altri, verificato prima della rimozione e ripristinabile con il comando nel manifest. LoRA su tutti i 31 layer anche per Llama e Mistral (186 run) in coda dietro gli archivi.
+    - Nuova metrica preonset-coverage-{32,64,128,256}: quota di token segnalati nella parte di risposta che precede la warning band, sui rollout degeneri. Rivalutazione di tutti i run dai parquet degli score in corso. Al layer 15 frozen su test: 0.004 prima della band 256 contro 0.049 nella band.
+    - Controllo posizionale rifatto sul nuovo pool (val e test in-domain, 3 seed, budget 1%): shuffled e argmax-only lasciano AUC e best accuracy invariate e muovono solo i numeri allineati all'onset. Ricetta scelta frozen L15 su test: Warn 256 0.086 as-scored, 0.53 shuffled, 0 argmax-only; preonset-coverage 256 0.010 contro 0.42 shuffled. LoRA L15: 0.265 / 0.67 / 0; LoRA L30: 0.32 / 0.66 / 0. A persistenza 4 e 8 argmax-only e token cap collassano ad AUC 0.5, lo shuffled resta alto. Tabelle in outputs/analysis/positional_control_{val,test_indomain}_summary.csv.
+
     **Prossimi passi**
 
     - Al termine della sweep: resume dei run in timeout, replay, selezione, scoring su val, test in-domain e held-out.
