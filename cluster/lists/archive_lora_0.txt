@@ -1,0 +1,16 @@
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L10_frontier512_hard256_bce_lora-all_s42_d37a180b/20261011T163359
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L12_frontier512_hard256_bce_lora-all_s42_711e5bd4/20261011T163413
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L14_frontier512_hard256_bce_lora-all_s42_2e810a4d/20261011T163412
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L16_frontier512_hard256_bce_lora-all_s43_f6e7a053/20261011T163415
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L18_frontier512_hard256_bce_lora-all_s43_ed23b02c/20261011T163421
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1_frontier512_hard256_bce_lora-all_s43_cc3d367b/20261011T161707
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L21_frontier512_hard256_bce_lora-all_s43_5f720d54/20261011T163656
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L23_frontier512_hard256_bce_lora-all_s43_d27f7896/20261011T163842
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L25_frontier512_hard256_bce_lora-all_s43_2ca61314/20261011T164127
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L27_frontier512_hard256_bce_lora-all_s43_6f88c0c6/20261011T164414
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L29_frontier512_hard256_bce_lora-all_s43_f006ae64/20261011T164637
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L30_frontier512_hard256_bce_lora-all_s43_26382166/20261011T164841
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L3_frontier512_hard256_bce_lora-all_s43_36731e67/20261011T161920
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L5_frontier512_hard256_bce_lora-all_s43_bd96fcfd/20261011T162753
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L7_frontier512_hard256_bce_lora-all_s43_9b2da3a8/20261011T162844
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L9_frontier512_hard256_bce_lora-all_s43_b65159a1/20261011T163355

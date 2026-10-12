@@ -1,0 +1,2 @@
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier512_hard256_bce_lora-none_s42_52fe58f5/20261010T194152
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L15_frontier512_hard256_bce_lora-all_s42_81808a2f/20261011T163414

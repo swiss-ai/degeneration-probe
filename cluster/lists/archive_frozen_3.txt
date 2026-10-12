@@ -1,0 +1,13 @@
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_all_tokens_hard256_bce_lora-none_s42_ea9304e9/20261010T194157
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier1024_hard128_bce_lora-none_s42_ba02d5a0/20261010T195645
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier1024_hard256_bce_lora-none_s42_4080d82e/20261010T200248
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier1024_hard512_bce_lora-none_s42_d98ba0b6/20261010T200301
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier256_hard_bce_lora-none_s42_64eb8ceb/20261010T194213
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier512_hard128_bce_lora-none_s43_2d5b06aa/20261010T194157
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier512_hard256_bce_lora-none_s44_2072f0d3/20261010T194154
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier512_hard_bce_lora-none_s43_d3c68d7e/20261010T194211
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier512_soft_bce_lora-none_s43_1b924b96/20261010T194156
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_frontier512_soft_bce_lora-none_s44_67adccd9/20261010T194158
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_random_window128_hard_bce_lora-none_s43_be5752f7/20261010T194201
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_random_window512_hard_bce_lora-none_s43_be4cad45/20261010T194206
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_rollout_balanced128_hard_bce_lora-none_s43_09f2eafb/20261010T194201
