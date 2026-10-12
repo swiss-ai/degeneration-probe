@@ -126,19 +126,27 @@ def measure(
     a = view_a_detection(table).iloc[0]
     b = view_b_coverage(target, thresholds).iloc[0]
     c = view_c_lead_time(table).iloc[0]
+    # A scorer that cannot produce m flags in a row has every response score at
+    # the floor of its range, so no threshold can spend the budget and the one
+    # chosen sits on that floor. On validation nothing fires; on another split
+    # a floor a hair lower flips every token to flagged. Neither reading says
+    # anything about the scorer, so the threshold-dependent numbers are left
+    # blank and only the rank metrics, which are at chance, are reported.
+    saturated = bool(thresholds[0].saturated)
+    blank = float("nan")
     return {
         "tau": float(thresholds[0].tau),
-        "saturated": bool(thresholds[0].saturated),
+        "saturated": saturated,
         "rollout_auc": rank_metrics(table)["rollout_auc"],
         "best_accuracy": best_accuracy(table),
-        "accuracy_at_budget": float(a["accuracy"]),
-        "in_pattern_recall": float(b["in_pattern_recall"]),
-        "warning_recall_256": float(b["warning_recall_256"]),
-        "warning_recall_128": float(b["warning_recall_128"]),
-        "preonset_coverage_256": float(b["preonset_coverage_256"]),
-        "fired_before_frontier": float(c["fired_before_frontier"]),
-        "median_offset": float(c["median_offset"]),
-        "never_fired_positives": int(c["never_fired_positives"]),
+        "accuracy_at_budget": blank if saturated else float(a["accuracy"]),
+        "in_pattern_recall": blank if saturated else float(b["in_pattern_recall"]),
+        "warning_recall_256": blank if saturated else float(b["warning_recall_256"]),
+        "warning_recall_128": blank if saturated else float(b["warning_recall_128"]),
+        "preonset_coverage_256": blank if saturated else float(b["preonset_coverage_256"]),
+        "fired_before_frontier": blank if saturated else float(c["fired_before_frontier"]),
+        "median_offset": blank if saturated else float(c["median_offset"]),
+        "never_fired_positives": blank if saturated else int(c["never_fired_positives"]),
     }
 
 
