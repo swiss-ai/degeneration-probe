@@ -127,26 +127,31 @@ def measure(
     b = view_b_coverage(target, thresholds).iloc[0]
     c = view_c_lead_time(table).iloc[0]
     # A scorer that cannot produce m flags in a row has every response score at
-    # the floor of its range, so no threshold can spend the budget and the one
-    # chosen sits on that floor. On validation nothing fires; on another split
-    # a floor a hair lower flips every token to flagged. Neither reading says
-    # anything about the scorer, so the threshold-dependent numbers are left
-    # blank and only the rank metrics, which are at chance, are reported.
+    # the floor of its range: the threshold lands on that floor, nothing fires
+    # on validation, and on another split a floor a hair lower flips every
+    # token to flagged. Neither reading says anything about the scorer, so
+    # when the response scores take a single value the threshold-dependent
+    # numbers are left blank and only the rank metrics, at chance, remain. A
+    # threshold that merely cannot spend the budget because negatives tie at
+    # the ceiling, as the token-cap rule's does, is still reported.
     saturated = bool(thresholds[0].saturated)
+    one = table.drop_duplicates(["prompt_id", "rollout_idx"])
+    degenerate = int(one["rollout_score"].nunique()) <= 1
     blank = float("nan")
     return {
         "tau": float(thresholds[0].tau),
         "saturated": saturated,
         "rollout_auc": rank_metrics(table)["rollout_auc"],
         "best_accuracy": best_accuracy(table),
-        "accuracy_at_budget": blank if saturated else float(a["accuracy"]),
-        "in_pattern_recall": blank if saturated else float(b["in_pattern_recall"]),
-        "warning_recall_256": blank if saturated else float(b["warning_recall_256"]),
-        "warning_recall_128": blank if saturated else float(b["warning_recall_128"]),
-        "preonset_coverage_256": blank if saturated else float(b["preonset_coverage_256"]),
-        "fired_before_frontier": blank if saturated else float(c["fired_before_frontier"]),
-        "median_offset": blank if saturated else float(c["median_offset"]),
-        "never_fired_positives": blank if saturated else int(c["never_fired_positives"]),
+        "degenerate": degenerate,
+        "accuracy_at_budget": blank if degenerate else float(a["accuracy"]),
+        "in_pattern_recall": blank if degenerate else float(b["in_pattern_recall"]),
+        "warning_recall_256": blank if degenerate else float(b["warning_recall_256"]),
+        "warning_recall_128": blank if degenerate else float(b["warning_recall_128"]),
+        "preonset_coverage_256": blank if degenerate else float(b["preonset_coverage_256"]),
+        "fired_before_frontier": blank if degenerate else float(c["fired_before_frontier"]),
+        "median_offset": blank if degenerate else float(c["median_offset"]),
+        "never_fired_positives": blank if degenerate else int(c["never_fired_positives"]),
     }
 
 
