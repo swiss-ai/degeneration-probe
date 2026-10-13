@@ -25,6 +25,12 @@ operating point of its own.
     rep_l        the standard per-token repetition rate of the generation
                  literature: whether a token already appeared in the l before
                  it, smoothed over a trailing window
+    ngram_<n>    the repeated-n-gram rule inference engines and loop studies
+                 use to stop a generation: how often the n-gram ending at a
+                 token has already occurred in the response
+    neglogp      the model's negative log-probability of each emitted token,
+                 averaged over a trailing window and inverted, like entropy;
+                 needs the token_logprobs artifact of the build
 
 None of them needs a GPU, so this runs anywhere.
 
@@ -47,7 +53,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from degeneration_probe.evaluation.scores import build_scores, write_scores
 
-BASELINES = ("repetition", "repetition_trailing", "entropy", "lrs", "rep_l")
+NGRAM_SIZES = (8, 16, 30)
+BASELINES = ("repetition", "repetition_trailing", "entropy", "lrs", "rep_l", "neglogp") + tuple(
+    f"ngram_{n}" for n in NGRAM_SIZES
+)
 # Welleck et al. report rep/l at l = 128, and the trailing average is taken over
 # the same width so the score has one scale rather than two.
 REP_L_LOOKBACK = 128
@@ -232,6 +241,41 @@ def rep_l_scores(
     return padded
 
 
+def ngram_repeat_scores(token_ids, num_tokens: int, n: int) -> np.ndarray:
+    """How often the n-gram ending at each token has already occurred, causally.
+
+    Loop detectors in practice count repeated n-grams in what has been generated
+    so far (a long n-gram seen many times is a loop), and stop once a count is
+    reached. Here the count is the score, mapped to ``1 - 1/c``: zero on a first
+    occurrence and rising toward one with every repeat, so calibrating a
+    threshold on validation is the same as choosing the count at which to stop.
+    Positions before the first full n-gram score zero.
+    """
+    ids = np.asarray(list(token_ids)[:num_tokens], dtype=np.int64)
+    scores = np.zeros(num_tokens, dtype=np.float64)
+    counts: Dict[tuple, int] = {}
+    for end in range(n - 1, ids.size):
+        key = tuple(ids[end - n + 1 : end + 1].tolist())
+        seen = counts.get(key, 0) + 1
+        counts[key] = seen
+        scores[end] = 1.0 - 1.0 / seen
+    return scores
+
+
+def neglogp_scores(values, num_tokens: int, window: int = ENTROPY_WINDOW) -> np.ndarray:
+    """Inverted negative log-probability of the emitted tokens, over a trailing window.
+
+    The same construction as the entropy baseline, on the probability the model
+    gave the token it actually emitted instead of on its whole distribution: a
+    loop is generated with high confidence, so a low average surprise scores high.
+    """
+    surprise = np.full(num_tokens, np.nan, dtype=np.float64)
+    supplied = -np.asarray(list(values)[:num_tokens], dtype=np.float64)
+    surprise[: supplied.size] = supplied
+    filled = _fill_gaps(np.clip(surprise, 0.0, None))
+    return 1.0 / (1.0 + _trailing_mean(filled, window))
+
+
 def _fill_gaps(scores: np.ndarray) -> np.ndarray:
     """Carry the last defined value forward; lead with the first one."""
     if np.isnan(scores).all():
@@ -255,10 +299,13 @@ def build_baseline_scores(
     # Three baselines are precomputed columns of the label store. rep/l is not:
     # it is a function of the generated ids themselves, which live beside the
     # text rather than beside the labels.
-    token_sourced = {"rep_l", "repetition_trailing"}
+    token_sourced = {"rep_l", "repetition_trailing"} | {f"ngram_{n}" for n in NGRAM_SIZES}
     source = "generations" if baseline in token_sourced else "labels"
     columns = ["prompt_id", "rollout_idx"]
-    if baseline in token_sourced:
+    if baseline == "neglogp":
+        source = "token_logprobs"
+        columns += ["token_logprob"]
+    elif baseline in token_sourced:
         columns += ["generated_token_ids"]
     elif baseline == "repetition":
         columns += ["repetition_score"]
@@ -272,11 +319,10 @@ def build_baseline_scores(
 
     records = []
     for domain in sorted(onset["domain"].astype(str).unique()):
+        # The log-probabilities are sharded by rollout, not by domain.
+        shard_dir = build_root / source if source == "token_logprobs" else build_root / source / domain
         labels = pd.concat(
-            [
-                pd.read_parquet(path, columns=columns)
-                for path in sorted((build_root / source / domain).glob("*.parquet"))
-            ],
+            [pd.read_parquet(path, columns=columns) for path in sorted(shard_dir.glob("*.parquet"))],
             ignore_index=True,
         )
         merged = onset[onset["domain"].astype(str) == domain].merge(
@@ -292,6 +338,10 @@ def build_baseline_scores(
                 scores = repetition_scores(row.repetition_score, tokens)
             elif baseline == "entropy":
                 scores = entropy_scores(row.entropy, tokens)
+            elif baseline == "neglogp":
+                scores = neglogp_scores(row.token_logprob, tokens)
+            elif baseline.startswith("ngram_"):
+                scores = ngram_repeat_scores(row.generated_token_ids, tokens, int(baseline.split("_")[1]))
             else:
                 scores = lrs_scores(
                     row.lrs_first_start_normalized_growing,
