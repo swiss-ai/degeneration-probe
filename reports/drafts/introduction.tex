@@ -1,0 +1,110 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Many failures of language models begin at an identifiable token. A harmful
+response has a first harmful instruction, a hallucinated answer has a first
+unsupported claim \citep{niu2024ragtruth}, a wrong solution has a first
+erroneous step \citep{zheng2025processbench}, and a degenerate response has a
+point where it falls into a repetition loop that runs until the token budget is
+exhausted \citep{holtzman2020curious,welleck2020neural,pipis2025wait}. A monitor
+of such failures can act at three moments. A \emph{response classifier} judges
+the finished response, a \emph{failure detector} flags the failure once it is
+under way, and an \emph{early-warning monitor} fires before it starts. Only the
+last leaves time to stop the generation, steer it
+\citep{lee2025cast,hedstrom2025mera} or roll it back and resample
+\citep{zhang2025backtracking} before the failure is produced. This paper studies
+how to evaluate early-warning monitors, using repetitive degeneration as the
+case study (\Cref{fig:degeneration_example}).
+
+Linear probes on hidden states are a cheap way to build such monitors. They
+detect deception \citep{goldowskydill2025deception}, high-stakes interactions
+\citep{mckenzie2025highstakes}, hallucinated entities
+\citep{obeso2025realtime}, cyber-offensive misuse in a production system
+\citep{kramar2026gemini}, and repetition loops
+\citep{xie2025wordsalad,yu2025breaking,duan2026circular}. Most of this work
+evaluates the probe as a classifier. Deception, high-stakes and hallucination
+probes report AUROC per response or per entity, together with recall at a low
+false-positive rate on benign data
+\citep{goldowskydill2025deception,mckenzie2025highstakes,obeso2025realtime}.
+Degeneration probes report accuracy and AUROC per chunk or per sentence
+\citep{xie2025wordsalad,duan2026circular}. These metrics measure whether a
+response or segment is labelled correctly. When every segment after the onset
+counts as positive, a probe that fires only once the failure is visible scores
+as well as one that warns before it. Some work does measure timing, but not
+against an annotated onset under a fixed false-alarm budget. Streaming
+harmful-content monitors report the share of the response read before the
+monitor stops it \citep{li2025fineharm} or whether the first flag falls inside
+the annotated unsafe sentence \citep{qwen2025qwen3guard}.
+\citet{duan2026circular} report lead times for loop prediction on balanced
+test sets. \citet{itkin2026quickest} argue that token-level AUROC hides how fast
+a hallucination detector reacts and measure the delay after the onset at a
+fixed false-alarm rate, which gives no credit to an alarm raised before the
+onset.
+
+Degeneration makes the problem concrete. We sample responses from
+\textsc{Apertus-8B-Instruct} \citep{apertus2025},
+\textsc{Llama-3.1-8B-Instruct} \citep{grattafiori2024llama} and
+\textsc{Mistral-7B-Instruct} \citep{jiang2023mistral} with one sampling
+configuration shared by all three models (temperature $0.7$, top-$p$ $0.9$, up
+to $4{,}096$ new tokens). It is not the recommended default of each model
+(\todo{list each model's recommended setting in \Cref{app:data}}), but it is a
+stochastic setting of the kind used in deployment, unlike the greedy or
+near-zero-temperature decoding of prior degeneration work
+\citep{xie2025wordsalad,duan2026circular}, and sharing it removes decoding as a
+source of difference between models. We do not balance the classes, so
+degeneration occurs at its natural rate under this setting, $3.0\%$, $7.5\%$
+and $10.7\%$ of validation responses. A monitor that never alarms then reaches $97.0\%$, $92.5\%$ and
+$89.3\%$ accuracy. A degenerate response runs to the token limit, so a rule
+that reads nothing from the model and flags only responses that reach the limit
+reaches an AUROC of \todo{1.000} on our test split. Response-level metrics
+cannot tell this rule from a probe that warns hundreds of tokens before the
+onset.
+
+We therefore borrow the evaluation used where early warnings are already
+deployed. Seizure prediction, quickest change detection and clinical early
+warning count alarms relative to the moment the event starts, with the rate of
+false alarms held fixed \citep{winterhalder2003seizure,basseville1993detection,hyland2020circulatory}.
+\method{} (\emph{onset-aligned warning diagnostics}) applies this to token-level
+monitors of language models. It fixes the share $\beta$ of healthy responses
+allowed to raise an alarm, and reports, relative to the annotated onset, how much
+of the degeneration a monitor flags, how much of the window just before the onset
+it flags, how often its first alarm precedes the onset, and by how many tokens.
+To our knowledge, no prior evaluation of language-model monitors credits alarms
+raised before an annotated onset under a fixed false-alarm budget.
+
+Applied to linear probes on the residual stream of all three models, \method{}
+changes which probe one would select. AUROC places every trained probe within
+\todo{0.004} of its maximum, and ranking probes by AUROC selects probes with
+\todo{3.9}$\times$ lower warning coverage than ranking by \method{}
+(\S\ref{sec:rq-metrics}). A similar gap has been reported for clinical
+early-warning models, whose discrimination falls to chance once only
+predictions made before treatment starts are counted
+\citep{kamran2024sepsis}. The probes do carry an early-warning signal. At a
+$5\%$ false-alarm budget their first alarm precedes the onset on
+\todo{60--73}\% of the degenerate responses they flag, on a test split with
+human-verified onsets (\S\ref{sec:rq-signal}). Our contributions are:
+\begin{itemize}
+  \item \method{}, an evaluation of token-level monitors relative to an
+  annotated failure onset under a response-level false-alarm budget, adapted
+  from event-based early-warning evaluation (\S\ref{sec:onward}).
+  \item Evidence that AUROC and accuracy, computed per response, saturate on
+  this task and rank probes against their early-warning behaviour, across
+  training strategies and layers (\S\ref{sec:rq-metrics}).
+  \item Linear probes for \textsc{Apertus}, \textsc{Llama} and \textsc{Mistral}
+  that warn before the onset at a $5\%$ false-alarm budget, and the finding that
+  low-rank adaptation of the layers below the probe more than doubles their
+  warning coverage (\S\ref{sec:rq-signal}, \S\ref{sec:rq-adaptation}).
+  \item A release of these probes with thresholds calibrated at $1\%$, $5\%$
+  and $10\%$ false-alarm budgets.
+\end{itemize}
+
+\method{} needs only a token-level scorer, a label for where the failure starts,
+and a set of healthy responses on which to fix the false-alarm budget. These
+already exist for other failures. Harmful content has been annotated at the
+token level \citep{li2025fineharm} and with the position where the unsafe part
+of a response begins \citep{singteam2026singprobe}, and hallucinations have been
+annotated at the word level \citep{niu2024ragtruth}. The right budget depends on
+what a false alarm costs. For degeneration it costs stopping or steering a
+healthy response, which is why we take $\beta=5\%$ as our working point. Where a
+missed failure is the larger cost, a different budget will be preferable.
+\Cref{app:related} discusses related work in full.

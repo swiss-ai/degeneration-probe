@@ -1,0 +1,124 @@
+\subsection{Related work in full}
+\label{app:related}
+
+\paragraph{Repetitive degeneration.}
+Repetition is a long-standing failure of neural text generation.
+\citet{holtzman2020curious} show that it is most frequent under
+likelihood-maximising decoding, with $73.66\%$ of greedy continuations ending
+in repetition, and that a repeated phrase becomes more probable each time it
+recurs. \citet{xu2022learning} measure this self-reinforcement directly: the
+more often a sentence already appears in the context, the more likely the model
+is to generate it again. \citet{welleck2020neural} trace repetition to the
+training objective and define the lexical measures \texttt{seq-rep-n} and
+rep$/\ell$, which are computed on a complete sequence. The failure has
+re-emerged in reasoning models, where a loop consumes the remaining decoding
+budget instead of producing an answer
+\citep{xie2025wordsalad,duan2026circular}. \citet{pipis2025wait} find that
+distilled models loop far more than their teachers and that raising the
+temperature reduces looping without removing its cause.
+\citet{ivgi2024loops} describe repetition as a fallback behaviour that models
+adopt as their uncertainty grows. On the mechanistic side,
+\citet{hiraoka2025repetition} locate neurons whose activation changes at the
+start of a repetition.
+
+\paragraph{Detecting and anticipating degeneration from internal states.}
+Several works read loops from hidden states, at different units of analysis.
+\citet{xie2025wordsalad} classify each blank-line-delimited chunk of a
+reasoning trace from the output of the final block at the chunk's last token,
+reaching $89.8$--$93.5\%$ accuracy on R1-Distill-Qwen-7B, and stop the
+generation after two consecutive positive chunks. \citet{yu2025breaking} detect
+recurrent generation from the similarity of binarised MLP activation patterns
+across all layers, starting after a minimum length, on prompts found by a
+search for inputs that trigger loops. \citet{duan2026circular} classify
+sentences from the mean of their last-layer states and accumulate the scores
+with a cumulative-sum rule \citep{page1954cusum}. They report early-detection
+rates of $0.64$--$0.76$ at false-positive rates of $0.24$--$0.34$, with lead
+times of $1306$--$1872$ tokens before verbatim repetition, using greedy decoding
+and balanced test sets built from tasks observed to trigger loops. Without
+their persistence requirement the false-positive rate rises to
+$0.40$--$0.62$. \citet{zhang2026radar} read attention statistics at
+geometrically spaced positions and report that their confidence crosses a
+threshold before the loop starts, mostly on attack-induced loops.
+\citet{oladri2026token} probe residual states at fixed positions to predict
+that a reasoning model will exhaust its budget and reach an AUROC of $0.61$
+on one model. None of these evaluates token-level alarms against an annotated
+onset under a fixed false-alarm budget, and none studies naturally occurring
+loops in instruction-tuned models.
+
+\paragraph{Monitors for other failures with an onset.}
+Probes on hidden states have been used as response classifiers for false
+statements \citep{azaria2023internal}, hallucination risk
+\citep{kossen2024semantic}, deception \citep{goldowskydill2025deception} and
+high-stakes interactions \citep{mckenzie2025highstakes}, and as failure
+detectors for hallucinated spans and entities
+\citep{chwang2024androids,obeso2025realtime}. Output-based uncertainty scores
+such as token entropy are the standard comparison for these probes
+\citep{manakul2023selfcheckgpt,obeso2025realtime}. For harmful content,
+streaming monitors read each prefix and can halt the output
+\citep{sharma2025constitutional,li2025fineharm,qwen2025qwen3guard,li2025kelp},
+sentence-level guards trade latency for stability \citep{yu2026sentguard}, and
+production systems use activation probes as a first stage
+\citep{kramar2026gemini}. Some monitors predict a failure before it appears.
+\citet{kavumba2026streamguard} forecast the harm of likely continuations from a
+prefix, \citet{snyder2024early} find that signals computed before a
+hallucinated token already predict it, \citet{kossen2024semantic} predict
+hallucination risk before the answer is generated, and probes predict whether a
+chain of thought or an intermediate answer will be correct
+\citep{afzal2025knowing,zhang2025reasoning}. Agent monitors raise alarms on
+partial trajectories at a fixed false-alarm budget
+\citep{huang2026prefixguard,dubey2026realtime}. Two recent works come closest to
+an onset-aligned evaluation. \citet{singteam2026singprobe} annotate where the
+unsafe part of a response starts but still score guards with response-level and
+token-level AUROC. \citet{itkin2026quickest} measure the delay of hallucination
+detectors after the annotated onset at a fixed false-alarm rate, and charge an
+alarm raised before the onset the same as a miss.
+
+\paragraph{Evaluating early-warning systems.}
+Fields that deploy early warnings evaluate them by when an alarm fires relative
+to the event. Seizure prediction relates sensitivity to the false prediction
+rate within a fixed prediction horizon \citep{winterhalder2003seizure}, quickest
+change detection compares detectors by their delay at a fixed false-alarm rate
+\citep{basseville1993detection}, and clinical systems report how many events
+are caught a given time ahead at a fixed number of alarms per patient-hour
+\citep{hyland2020circulatory}. The limits of AUROC for such systems are well
+documented. It is uninformative for clinical early-warning scores
+\citep{romerobrufau2015cstatistic}, can mislead under class imbalance
+\citep{saito2015precision}, and hides the regime of low false-positive rates
+that matters in deployment \citep{carlini2022membership}.
+\citet{kamran2024sepsis} report that a deployed sepsis model reaches an AUROC
+of $0.62$ on predictions made before sepsis criteria are met and $0.47$ on
+predictions made before the first sign of treatment, which suggests that it
+partly reacts to clinicians' actions. Range-based precision and
+recall \citep{tatbul2018precision} and the early risk detection error
+\citep{losada2016test} add position and delay to classification metrics for
+time series and text streams. \method{} combines these ideas for token-level
+monitors of language models: a response-level false-alarm budget, coverage of
+the failure and of a fixed window before its onset, and the timing of the first
+alarm.
+
+\paragraph{Acting on an alarm.}
+An early warning is useful because it allows an intervention. Activation
+steering can be applied only when a condition read from hidden states holds
+\citep{lee2025cast}, or only when a calibrated estimate says it will reduce the
+error \citep{hedstrom2025mera}. Probes can switch on refusal behaviour before
+an unsafe output is produced \citep{han2025safeswitch}. A model can be trained
+to discard an unsafe partial response and regenerate it
+\citep{zhang2025backtracking}, and reasoning can stop early once a probe judges
+an intermediate answer correct \citep{zhang2025reasoning}. For degeneration,
+\citet{xie2025wordsalad} cut the trace and regenerate once a loop is detected.
+Most of these interventions act on a failure that is already under way or on
+a prediction made from the prompt. Acting on a calibrated warning raised before
+the onset of degeneration is left to future work.
+
+\paragraph{Adapting the representation a probe reads.}
+Low-rank adapters \citep{hu2022lora} train a small number of added parameters
+and leave the pretrained weights unchanged. \citet{obeso2025realtime} train such
+adapters in the layers below a linear probe, jointly with it, and report higher
+AUROC for hallucinated entities than with a probe on the frozen model. Studies
+of fine-tuning find that it tends to strengthen mechanisms the model already has
+\citep{prakash2024finetuning}. Fine-tuning can also move what a probe reads, to
+the point of hiding a harmful state from it \citep{bailey2026obfuscated}. On
+the question of depth, linear features are often most readable in the middle of
+the network \citep{skean2025layer}, while degeneration detectors have read the
+final layer \citep{xie2025wordsalad,duan2026circular} or all layers
+\citep{yu2025breaking}.
