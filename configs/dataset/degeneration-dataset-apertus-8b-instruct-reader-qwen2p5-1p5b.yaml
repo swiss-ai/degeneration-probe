@@ -1,0 +1,25 @@
+short_name: apertus-8b-instruct-reader-qwen2p5-1p5b
+build_root: /capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/degeneration-dataset-apertus-8b-instruct-reader-qwen2p5-1p5b
+build_config: configs/dataset/builds/degeneration-dataset-apertus-8b-instruct.yaml
+# The apertus-8b-instruct build re-tokenized for the text-only reader Qwen2.5-1.5B
+# (scripts/build_reader_dataset.py). Generations, onset positions and token
+# counts are in reader tokens; prompts, labels and splits are links to the
+# source build. The reader's tokens can outnumber the generator's, hence the
+# longer completion limit.
+
+splits:
+  train: train
+  validation: val
+  test_indomain: test_indomain
+  test_heldout_domains: test_heldout_domains
+
+tokenization:
+  max_length: 5632
+  max_completion_length: 5120
+  prompt_truncation_side: left
+
+sampling:
+  train_negative_rollouts_per_positive: 4.0
+  evaluation_negative_rollouts_per_positive: null
+  domain_stratified: true
+  seed: null

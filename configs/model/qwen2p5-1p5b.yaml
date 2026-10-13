@@ -1,0 +1,4 @@
+short_name: qwen2p5-1p5b
+name: Qwen/Qwen2.5-1.5B
+tokenizer_name: Qwen/Qwen2.5-1.5B
+dtype: bfloat16
