@@ -109,6 +109,11 @@ def _(mo):
     - Nuova metrica preonset-coverage-{32,64,128,256}: quota di token segnalati nella parte di risposta che precede la warning band, sui rollout degeneri. Rivalutazione di tutti i run dai parquet degli score in corso. Al layer 15 frozen su test: 0.004 prima della band 256 contro 0.049 nella band.
     - Controllo posizionale rifatto sul nuovo pool (val e test in-domain, 3 seed, budget 1%): shuffled e argmax-only lasciano AUC e best accuracy invariate e muovono solo i numeri allineati all'onset. Ricetta scelta frozen L15 su test: Warn 256 0.086 as-scored, 0.53 shuffled, 0 argmax-only; preonset-coverage 256 0.010 contro 0.42 shuffled. LoRA L15: 0.265 / 0.67 / 0; LoRA L30: 0.32 / 0.66 / 0. A persistenza 4 e 8 argmax-only e token cap collassano ad AUC 0.5, lo shuffled resta alto. Tabelle in outputs/analysis/positional_control_{val,test_indomain}_summary.csv.
 
+    **13 ottobre 2026**
+
+    - LoRA su tutti i 31 layer per Llama e Mistral: 186 training finiti, 184 scoring su 186; due scoring si sono bloccati dopo il caricamento dei pesi sullo stesso nodo (nid005399) e sono stati rilanciati escludendolo. Aggregazione finale in coda dietro di loro.
+    - Profilo LoRA sui modelli di trasferimento, Warn 256 a budget 1% su test in-domain, media su 3 seed: Llama tra 0.04 e 0.075 a tutti i layer, senza un picco (frozen al pavimento: 0.006); post-onset 0.32-0.53. Mistral tra 0.02 e 0.08, massimo al layer 15 (0.078), post-onset 0.26-0.64 (frozen: 0.004). Apertus LoRA nello stesso confronto va da 0.09 al layer 2 a 0.32 al layer 30. L'adattamento quindi porta Llama e Mistral dal pavimento a livelli simili al frozen Apertus (0.086), ma non al suo adattato: la differenza tra i modelli resta grande. La pre-onset coverage di Llama e Mistral (0.02-0.07) e' vicina alla loro warning coverage: su quei modelli il probe adattato segnala il rollout piu' che l'avvicinamento.
+
     **Prossimi passi**
 
     - Al termine della sweep: resume dei run in timeout, replay, selezione, scoring su val, test in-domain e held-out.
