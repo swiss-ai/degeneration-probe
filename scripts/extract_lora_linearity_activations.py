@@ -63,6 +63,10 @@ magnitude, so this is not a loosened check, it is the correctly-scaled one.
         --frozen-run-dir outputs/apertus-8b-instruct_L1-31_all_tokens_hard1024_bce_lora-none_s42_7790c264/20260814T050453 \
         --lora-checkpoint outputs/apertus-8b-instruct_L15_all_tokens_hard1024_bce_lora-all_s42_b9e9df34/20260816T085625/checkpoint-1600 \
         --out-dir outputs/lora_linearity_probe/activations
+
+``--rollouts PROMPT_ID:IDX ...`` replaces the whole-prompt selection with
+individual rollouts from any split, which is how the paper's single-rollout
+figures get their frozen and adapted hidden states.
 """
 
 from __future__ import annotations
@@ -70,7 +74,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import torch
@@ -110,24 +114,46 @@ DEFAULT_PROMPT_IDS = [
 PROBE_LAYER_FOR_SANITY_CHECK = 15
 
 
-def load_rollouts(build_root: Path, prompt_ids: List[str]) -> pd.DataFrame:
+def parse_rollout_keys(values: List[str]) -> List[Tuple[str, int]]:
+    """Turn ``PROMPT_ID:IDX`` arguments into (prompt_id, rollout_idx) pairs."""
+    keys = []
+    for value in values:
+        prompt_id, sep, idx = value.rpartition(":")
+        if not sep or not prompt_id or not idx.isdigit():
+            raise ValueError(f"expected PROMPT_ID:IDX, got {value!r}")
+        keys.append((prompt_id, int(idx)))
+    return keys
+
+
+def load_rollouts(
+    build_root: Path, prompt_ids: List[str], rollout_keys: Optional[List[Tuple[str, int]]] = None
+) -> pd.DataFrame:
     onset = pd.read_parquet(build_root / "onset_labels" / "onset_labels.parquet")
-    selected = onset[onset["prompt_id"].isin(prompt_ids)].copy()
-    missing = set(prompt_ids) - set(selected["prompt_id"])
-    if missing:
-        raise ValueError(f"prompt id(s) not found in onset labels: {sorted(missing)}")
-    if not (selected["split"] == "val").all():
-        bad = selected.loc[selected["split"] != "val", ["prompt_id", "split"]]
-        raise ValueError(f"every rollout must be in the validation split, found:\n{bad}")
+    if rollout_keys:
+        wanted = pd.DataFrame(rollout_keys, columns=["prompt_id", "rollout_idx"]).drop_duplicates()
+        selected = onset.merge(wanted, on=["prompt_id", "rollout_idx"], how="inner", validate="one_to_one")
+        if len(selected) != len(wanted):
+            found = set(zip(selected["prompt_id"], selected["rollout_idx"]))
+            missing = [key for key in wanted.itertuples(index=False, name=None) if key not in found]
+            raise ValueError(f"rollout(s) not found in onset labels: {missing}")
+    else:
+        selected = onset[onset["prompt_id"].isin(prompt_ids)].copy()
+        missing = set(prompt_ids) - set(selected["prompt_id"])
+        if missing:
+            raise ValueError(f"prompt id(s) not found in onset labels: {sorted(missing)}")
+        if not (selected["split"] == "val").all():
+            bad = selected.loc[selected["split"] != "val", ["prompt_id", "split"]]
+            raise ValueError(f"every rollout must be in the validation split, found:\n{bad}")
     # is_positive already implies onset_resolution == "ok" in this corpus (checked once,
     # not re-derived here), so a positive rollout always has a usable frontier.
     bad_positive = selected[selected["is_positive"] & (selected["onset_resolution"] != "ok")]
     if not bad_positive.empty:
         raise ValueError(f"positive rollout(s) without a resolved frontier:\n{bad_positive}")
     selected = selected.sort_values(["prompt_id", "rollout_idx"]).reset_index(drop=True)
-    for prompt_id, group in selected.groupby("prompt_id"):
-        if len(group) != 10 or sorted(group["rollout_idx"]) != list(range(10)):
-            raise ValueError(f"expected rollouts 0..9 for {prompt_id!r}, found {sorted(group['rollout_idx'])}")
+    if not rollout_keys:
+        for prompt_id, group in selected.groupby("prompt_id"):
+            if len(group) != 10 or sorted(group["rollout_idx"]) != list(range(10)):
+                raise ValueError(f"expected rollouts 0..9 for {prompt_id!r}, found {sorted(group['rollout_idx'])}")
     return selected
 
 
@@ -291,6 +317,12 @@ def main() -> None:
     parser.add_argument("--lora-checkpoint", type=Path, required=True, help="Checkpoint dir of the LoRA run holding adapter_model.safetensors.")
     parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "outputs" / "lora_linearity_probe" / "activations")
     parser.add_argument("--prompt-ids", nargs="+", default=DEFAULT_PROMPT_IDS)
+    parser.add_argument(
+        "--rollouts",
+        nargs="+",
+        metavar="PROMPT_ID:IDX",
+        help="Extract only these rollouts, from any split, instead of all ten rollouts of each --prompt-ids prompt.",
+    )
     parser.add_argument("--sanity-rollouts", type=int, default=2)
     args = parser.parse_args()
 
@@ -302,8 +334,9 @@ def main() -> None:
     activations_root = config.dataset.activations_dir
     build_config = DatasetGenConfig.from_yaml(config.dataset.build_config)
 
-    print(f"Loading rollouts for prompts {args.prompt_ids} from {build_root}")
-    rollouts = load_rollouts(build_root, args.prompt_ids)
+    rollout_keys = parse_rollout_keys(args.rollouts) if args.rollouts else None
+    print(f"Loading rollouts for {args.rollouts or args.prompt_ids} from {build_root}")
+    rollouts = load_rollouts(build_root, args.prompt_ids, rollout_keys)
     rollouts = attach_text_and_tokens(build_root, rollouts)
     print(f"{len(rollouts)} rollouts total, {int(rollouts['is_positive'].sum())} positive")
 
