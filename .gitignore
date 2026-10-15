@@ -37,3 +37,6 @@ docs/paper
 
 # marimo's own session/autosave cache
 __marimo__/
+
+# Human review exports
+humanReview*.zip
