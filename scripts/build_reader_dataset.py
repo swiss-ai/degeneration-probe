@@ -56,13 +56,32 @@ def generator_char_ends(tokenizer, token_ids) -> tuple[str, np.ndarray]:
 
     stream = DecodeStream(skip_special_tokens=True)
     pieces, ends, length = [], np.zeros(len(token_ids), dtype=np.int64), 0
-    for index, token in enumerate(token_ids):
-        chunk = stream.step(tokenizer._tokenizer, int(token))
-        if chunk:
-            pieces.append(chunk)
-            length += len(chunk)
-        ends[index] = length
-    return "".join(pieces), ends
+    try:
+        for index, token in enumerate(token_ids):
+            chunk = stream.step(tokenizer._tokenizer, int(token))
+            if chunk:
+                pieces.append(chunk)
+                length += len(chunk)
+            ends[index] = length
+        return "".join(pieces), ends
+    except Exception:
+        return prefix_char_ends(tokenizer, token_ids)
+
+
+def prefix_char_ends(tokenizer, token_ids) -> tuple[str, np.ndarray]:
+    """The same offsets from decoding every prefix, for streams the incremental decoder rejects.
+
+    A prefix that ends inside a multi-byte character decodes with a trailing
+    replacement character, which is dropped, and the offsets are made
+    non-decreasing, so a character is credited to the token that completes it.
+    """
+    ids = [int(t) for t in token_ids]
+    text = tokenizer.decode(ids, skip_special_tokens=True)
+    ends = np.zeros(len(ids), dtype=np.int64)
+    for index in range(len(ids)):
+        prefix = tokenizer.decode(ids[: index + 1], skip_special_tokens=True).rstrip("\ufffd")
+        ends[index] = min(len(prefix), len(text))
+    return text, np.maximum.accumulate(ends)
 
 
 def convert_shard(task) -> dict:
