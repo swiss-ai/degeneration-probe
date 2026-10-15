@@ -84,13 +84,14 @@ def test_persistence_requires_consecutive_tokens_and_costs_lead_time():
     spiky[10] = 1.0  # a lone spike
     spiky[50:] = 1.0  # a sustained run
     assert first_alarm(spiky, 0.5, persistence=1) == 10
-    assert first_alarm(spiky, 0.5, persistence=3) == 50
-    # A sustained alarm is delayed by nothing; the window closes on its start.
-    assert first_alarm(oracle(), 0.5, persistence=5) == ONSET
+    assert first_alarm(spiky, 0.5, persistence=3) == 52
+    # The alarm sits on the token that completes the run, so even a sustained
+    # alarm waits m-1 tokens: it cannot act on scores not generated yet.
+    assert first_alarm(oracle(), 0.5, persistence=5) == ONSET + 4
     # A run shorter than the window can never trip the rule.
     brief = np.zeros(20, dtype=np.float32)
     brief[5:8] = 1.0
-    assert first_alarm(brief, 0.5, persistence=3) == 5
+    assert first_alarm(brief, 0.5, persistence=3) == 7
     assert first_alarm(brief, 0.5, persistence=4) is None
 
 
@@ -98,6 +99,24 @@ def test_a_rollout_shorter_than_the_window_can_never_fire():
     assert persistence_scores(np.ones(3), 5).size == 0
     assert first_alarm(np.ones(3), 0.5, persistence=5) is None
     assert rollout_score(np.ones(3), persistence=5) == 0.0
+
+
+def test_the_window_minimum_matches_a_direct_scan():
+    rng = np.random.default_rng(0)
+    for persistence in (2, 3, 7, 16, 100, 128):
+        scores = rng.random(int(rng.integers(persistence, 600)))
+        direct = [scores[i : i + persistence].min() for i in range(scores.size - persistence + 1)]
+        assert np.array_equal(persistence_scores(scores, persistence), direct)
+
+
+def test_the_alarm_never_uses_a_score_from_after_it():
+    scores = np.random.default_rng(1).random(300)
+    for persistence in (1, 2, 5, 32):
+        for tau in (0.3, 0.6, 0.9):
+            alarm = first_alarm(scores, tau, persistence)
+            if alarm is not None:
+                assert first_alarm(scores[: alarm + 1], tau, persistence) == alarm
+                assert first_alarm(scores[:alarm], tau, persistence) is None
 
 
 def test_one_pass_answers_every_threshold():
@@ -234,7 +253,7 @@ def test_persistence_separates_a_jittery_scorer_from_a_confident_one():
     # Which is what a persistence window is chosen from: m=2 removes every
     # single-token false alarm, and the sustained ones survive untouched.
     assert all(first_alarm(row, 0.5, persistence=2) is None for row in spiky)
-    assert all(first_alarm(row, 0.5, persistence=2) == 40 for row in sustained)
+    assert all(first_alarm(row, 0.5, persistence=2) == 41 for row in sustained)
 
 
 def test_commitment_is_the_point_after_which_it_never_backs_down():

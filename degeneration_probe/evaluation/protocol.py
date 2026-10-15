@@ -3,11 +3,13 @@
 Everything here is built on the first-alarm position: for a rollout r, a
 decision threshold tau and a persistence window m,
 
-    a_r(tau, m) = min { t : p_r(t') >= tau for all t' in [t, t+m) }
+    a_r(tau, m) = min { t : p_r(t') >= tau for all t' in (t-m, t] }
 
 or infinity when the scorer never fires. This is the first token at which the
 scorer would have acted, requiring m consecutive tokens at or above the
-threshold before committing. From it, four views are reported:
+threshold before committing, so the alarm sits on the token that completes the
+run and never uses a score the generator has not produced yet. From it, four
+views are reported:
 
     A  rollout-level detection: did the scorer catch this rollout at all
     B  token-level coverage: false positives on healthy text, recall inside
@@ -54,8 +56,11 @@ WARNING_BANDS = (32, 64, 128, 256)
 def persistence_scores(scores: np.ndarray, persistence: int) -> np.ndarray:
     """The score a firing rule actually sees, given it needs m tokens in a row.
 
-    Position t carries the minimum over [t, t+m), so a single spike can no
-    longer trip the rule while a sustained run still does.
+    Entry i carries the minimum over the window [i, i+m), so a single spike can
+    no longer trip the rule while a sustained run still does. The array is m-1
+    entries shorter than the rollout, and entry i only becomes known at token
+    i+m-1, the token that closes its window; anything reporting a position
+    from it has to add that m-1 back.
     """
     if persistence < 1:
         raise ValueError(f"persistence must be at least 1, got {persistence}")
@@ -64,8 +69,15 @@ def persistence_scores(scores: np.ndarray, persistence: int) -> np.ndarray:
         return scores
     if scores.size < persistence:
         return np.empty(0, dtype=np.float64)
-    windows = np.lib.stride_tricks.sliding_window_view(scores, persistence)
-    return windows.min(axis=1)
+    # Minimum over windows of doubling width, then two overlapping windows of
+    # the largest power of two cover any width exactly: O(n log m), not O(n m).
+    width, minima = 1, scores
+    while 2 * width <= persistence:
+        minima = np.minimum(minima[:-width], minima[width:])
+        width *= 2
+    count = scores.size - persistence + 1
+    shift = persistence - width
+    return np.minimum(minima[:count], minima[shift : shift + count])
 
 
 def alarm_staircase(scores: np.ndarray, persistence: int = 1) -> Tuple[np.ndarray, np.ndarray]:
@@ -73,14 +85,15 @@ def alarm_staircase(scores: np.ndarray, persistence: int = 1) -> Tuple[np.ndarra
 
     Raising the threshold can only delay an alarm, so the running maximum of
     the persistence scores is a staircase: at each step the position is the
-    first token that reaches that level. One pass answers every threshold.
+    token that completes the first run of m tokens reaching that level. One
+    pass answers every threshold.
     """
     effective = persistence_scores(scores, persistence)
     if effective.size == 0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
     running = np.maximum.accumulate(effective)
     rises = np.flatnonzero(np.r_[True, running[1:] > running[:-1]])
-    return rises.astype(np.int64), running[rises]
+    return (rises + persistence - 1).astype(np.int64), running[rises]
 
 
 def first_alarm(scores: np.ndarray, threshold: float, persistence: int = 1) -> Optional[int]:
