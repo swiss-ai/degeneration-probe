@@ -108,9 +108,10 @@ def corpus_table() -> str:
             cells.append(f"{n:,}".replace(",", "{,}") + f" ({100 * n / len(part):.1f}\\%)")
         rows.append("    " + " & ".join(cells) + r" \\")
     heads = " & ".join(label for _, label in MODELS.values())
+    labels_note = " Test rows use the human-verified labels, train and validation rows the judge's." if HUMAN else ""
     return rf"""\begin{{table}}[!htbp]
   \centering
-  \caption{{Dataset size per split: prompts, and degenerate responses per model with their share of evaluated responses. \texttt{{codeforces}} and \texttt{{medical\_o1}} appear only in the held-out split.}}
+  \caption{{Dataset size per split: prompts, and degenerate responses per model with their share of evaluated responses. \texttt{{codeforces}} and \texttt{{medical\_o1}} appear only in the held-out split.{labels_note}}}
   \label{{tab:corpus-splits}}
   \small
   \begin{{tabular}}{{lrrrr}}
