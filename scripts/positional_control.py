@@ -45,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from degeneration_probe.analysis.unit_levels import best_accuracy as response_best_accuracy  # noqa: E402
 from degeneration_probe.evaluation.protocol import (  # noqa: E402
     choose_thresholds,
     per_rollout_table,
@@ -104,18 +105,15 @@ def token_cap(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def best_accuracy(table: pd.DataFrame) -> float:
-    """The highest accuracy any threshold on the response score could reach."""
+    """The highest accuracy any threshold on the response score could reach.
+
+    Tied response scores fall on the same side of every threshold, which matters
+    for the token-cap rule: it gives every capped answer the same score, healthy
+    or not.
+    """
     one = table.drop_duplicates(["prompt_id", "rollout_idx"])
-    y = one["is_positive"].to_numpy(dtype=bool)
-    s = one["rollout_score"].to_numpy(dtype=float)
-    order = np.argsort(-s, kind="stable")
-    y = y[order]
-    tp = np.cumsum(y)
-    fp = np.cumsum(~y)
-    positives, negatives = int(y.sum()), int((~y).sum())
-    # predicting the top k as positive, for every k including none
-    correct = np.concatenate([[negatives], tp + (negatives - fp)])
-    return float(correct.max() / len(y))
+    return response_best_accuracy(one["is_positive"].to_numpy(dtype=int),
+                                  one["rollout_score"].to_numpy(dtype=float))
 
 
 def measure(

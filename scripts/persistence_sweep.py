@@ -7,6 +7,11 @@ the token that completes the first run of ``m`` flags, post-onset and
 pre-onset coverage are read as plain token coverage at that threshold, and the
 test splits are read against the thresholds frozen on validation.
 
+Plain coverage counts every token at or above the lowered threshold, including
+tokens that never belong to a run of ``m`` and so never move the alarm. The
+alarm-rule coverage next to it counts only the tokens on which a run of ``m``
+flags closes, the tokens at which the rule itself has fired.
+
     python scripts/persistence_sweep.py \\
         --probe "apertus frozen" outputs/<run>/<attempt>/selected/layer_15 [more seeds] \\
         --probe "apertus adapted" ... \\
@@ -24,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +38,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from degeneration_probe.evaluation.protocol import (  # noqa: E402
     choose_thresholds,
+    coverage_window,
     per_rollout_table,
+    persistence_scores,
     rank_metrics,
     view_a_detection,
     view_b_coverage,
@@ -46,6 +54,27 @@ SPLITS = ["val", "test_indomain", "test_heldout_domains"]
 BANDS = (32, 64, 128, 256)
 
 
+def alarm_rule_coverage(frame: pd.DataFrame, thresholds, persistence: int) -> Dict[float, Dict[str, float]]:
+    """Coverage of the tokens on which a run of m flags closes, pooled over positive rollouts."""
+    keys = ["in_pattern", *(f"warning_{w}" for w in BANDS)]
+    hits = {t.target_negative_fpr: dict.fromkeys(keys, 0) for t in thresholds}
+    total = dict.fromkeys(keys, 0)
+    for row in frame.itertuples(index=False):
+        if not row.is_positive:
+            continue
+        scores = np.asarray(row.scores, dtype=np.float64)
+        closing = np.r_[np.full(min(persistence - 1, scores.size), -np.inf), persistence_scores(scores, persistence)]
+        onset = int(row.onset_position)
+        segments = {"in_pattern": closing[onset:],
+                    **{f"warning_{w}": closing[coverage_window(scores.size, onset, w)] for w in BANDS}}
+        for key, segment in segments.items():
+            total[key] += segment.size
+            for t in thresholds:
+                hits[t.target_negative_fpr][key] += int(np.count_nonzero(segment >= t.tau))
+    return {k: {f"alarm_{key}": (h[key] / total[key] if total[key] else np.nan) for key in keys}
+            for k, h in hits.items()}
+
+
 def measure(val: pd.DataFrame, target: pd.DataFrame, budgets, persistence: int) -> List[Dict[str, float]]:
     thresholds = choose_thresholds(val, budgets, persistence=persistence)
     table = per_rollout_table(target, thresholds, persistence=persistence)
@@ -53,6 +82,7 @@ def measure(val: pd.DataFrame, target: pd.DataFrame, budgets, persistence: int) 
     b = view_b_coverage(target, thresholds).set_index("target_negative_fpr")
     c = view_c_lead_time(table).set_index("target_negative_fpr")
     auc = rank_metrics(table)["rollout_auc"]
+    alarm = alarm_rule_coverage(target, thresholds, persistence)
     rows = []
     for t in thresholds:
         k = t.target_negative_fpr
@@ -69,6 +99,7 @@ def measure(val: pd.DataFrame, target: pd.DataFrame, budgets, persistence: int) 
             "in_pattern_recall": float(b.loc[k, "in_pattern_recall"]),
             **{f"warning_recall_{w}": float(b.loc[k, f"warning_recall_{w}"]) for w in BANDS},
             **{f"preonset_coverage_{w}": float(b.loc[k, f"preonset_coverage_{w}"]) for w in BANDS},
+            **alarm[k],
             "fired_before_frontier": float(c.loc[k, "fired_before_frontier"]),
             "median_offset": float(c.loc[k, "median_offset"]),
             "never_fired_positives": int(c.loc[k, "never_fired_positives"]),
