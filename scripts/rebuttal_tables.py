@@ -8,10 +8,10 @@ change (for example on the human-verified split).
 
 Tables: corpus composition (tab:corpus-splits), training strategies
 (tab:strategies), positional control (tab:positional-control), rank transfer
-(tab:rank-transfer), the reported probes (tab:probes, tab:heldout), persistence
-(tab:persistence) and the baseline comparison (tab:baselines, tab:baselines-1pct,
-tab:baselines-full), which reads outputs/analysis/q3_comparison.csv from
-scripts/q3_comparison.py.
+(tab:rank-transfer), persistence (tab:persistence) and warning coverage by
+source (tab:per-source). The tables with every scorer on each test split
+(tab:baselines, tab:probes-judge, tab:heldout, tab:heldout-human) and the
+baseline sweeps are written by scripts/baseline_sweep_tables.py.
 """
 
 from __future__ import annotations
@@ -29,6 +29,34 @@ MODELS = {"apertus": ("apertus-8b-instruct", r"\textsc{Apertus}"),
           "llama3p1": ("llama3p1-8b-instruct", r"\textsc{Llama}"),
           "mistral": ("mistral-7b-instruct-v0p1", r"\textsc{Mistral}")}
 UNJUDGED = ["judge_failed", "not_found"]
+HUMAN_LABELS = STORE / "human_review" / "labels"
+# Set by --human: every test-split number is read on the human-verified labels.
+HUMAN = False
+
+
+def evaluation_folder(split: str) -> str:
+    """Where a scorer's evaluation of a split lives: validation always in evaluation/, the test splits in
+    evaluation_human/ under --human."""
+    return "evaluation_human" if HUMAN and split != "val" else "evaluation"
+
+
+def test_split_name() -> str:
+    return "human-verified in-domain test split" if HUMAN else "in-domain test split"
+
+
+def onset_labels(dataset: str) -> pd.DataFrame:
+    """A build's onset labels, with the reviewers' verdicts and onsets on the test splits under --human."""
+    labels = pd.read_parquet(STORE / f"degeneration-dataset-{dataset}" / "onset_labels" / "onset_labels.parquet")
+    if not HUMAN:
+        return labels
+    reviewed = pd.read_csv(HUMAN_LABELS / f"labels_{dataset}.csv").set_index("id")
+    keys = labels["prompt_id"] + "::" + labels["rollout_idx"].astype(str)
+    labels = labels[~keys.isin(reviewed.index[reviewed["drop"]])].copy()
+    keys = labels["prompt_id"] + "::" + labels["rollout_idx"].astype(str)
+    hit = keys.isin(reviewed.index).to_numpy()
+    labels.loc[hit, "is_positive"] = reviewed.loc[keys[hit], "is_positive"].to_numpy(bool)
+    labels.loc[hit, "onset_position"] = reviewed.loc[keys[hit], "onset_position"].to_numpy(float)
+    return labels
 
 
 def small(value):
@@ -49,11 +77,11 @@ def pm(mean, std, digits):
 
 
 def metrics_table() -> pd.DataFrame:
-    table = pd.read_csv(ANALYSIS / "selected_metrics.csv")
+    table = pd.read_csv(ANALYSIS / ("selected_metrics_human.csv" if HUMAN else "selected_metrics.csv"))
     outputs = ANALYSIS.parent
     table["scorer_dir"] = [f"{outputs}/{r}/{a}/selected/layer_{int(l):02d}"
                            for r, a, l in zip(table["run_name"], table["attempt"], table["layer"])]
-    pool = ANALYSIS / "response_metrics_pool.csv"
+    pool = ANALYSIS / ("response_metrics_pool_human.csv" if HUMAN else "response_metrics_pool.csv")
     if pool.is_file():
         table = table.merge(pd.read_csv(pool)[["scorer_dir", "split", "best_accuracy"]],
                             on=["scorer_dir", "split"], how="left")
@@ -63,11 +91,11 @@ def metrics_table() -> pd.DataFrame:
 def corpus_table() -> str:
     rows, data = [], {}
     for model, (dataset, _) in MODELS.items():
-        labels = pd.read_parquet(STORE / f"degeneration-dataset-{dataset}" / "onset_labels" / "onset_labels.parquet")
-        # The evaluated population: unjudged responses and capped responses
-        # ruled healthy are left out, as in the protocol.
+        labels = onset_labels(dataset)
+        # The evaluated population: responses the judge could not rule on are
+        # left out, as in the protocol. Capped responses ruled healthy stay, as
+        # healthy responses.
         labels = labels[~labels["onset_resolution"].isin(UNJUDGED)]
-        labels = labels[~((labels["stop_reason"] != "eos") & ~labels["is_positive"].astype(bool))]
         data[model] = labels
     base = data["apertus"]
     for split, name in [("train", "Train"), ("val", "Validation"), ("test_indomain", "Test, in-domain"),
@@ -82,11 +110,7 @@ def corpus_table() -> str:
     heads = " & ".join(label for _, label in MODELS.values())
     return rf"""\begin{{table}}[!htbp]
   \centering
-  \caption{{Number of prompts per split and number of degenerate responses per
-  model, with their share of the evaluated responses in parentheses. Each prompt
-  has $10$ responses per model. Responses the judge could not rule on, and capped
-  responses it ruled healthy, are not evaluated. \texttt{{codeforces}} and
-  \texttt{{medical\_o1}} appear only in the held-out test split.}}
+  \caption{{Dataset size per split: prompts, and degenerate responses per model with their share of evaluated responses. \texttt{{codeforces}} and \texttt{{medical\_o1}} appear only in the held-out split.}}
   \label{{tab:corpus-splits}}
   \small
   \begin{{tabular}}{{lrrrr}}
@@ -125,6 +149,19 @@ def strategy_name(row) -> tuple[str, str]:
     return group, text
 
 
+def bold_name(name: str) -> str:
+    """A strategy name in bold: typewriter words as bold text, math in bold, plain words in bold."""
+    parts = []
+    for part in name.split(" "):
+        if part.startswith(r"\texttt{"):
+            parts.append(r"\textbf{" + part[len(r"\texttt{"):])
+        elif part.startswith("$"):
+            parts.append(r"$\mathbf{" + part.strip("$") + "}$")
+        else:
+            parts.append(r"\textbf{" + part + "}")
+    return " ".join(parts)
+
+
 def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
     apertus = table[table["model"] == "apertus"]
     val_sel = apertus[(apertus["split"] == "val") & np.isclose(apertus["target_negative_fpr"], 0.01) & apertus["selectable"]]
@@ -150,11 +187,16 @@ def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
             "sort": val["warning_recall_256"].mean(),
         })
     frame = pd.DataFrame(rows).sort_values("sort", ascending=False)
+    # The selected strategy is the frozen one with the highest validation score; its name and that score are in bold.
+    frozen = frame[frame["group"] != "adapted"]
+    selected = frozen["sort"].idxmax()
+    frame.loc[selected, "name"] = bold_name(frame.loc[selected, "name"])
+    frame.loc[selected, "warn_val"] = rf"$\mathbf{{{frame.loc[selected, 'warn_val'].strip('$')}}}$"
     headers = {
         "selection": r"\textbf{Token selection} (frozen, hard target, $K{=}0$)",
         "horizon": r"\textbf{Target horizon} (frozen, hard target from $K$ tokens before the onset)",
         "soft": r"\textbf{Soft targets} (frozen, \texttt{frontier\_window} $W{=}512$ centred)",
-        "adapted": r"\textbf{Adapted} (LoRA rank 16 on blocks $1$ to $\ell$)",
+        "adapted": r"\textbf{Adapted} (LoRA rank 16 on blocks $0$ to $\ell$)",
     }
     lines = []
     for group, header in headers.items():
@@ -170,17 +212,13 @@ def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
     dagger = " $\\ddag$: fewer than three seeds reach the post-onset floor." if any("ddag" in l for l in lines) else ""
     return rf"""\begin{{table}}[!htbp]
   \centering
-  \caption{{Training strategies compared on \textsc{{Apertus}}. Two budgets appear, for
-  different purposes. \emph{{Selection}} uses the validation split at $\beta=1\%$:
-  for each seed, the layer and checkpoint are those with the highest validation
-  $\mathrm{{Warn}}_{{256}}$ among those with post-onset coverage at least 0.3, and
-  strategies are ordered by this validation score (column ``$\mathrm{{Warn}}_{{256}}$
-  (val, 1\%)''). \emph{{Reporting}} uses the in-domain test split at $\beta={budget * 100:.0f}\%$:
-  post-onset coverage, $\mathrm{{Warn}}_{{256}}$ and early-warning rate are measured
-  with the threshold calibrated on validation for $\beta={budget * 100:.0f}\%$. AUROC needs no
-  threshold. Layer: median and range over seeds of the selected layer; all other
-  columns: mean $\pm$ one standard deviation over three seeds. AUROC varies little
-  between strategies, while warning coverage varies several-fold.{dagger}}}
+  \caption{{Training strategies compared on \textsc{{Apertus}}. Strategies are ordered by
+  validation $\mathrm{{Warn}}_{{256}}$ at $\beta=1\%$, the score the selection rule of
+  \Cref{{sec:onward}} uses, and the selected strategy is in bold. The other metric columns
+  are measured on the {test_split_name()} at $\beta={budget * 100:.0f}\%$. Layer: median and
+  range over seeds of the selected layer. Other columns: mean $\pm$ one standard deviation
+  over three seeds. AUROC varies little between strategies, while warning coverage varies
+  several-fold.{dagger}}}
   \label{{tab:strategies}}
   \footnotesize
   \setlength{{\tabcolsep}}{{3pt}}
@@ -197,7 +235,10 @@ def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
 
 
 def positional_table(split: str) -> str:
-    frame = pd.read_csv(ANALYSIS / f"positional_control_{split}_summary.csv")
+    """The positional control: every metric of three scorers as scored, shuffled within each response, and with
+    only the maximum kept, at m=1 and m=4."""
+    frame = pd.read_csv(ANALYSIS / f"positional_control_{split}{'_human' if HUMAN and split != 'val' else ''}.csv")
+    frame = frame.groupby(["scorer", "transform", "persistence"]).mean(numeric_only=True)
     names = {
         "best probe by AUC (random_window W=64)": "frozen, highest AUROC",
         "worst probe by AUC (frontier W=1024 trailing K=128)": "frozen, lowest AUROC",
@@ -205,40 +246,44 @@ def positional_table(split: str) -> str:
     }
     lines = []
     for key, name in names.items():
-        part = frame[frame["scorer"] == key]
-        auc = part[(part["transform"] == "as scored") & (part["persistence"] == 1)]["rollout_auc_mean"].iloc[0]
+        auc = frame.loc[(key, "as scored", 1), "rollout_auc"]
         block = []
         for i, transform in enumerate(["as scored", "shuffled", "argmax only"]):
             cells = []
             for m in (1, 4):
-                r = part[(part["transform"] == transform) & (part["persistence"] == m)].iloc[0]
-                post = r["in_pattern_recall_mean"]
-                cells += [f"{r['rollout_auc_mean']:.4f}" if m > 1 else "",
-                          small(post), small(r["warning_recall_256_mean"])]
+                r = frame.loc[(key, transform, m)]
+                if m > 1:
+                    cells.append(f"{r['rollout_auc']:.4f}")
+                cells += [small(r["in_pattern_recall"]), small(r["warning_recall_256"])]
+                cells += ["--", "--"] if pd.isna(r["median_offset"]) \
+                    else [f"{r['fired_before_frontier']:.2f}", f"${r['median_offset']:+.0f}$"]
+                cells.append(small(r["preonset_coverage_256"]))
             head = rf"\multirow{{3}}{{*}}{{\shortstack[l]{{{name}\\AUROC ${auc:.4f}$}}}}" if i == 0 else ""
-            block.append(f"    {head} & {transform} & " + " & ".join(c for c in cells if c != "") + r" \\")
+            block.append(f"    {head} & {transform} & " + " & ".join(cells) + r" \\")
         lines.append("\n".join(block))
     body = ("\n    \\midrule\n").join(lines)
     return rf"""\begin{{table}}[!htbp]
   \centering
-  \caption{{The positional control. \emph{{Shuffled}} permutes each response's
-  token scores and \emph{{argmax only}} keeps only its highest score; both keep
-  every response's maximum, so at $m=1$ AUROC (given once per scorer) and the
-  calibrated threshold are unchanged by construction. At $m=4$ an alarm needs
-  four consecutive flagged tokens, the threshold is recalibrated, and a scorer
-  whose evidence is one token never fires (AUROC $0.5$). \textsc{{Apertus}},
-  layer $15$, in-domain test split, $\beta=1\%$, mean over three seeds.}}
+  \caption{{\emph{{Shuffled}} permutes each response's
+  token scores and \emph{{argmax only}} keeps only its highest score, at its
+  position. AUROC is given once per scorer at $m=1$, where neither transform
+  changes it. At $m=4$ the threshold is recalibrated. --: no alarm.
+  \textsc{{Apertus}}, layer $15$, {test_split_name()}, $\beta=1\%$, mean over
+  three seeds.}}
   \label{{tab:positional-control}}
-  \small
-  \begin{{tabular}}{{ll rr rrr}}
+  \footnotesize
+  \setlength{{\tabcolsep}}{{3pt}}
+  \resizebox{{\linewidth}}{{!}}{{%
+  \begin{{tabular}}{{ll rrrrr rrrrrr}}
     \toprule
-    & & \multicolumn{{2}}{{c}}{{$m=1$}} & \multicolumn{{3}}{{c}}{{$m=4$}} \\
-    \cmidrule(lr){{3-4}}\cmidrule(lr){{5-7}}
-    Scorer & Scores & Post & $\mathrm{{Warn}}_{{256}}$ & AUROC & Post & $\mathrm{{Warn}}_{{256}}$ \\
+    & & \multicolumn{{5}}{{c}}{{$m=1$}} & \multicolumn{{6}}{{c}}{{$m=4$}} \\
+    \cmidrule(lr){{3-7}}\cmidrule(lr){{8-13}}
+    Scorer & Scores & Post & $\mathrm{{Warn}}_{{256}}$ & Early & Lead & Pre & AUROC & Post & $\mathrm{{Warn}}_{{256}}$ & Early & Lead & Pre \\
     \midrule
 {body}
     \bottomrule
-  \end{{tabular}}
+  \end{{tabular}}%
+  }}
 \end{{table}}
 """
 
@@ -264,7 +309,7 @@ def rank_table(table: pd.DataFrame, split: str, budget: float) -> str:
         lines.append(f"    {name} & ${own:+.2f}$ & {cell} \\\\")
     return rf"""\begin{{table}}[!htbp]
   \centering
-  \caption{{Rank transfer from validation to the in-domain test split, Kendall's
+  \caption{{Rank transfer from validation to the {test_split_name()}, Kendall's
   $\tau$ over the ${n}$ \textsc{{Apertus}} training strategies, each read at its
   validation-selected layer, at $\beta={budget * 100:.0f}\%$. Left: whether a metric
   reproduces its own ordering. Right: whether its validation ordering predicts
@@ -284,7 +329,7 @@ def rank_table(table: pd.DataFrame, split: str, budget: float) -> str:
 
 def persistence_table(split: str, budget: float, ms=(1, 16, 64)) -> str:
     """Warning coverage, early-warning rate, lead and post-onset coverage as m grows."""
-    frame = pd.read_csv(ANALYSIS / "persistence_sweep_summary.csv")
+    frame = pd.read_csv(ANALYSIS / ("persistence_sweep_human_summary.csv" if HUMAN else "persistence_sweep_summary.csv"))
     frame = frame[(frame["split"] == split) & np.isclose(frame["target_negative_fpr"], budget)]
     order = []
     for model, label in (("apertus", r"\textsc{Apertus}"), ("llama", r"\textsc{Llama}"), ("mistral", r"\textsc{Mistral}")):
@@ -300,28 +345,21 @@ def persistence_table(split: str, budget: float, ms=(1, 16, 64)) -> str:
             lines.append(r"    \midrule")
         part = frame[frame["probe"] == probe].set_index("persistence")
         cells = [label, name]
-        for column in ("warning_recall_256_mean", "fired_before_frontier_mean", "median_offset_mean", "in_pattern_recall_mean"):
+        for column in ("in_pattern_recall_mean", "warning_recall_256_mean", "fired_before_frontier_mean", "median_offset_mean"):
             fmt = (lambda v: f"${v:+.0f}$") if column == "median_offset_mean" else (lambda v: f"{v:.3f}")
             cells += [fmt(part.loc[m, column]) if m in part.index else "--" for m in ms]
         lines.append("    " + " & ".join(cells) + r" \\")
     heads = " & ".join(f"${m}$" for m in ms)
     return rf"""\begin{{table}}[!htbp]
   \centering
-  \caption{{Effect of the persistence $m$, the number of consecutive flagged tokens an
-  alarm needs, recalibrated at each $m$ so that every entry spends
-  $\beta={budget * 100:.0f}\%$. $\mathrm{{Warn}}_{{256}}$ and post-onset coverage
-  count every token at or above the threshold of that $m$. The early-warning rate
-  and the lead describe the first alarm, which needs a complete run of $m$ flags.
-  Lead is the median offset of the first alarm from the onset, in tokens. Each model has its
-  frozen probe at the layer selected on validation, the adapted probe at the
-  same layer, and the adapted probe at its own selected layer. In-domain test
-  split, mean over three seeds.}}
+  \caption{{Probes at persistence $m\in\{{{", ".join(str(m) for m in ms)}\}}$, with the threshold
+  recalibrated at each $m$ for $\beta={budget * 100:.0f}\%$. {test_split_name()[0].upper() + test_split_name()[1:]}, mean over three seeds.}}
   \label{{tab:persistence}}
   \footnotesize
   \setlength{{\tabcolsep}}{{3.5pt}}
   \begin{{tabular}}{{ll ccc ccc ccc ccc}}
     \toprule
-    & & \multicolumn{{3}}{{c}}{{$\mathrm{{Warn}}_{{256}}$}} & \multicolumn{{3}}{{c}}{{Early-warning rate}} & \multicolumn{{3}}{{c}}{{Lead}} & \multicolumn{{3}}{{c}}{{Post-onset coverage}} \\
+    & & \multicolumn{{3}}{{c}}{{Post}} & \multicolumn{{3}}{{c}}{{$\mathrm{{Warn}}_{{256}}$}} & \multicolumn{{3}}{{c}}{{Early}} & \multicolumn{{3}}{{c}}{{Lead}} \\
     \cmidrule(lr){{3-5}}\cmidrule(lr){{6-8}}\cmidrule(lr){{9-11}}\cmidrule(lr){{12-14}}
     Model & Probe & {heads} & {heads} & {heads} & {heads} \\
     \midrule
@@ -440,7 +478,7 @@ def per_source_metrics(table: pd.DataFrame, budget: float) -> pd.DataFrame:
                 rows = s4[(s4["model"] == model) & (s4["regime"] == regime) & (s4["layer"] == layer)
                           & (s4["split"] == split) & np.isclose(s4["target_negative_fpr"], budget)]
                 for scorer_dir in rows["scorer_dir"]:
-                    responses = pd.read_csv(f"{scorer_dir}/evaluation/{split}/rollout_table.csv")
+                    responses = pd.read_csv(f"{scorer_dir}/{evaluation_folder(split)}/{split}/rollout_table.csv")
                     responses = responses[np.isclose(responses["target_negative_fpr"], budget)]
                     for source, group in responses.groupby("domain"):
                         positive = group[group["is_positive"].astype(bool)]
@@ -454,7 +492,7 @@ def per_source_metrics(table: pd.DataFrame, budget: float) -> pd.DataFrame:
 def per_source_table(table: pd.DataFrame, budget: float) -> str:
     frame = per_source_metrics(table, budget).set_index(["model", "regime", "source"])
     blocks = []
-    for metric, title in (("warn", r"Warning coverage $\mathrm{Warn}_{256}$"), ("early", "Early-warning rate")):
+    for metric, title in (("warn", r"$\mathrm{Warn}_{256}$"), ("early", "Early")):
         lines = [rf"\multicolumn{{10}}{{l}}{{\textbf{{{title}}}}} \\"]
         for i, (split, sources) in enumerate(SOURCES):
             if i:
@@ -478,7 +516,7 @@ def per_source_table(table: pd.DataFrame, budget: float) -> str:
 selected layer, at $\beta={budget * 100:.0f}\%$ with the thresholds calibrated on the whole validation split. The
 first five sources form the in-domain test split, the last two the held-out split. $n$: number of degenerate
 responses of the source. Rates are left out (--) for sources with fewer than ${MIN_SOURCE_POSITIVES}$ degenerate
-responses. Judge labels, mean over three seeds.}}
+responses. {"Human-verified" if HUMAN else "Judge"} labels, mean over three seeds.}}
 \label{{tab:per-source}}
 \setlength{{\tabcolsep}}{{3pt}}
 \resizebox{{\linewidth}}{{!}}{{%
@@ -664,7 +702,10 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--split", default="test_indomain")
     parser.add_argument("--budget", type=float, default=0.05)
+    parser.add_argument("--human", action="store_true", help="read every test-split number on the human-verified labels")
     args = parser.parse_args()
+    global HUMAN
+    HUMAN = args.human
     args.out.mkdir(parents=True, exist_ok=True)
     table = metrics_table()
     outputs = {
@@ -673,27 +714,7 @@ def main() -> None:
         "positional_control.tex": positional_table(args.split),
         "rank_transfer.tex": rank_table(table, args.split, args.budget),
         "persistence.tex": persistence_table(args.split, args.budget),
-        "heldout.tex": heldout_table(table, args.budget),
-        "heldout_human.tex": heldout_human_table(table, args.budget),
-        "probes.tex": indomain_table(table, args.budget),
-        "probes_judge.tex": indomain_judge_table(table, args.budget),
         "per_source.tex": per_source_table(table, args.budget),
-        "baselines.tex": comparison_table(
-            args.budget, args.split, "tab:baselines",
-            rf"Probes against the baselines on the in-domain test split at $\beta={args.budget * 100:.0f}\%$. "
-            + COMPARISON_NOTE),
-        "baselines_1pct.tex": comparison_table(
-            0.01, args.split, "tab:baselines-1pct",
-            r"The comparison of \Cref{tab:baselines} at $\beta=1\%$. " + COMPARISON_NOTE),
-        "baselines_full.tex": comparison_full_table(
-            args.budget, args.split, "tab:baselines-full",
-            rf"Every scorer of \Cref{{tab:baselines}} with all metrics, in-domain test split, $\beta={args.budget * 100:.0f}\%$. "
-            r"\emph{FA}: realised false-alarm rate on healthy responses, in percent. \emph{Detection}: share of "
-            r"degenerate responses that raise an alarm. \emph{Pre}: coverage of the positions before the warning "
-            r"window. \emph{Lead}: median first alarm minus the onset, in tokens, over alarmed degenerate responses. "
-            r"Random alarms flag each token with a probability calibrated on validation, so their coverage equals "
-            r"that probability and all their metrics follow in closed form. Mean $\pm$ one standard deviation over three "
-            r"seeds for probes."),
     }
     for name, text in outputs.items():
         (args.out / name).write_text(text)

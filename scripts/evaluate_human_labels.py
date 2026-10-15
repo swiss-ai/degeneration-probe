@@ -17,6 +17,12 @@ can be read while it is still coming in:
   respectively. The difference between these two is the effect of the labels
   alone.
 
+With ``--write-evaluation NAME`` the ``hybrid`` population of every run and
+split is also written to ``<run-dir>/NAME/<split>/`` in the layout of the
+regular ``evaluation/`` folder, so every reader of that folder (the comparison
+table among them) reads the human-verified split unchanged. Once every capped
+test response has a review, ``hybrid`` is the human-verified split itself.
+
 Onset positions follow the label table's convention. A confirmed onset keeps
 the stored token position. A moved onset is mapped from its character offset
 to the token holding that character, then shifted by the offset between the
@@ -49,8 +55,35 @@ if str(REPO_ROOT) not in sys.path:
 from degeneration_probe.dataset_gen import paths
 from degeneration_probe.dataset_gen.config import DatasetGenConfig
 from degeneration_probe.evaluation.protocol import Threshold, evaluate
+from degeneration_probe.utils.file_utils import save_json
 
 TEST_SPLITS = ("test_indomain", "test_heldout_domains")
+UNJUDGED = ("judge_failed", "not_found")
+POPULATIONS = {
+    "judge": (False, False),
+    "hybrid": (True, False),
+    "reviewed_judge": (False, True),
+    "reviewed_human": (True, True),
+}
+
+
+def write_evaluation(out: Path, split: str, result: dict, coverage: dict) -> None:
+    """One split's results in the layout of ``evaluate_scores.py``'s ``evaluation/`` folder."""
+    out.mkdir(parents=True, exist_ok=True)
+    for name, value in result.items():
+        if isinstance(value, pd.DataFrame):
+            value.to_csv(out / f"{name}.csv", index=False)
+    save_json(
+        {
+            "split": split,
+            "persistence": result["persistence"],
+            "thresholds": result["thresholds"],
+            "rank_metrics": result["rank_metrics"],
+            "labels": "human-verified where reviewed, judge elsewhere",
+            "review_coverage": coverage,
+        },
+        out / "summary.json",
+    )
 
 
 def load_reviews(sources: List[Path], dataset_tag: str) -> pd.DataFrame:
@@ -141,9 +174,14 @@ def human_labels(
 
         row = {"id": key, "reviewer": review.reviewer, "split": label["split"], "drop": False,
                "is_positive": False, "onset_position": np.nan, "onset_moved": False,
-               "judge_positive": bool(label["is_positive"])}
+               "judge_positive": bool(label["is_positive"]),
+               "unjudged": label["onset_resolution"] in UNJUDGED}
         decision = decided.loc[key] if key in decided.index else None
-        if decision is not None and decision["decision"] == "drop":
+        if label["onset_resolution"] in UNJUDGED:
+            # The judge could not rule on it, so it is left out of every population, as in the judge-labelled
+            # evaluation, whatever the reviewer decided.
+            row["drop"] = True
+        elif decision is not None and decision["decision"] == "drop":
             row["drop"] = True
         elif decision is not None and decision["decision"] == "pending":
             # Undecided: the rollout keeps whatever the stored labels say.
@@ -169,10 +207,41 @@ def human_labels(
     return pd.DataFrame(rows)
 
 
+HUMAN_LABELS = Path("/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/human_review/labels")
+
+
+def labels_for_scores(scores_dir: Path) -> Optional[pd.DataFrame]:
+    """The human label table of the build a scored directory describes, or None if there is none.
+
+    The build is read from the run configuration beside the scores, the same way
+    the evaluation finds its onset labels; a baseline directory names its build
+    in its path."""
+    from scripts.evaluate_scores import _discover_onset_labels
+
+    onset = _discover_onset_labels(Path(scores_dir))
+    names = [onset.parent.parent.name] if onset is not None else list(Path(scores_dir).parts)
+    for name in names:
+        dataset = name.replace("degeneration-dataset-", "")
+        path = HUMAN_LABELS / f"labels_{dataset}.csv"
+        if path.is_file():
+            return pd.read_csv(path)
+    return None
+
+
+def apply_human_labels(frame: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
+    """A score frame with the human-verified labels: reviewed rollouts take the reviewer's verdict and onset, and
+    the rollouts the reviewers dropped are removed. Rows of other splits pass through unchanged."""
+    return relabel(frame, labels, human=True, reviewed_only=False)
+
+
 def relabel(frame: pd.DataFrame, labels: pd.DataFrame, *, human: bool, reviewed_only: bool) -> pd.DataFrame:
     frame = frame.copy()
     frame["id"] = frame["prompt_id"] + "::" + frame["rollout_idx"].astype(str)
     reviewed = labels.set_index("id")
+    if "unjudged" in reviewed.columns:
+        # Responses the judge could not rule on are out of every population, judge or human, as in the
+        # regular evaluation; a scorer whose score table still holds them (the baselines) drops them here.
+        frame = frame[~frame["id"].isin(reviewed.index[reviewed["unjudged"].astype(bool)])]
     if reviewed_only:
         keep = (frame["stop_reason"] == "eos") | frame["id"].isin(reviewed.index)
         frame = frame[keep]
@@ -210,12 +279,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset-config", type=Path, required=True)
     parser.add_argument("--tokenizer", default=None, help="Defaults to the build's model_name.")
-    parser.add_argument("--reviews", type=Path, nargs="+", required=True)
+    parser.add_argument("--reviews", type=Path, nargs="*", default=[])
     parser.add_argument("--adjudications", type=Path, default=None)
-    parser.add_argument("--run-dirs", type=Path, nargs="+", required=True,
+    parser.add_argument("--run-dirs", type=Path, nargs="*", default=[],
                         help="Directories holding scores/ and decision_thresholds.json (one depth each).")
     parser.add_argument("--splits", nargs="*", default=list(TEST_SPLITS))
     parser.add_argument("--labels-out", type=Path, default=None)
+    parser.add_argument("--labels-in", type=Path, default=None,
+                        help="A label table written earlier with --labels-out; skips reading the reviews.")
+    parser.add_argument("--run-dirs-file", type=Path, default=None, help="More run directories, one per line.")
+    parser.add_argument("--populations", nargs="*", default=list(POPULATIONS), choices=list(POPULATIONS))
+    parser.add_argument("--write-evaluation", default=None, metavar="NAME",
+                        help="Also write the hybrid population to <run-dir>/NAME/<split>/.")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
@@ -224,15 +299,30 @@ def main() -> None:
     onset = pd.read_parquet(paths.onset_labels_path(config))
     onset["id"] = onset["prompt_id"] + "::" + onset["rollout_idx"].astype(str)
 
+    if args.run_dirs_file:
+        args.run_dirs = list(args.run_dirs) + [Path(line) for line in args.run_dirs_file.read_text().split() if line]
+    capped = onset[onset["split"].isin(TEST_SPLITS) & (onset["stop_reason"] != "eos")]
+    if args.labels_in:
+        labels = pd.read_csv(args.labels_in)
+        coverage = {split: {"reviewed": int((labels["split"] == split).sum()),
+                            "capped": int((capped["split"] == split).sum())} for split in TEST_SPLITS}
+        print(f"{dataset_tag}: labels from {args.labels_in}, {coverage}")
+    else:
+        labels, coverage = build_labels(args, config, dataset_tag, onset, capped)
+    evaluate_runs(args, labels, coverage)
+
+
+def build_labels(args, config, dataset_tag: str, onset: pd.DataFrame, capped: pd.DataFrame):
     reviews = load_reviews(args.reviews, dataset_tag)
     adjudications = pd.read_csv(args.adjudications) if args.adjudications else pd.DataFrame()
     if len(adjudications):
         adjudications = adjudications[adjudications["model"] == dataset_tag.replace("degeneration-dataset-", "")]
-    capped = onset[onset["split"].isin(TEST_SPLITS) & (onset["stop_reason"] != "eos")]
     print(f"{dataset_tag}: {len(reviews)} reviews over {len(capped)} capped test rollouts")
+    coverage = {}
     for split in TEST_SPLITS:
         in_split = set(capped.loc[capped["split"] == split, "id"])
-        print(f"  {split}: {len(in_split & set(reviews['id']))}/{len(in_split)} reviewed")
+        coverage[split] = {"reviewed": len(in_split & set(reviews["id"])), "capped": len(in_split)}
+        print(f"  {split}: {coverage[split]['reviewed']}/{coverage[split]['capped']} reviewed")
     stray = set(reviews["id"]) - set(capped["id"])
     if stray:
         raise ValueError(f"Reviews for rollouts outside the capped test population: {sorted(stray)[:5]}")
@@ -249,6 +339,13 @@ def main() -> None:
     if args.labels_out:
         args.labels_out.parent.mkdir(parents=True, exist_ok=True)
         labels.to_csv(args.labels_out, index=False)
+    return labels, coverage
+
+
+def evaluate_runs(args, labels: pd.DataFrame, coverage: dict) -> None:
+    populations = list(args.populations)
+    if args.write_evaluation and "hybrid" not in populations:
+        populations.append("hybrid")
 
     rows = []
     for run_dir in args.run_dirs:
@@ -264,13 +361,13 @@ def main() -> None:
             )
             if unscored:
                 print(f"  {split}: {len(unscored)} reviewed rollouts have no scores (judge failed at scoring time)")
-            for population, human, reviewed_only in (
-                ("judge", False, False), ("hybrid", True, False),
-                ("reviewed_judge", False, True), ("reviewed_human", True, True),
-            ):
+            for population in populations:
+                human, reviewed_only = POPULATIONS[population]
                 view = relabel(frame, labels, human=human, reviewed_only=reviewed_only)
                 result = evaluate(view, thresholds, persistence=persistence)
                 rows.extend(summarize(result, population, name, split))
+                if population == "hybrid" and args.write_evaluation:
+                    write_evaluation(run_dir / args.write_evaluation / split, split, result, coverage[split])
     out = pd.DataFrame(rows)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.out, index=False)

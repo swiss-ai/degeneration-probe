@@ -20,6 +20,9 @@ flags closes, the tokens at which the rule itself has fired.
 Several directories under one name are seeds and are averaged in the summary.
 Which rollouts the judge could not rule on is read from the run configuration
 beside each scores directory, so probes of different builds can share a call.
+
+With --human every split other than validation is read on the human-verified
+labels, so thresholds stay those calibrated on validation.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from degeneration_probe.evaluation.protocol import (  # noqa: E402
     view_c_lead_time,
 )
 from degeneration_probe.evaluation.scores import read_scores, unjudged_rollouts  # noqa: E402
+from scripts.evaluate_human_labels import apply_human_labels, labels_for_scores  # noqa: E402
 from scripts.evaluate_scores import _discover_onset_labels  # noqa: E402
 
 TUNING_SPLIT = "val"
@@ -115,6 +119,8 @@ def main() -> None:
     parser.add_argument("--budgets", nargs="*", type=float, default=[0.01, 0.05, 0.10])
     parser.add_argument("--splits", nargs="*", default=SPLITS)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--human", action="store_true",
+                        help="read the test splits on the human-verified labels (scripts/evaluate_human_labels.py)")
     args = parser.parse_args()
 
     rows: List[dict] = []
@@ -133,6 +139,10 @@ def main() -> None:
                 )
                 for split in args.splits
             }
+            if args.human:
+                human = labels_for_scores(scores_dir)
+                targets = {split: frame if split == TUNING_SPLIT else apply_human_labels(frame, human)
+                           for split, frame in targets.items()}
             for m in args.persistence:
                 for split, target in targets.items():
                     for row in measure(val, target, args.budgets, m):

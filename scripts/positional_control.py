@@ -29,6 +29,9 @@ nothing else, is built from the first scorer's table and reported alongside.
 Thresholds are always frozen on validation; ``--split`` names the split that
 is then read against them. Several directories under one name are seeds and
 are averaged.
+
+With --human every split other than validation is read on the human-verified
+labels, so thresholds stay those calibrated on validation.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ from degeneration_probe.evaluation.protocol import (  # noqa: E402
     view_c_lead_time,
 )
 from degeneration_probe.evaluation.scores import read_scores  # noqa: E402
+from scripts.evaluate_human_labels import apply_human_labels, labels_for_scores  # noqa: E402
 
 TUNING_SPLIT = "val"
 SEED = 0
@@ -164,6 +168,8 @@ def main() -> None:
                         help="onset table naming the rollouts the judge could not rule on")
     parser.add_argument("--no-token-cap", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--human", action="store_true",
+                        help="read the test splits on the human-verified labels (scripts/evaluate_human_labels.py)")
     args = parser.parse_args()
 
     unjudged = None
@@ -181,6 +187,8 @@ def main() -> None:
             target = val if args.split == TUNING_SPLIT else read_scores(
                 scores_dir / "scores" / f"{args.split}.parquet", split=args.split, unjudged=unjudged
             )
+            if args.human and target is not val:
+                target = apply_human_labels(target, labels_for_scores(scores_dir))
             if first_val is None:
                 first_val, first_target = val, target
             for transform, fn in TRANSFORMS.items():

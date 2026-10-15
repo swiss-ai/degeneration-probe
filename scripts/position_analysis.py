@@ -23,7 +23,11 @@ It writes five tables into --out-dir:
                           calibrated to the same budget, next to the probes
     per_source.csv        AUROC and onset-aligned metrics per source
 
-    python scripts/position_analysis.py --out-dir <dir> [--budget 0.05]
+    python scripts/position_analysis.py --out-dir <dir> [--budget 0.05] [--human]
+
+With --human the test responses carry the human-verified labels
+(scripts/evaluate_human_labels.py): reviewed responses take the reviewer's
+verdict and onset, and the responses the reviewers dropped are left out.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from degeneration_probe.evaluation.scores import read_scores  # noqa: E402
+from scripts.evaluate_human_labels import apply_human_labels, labels_for_scores  # noqa: E402
 
 STORE = Path("/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe")
 OUTPUTS = STORE / "outputs"
@@ -113,8 +118,14 @@ def threshold(depth: Path, budget: float) -> float:
     return next(t["tau"] for t in thresholds if abs(t["target_negative_fpr"] - budget) < 1e-9)
 
 
+HUMAN = False
+
+
 def load(path: Path) -> pd.DataFrame:
-    frame = read_scores(path, validate=False).sort_values(["prompt_id", "rollout_idx"]).reset_index(drop=True)
+    frame = read_scores(path, validate=False)
+    if HUMAN and path.stem != "val":
+        frame = apply_human_labels(frame, labels_for_scores(path.parent.parent))
+    frame = frame.sort_values(["prompt_id", "rollout_idx"]).reset_index(drop=True)
     frame["is_positive"] = frame["is_positive"].astype(bool)
     return frame
 
@@ -334,7 +345,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--budget", type=float, default=0.05)
+    parser.add_argument("--human", action="store_true", help="read the test responses on the human-verified labels")
     args = parser.parse_args()
+    global HUMAN
+    HUMAN = args.human
     table = pd.read_csv(OUTPUTS / "analysis" / "selected_metrics.csv")
     table = table[(table["recipe"].isin([RECIPE, f"{RECIPE} +LoRA"])) & (table["split"] == SPLIT)]
     out = {k: [] for k in ("onset_profile", "healthy_position", "per_source", "repetition", "position_only")}

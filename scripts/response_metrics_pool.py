@@ -14,7 +14,9 @@ every baseline under <outputs>/baselines/<dataset>/<name>.
     python scripts/response_metrics_pool.py --workers 32 --splits val test_indomain test_heldout_domains
 
 Writes <outputs>/analysis/response_metrics_pool.csv. A rerun reads only the
-tables that changed since the last one.
+tables that changed since the last one. With --human the test splits are read
+from each scorer's evaluation_human folder, the human-verified labels, and the
+table is response_metrics_pool_human.csv.
 """
 
 from __future__ import annotations
@@ -57,11 +59,12 @@ def measure(path: str) -> Dict:
     }
 
 
-def discover(root: Path, splits: List[str]) -> List[Path]:
+def discover(root: Path, splits: List[str], human: bool = False) -> List[Path]:
     found = []
     for split in splits:
-        found += root.glob(f"*/2*/selected/layer_*/evaluation/{split}/rollout_table.csv")
-        found += root.glob(f"baselines/*/*/evaluation/{split}/rollout_table.csv")
+        folder = "evaluation_human" if human and split != "val" else "evaluation"
+        found += root.glob(f"*/2*/selected/layer_*/{folder}/{split}/rollout_table.csv")
+        found += root.glob(f"baselines/*/*/{folder}/{split}/rollout_table.csv")
     return sorted(found)
 
 
@@ -70,13 +73,14 @@ def main() -> None:
     parser.add_argument("--outputs-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--splits", nargs="*", default=["val", "test_indomain"])
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--human", action="store_true", help="read the test splits on the human-verified labels")
     args = parser.parse_args()
 
-    out = args.outputs_root / "analysis" / "response_metrics_pool.csv"
+    out = args.outputs_root / "analysis" / ("response_metrics_pool_human.csv" if args.human else "response_metrics_pool.csv")
     previous = pd.read_csv(out) if out.is_file() else pd.DataFrame(columns=["rollout_table", "mtime_ns"])
     known = dict(zip(previous["rollout_table"], previous["mtime_ns"]))
 
-    paths = discover(args.outputs_root, args.splits)
+    paths = discover(args.outputs_root, args.splits, args.human)
     stale = [str(p) for p in paths if known.get(str(p)) != p.stat().st_mtime_ns]
     print(f"{len(paths)} rollout tables, {len(stale)} new or changed")
     with ProcessPoolExecutor(max_workers=args.workers) as pool:

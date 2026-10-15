@@ -14,6 +14,12 @@ tokens) and the timing figures (lead, early share, never-fired count).
 Writes <outputs>/analysis/selected_metrics.csv. A second file,
 selected_metrics_by_recipe.csv, averages the seeds of each recipe at each depth
 and split, over selectable depths only.
+
+With --human the test splits are read from each depth's evaluation_human
+folder (scripts/evaluate_human_labels.py), the human-verified labels, and
+validation from evaluation as before, since selection uses validation only.
+The two files are then selected_metrics_human.csv and
+selected_metrics_human_by_recipe.csv.
 """
 
 from __future__ import annotations
@@ -87,7 +93,9 @@ def main() -> None:
     parser.add_argument("--outputs-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--subdir", default="selected")
     parser.add_argument("--summary", action="store_true", help="print recipe x layer means at the 1%% budget")
+    parser.add_argument("--human", action="store_true", help="read the test splits on the human-verified labels")
     args = parser.parse_args()
+    stem = "selected_metrics_human" if args.human else "selected_metrics"
 
     rows: List[pd.DataFrame] = []
     incomplete: List[str] = []
@@ -106,9 +114,10 @@ def main() -> None:
         depths = json.loads(selection_file.read_text(encoding="utf-8"))["depths"]
         for depth in depths:
             layer = int(depth["layer"])
-            evaluation = attempt / args.subdir / f"layer_{layer:02d}" / "evaluation"
+            depth_dir = attempt / args.subdir / f"layer_{layer:02d}"
             for split in SPLITS:
-                frame = read_depth(evaluation, split)
+                folder = "evaluation_human" if args.human and split != "val" else "evaluation"
+                frame = read_depth(depth_dir / folder, split)
                 if frame is None:
                     incomplete.append(f"{meta['run_name']} layer {layer} {split}")
                     continue
@@ -126,7 +135,7 @@ def main() -> None:
     table = table[lead + [c for c in table.columns if c not in lead]]
     out_dir = args.outputs_root / "analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
-    table.to_csv(out_dir / "selected_metrics.csv", index=False)
+    table.to_csv(out_dir / f"{stem}.csv", index=False)
 
     metrics = [c for c in table.columns if c not in lead and c != "persistence"]
     by_recipe = (
@@ -136,11 +145,11 @@ def main() -> None:
     )
     by_recipe.columns = [f"{m}_{s}" for m, s in by_recipe.columns]
     by_recipe = by_recipe.reset_index()
-    by_recipe.to_csv(out_dir / "selected_metrics_by_recipe.csv", index=False)
+    by_recipe.to_csv(out_dir / f"{stem}_by_recipe.csv", index=False)
 
     runs = table[["run_name", "attempt"]].drop_duplicates()
-    print(f"{len(runs)} runs, {len(table)} rows -> {out_dir / 'selected_metrics.csv'}")
-    print(f"recipe x layer means -> {out_dir / 'selected_metrics_by_recipe.csv'}")
+    print(f"{len(runs)} runs, {len(table)} rows -> {out_dir / f'{stem}.csv'}")
+    print(f"recipe x layer means -> {out_dir / f'{stem}_by_recipe.csv'}")
     if incomplete:
         print(f"{len(incomplete)} (run, depth, split) evaluations missing, e.g. {incomplete[0]}")
 
