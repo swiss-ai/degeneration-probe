@@ -27,6 +27,10 @@ degenerate response, up to ``--siblings`` healthy responses to the same prompt
 that run at least as long as its onset, so that the two can be compared at the
 same positions with the prompt held fixed.
 
+With ``--rollouts prompt_id:k ...`` exactly those responses are extracted, with no
+sampling. ``--extra-adapted-layer n`` also extracts the adapted probe selected at
+layer n, with its own adapters, read at layer n, into ``adapted_L<n>``.
+
 Writes <out-dir>/<model>/{frozen,adapted}/<domain>/<prompt_id>/rollout_<k>.safetensors
 (tensor ``hidden_states``, shape [tokens, hidden], float16) and a manifest.
 """
@@ -155,6 +159,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--paired", action="store_true", help="healthy siblings of the same prompt")
     parser.add_argument("--siblings", type=int, default=3)
+    parser.add_argument("--rollouts", nargs="+", metavar="PROMPT_ID:K", help="extract exactly these responses")
+    parser.add_argument("--extra-adapted-layer", type=int, help="also extract the adapted probe selected at this layer")
     args = parser.parse_args()
 
     frozen_run = next((run for run, axes in finished_runs(args.model, "none")), None)
@@ -165,8 +171,16 @@ def main() -> None:
     build_config = DatasetGenConfig.from_yaml(config.dataset.build_config)
     checkpoint = adapted_checkpoint(args.model, args.layer)
     print(f"model {args.model}, layer {args.layer}\n  frozen settings from {frozen_run}\n  adapters from {checkpoint}")
+    # (output directory, read layer, adapter checkpoint or None for the frozen model)
+    conditions = [("frozen", args.layer, None), ("adapted", args.layer, checkpoint)]
+    if args.extra_adapted_layer is not None:
+        extra = adapted_checkpoint(args.model, args.extra_adapted_layer)
+        conditions.append((f"adapted_L{args.extra_adapted_layer}", args.extra_adapted_layer, extra))
+        print(f"  adapters at layer {args.extra_adapted_layer} from {extra}")
 
-    if args.paired:
+    if args.rollouts:
+        keys = [(key.rsplit(":", 1)[0], int(key.rsplit(":", 1)[1])) for key in args.rollouts]
+    elif args.paired:
         keys = sample_paired_keys(build_root, args.n_degenerate, args.siblings, args.seed)
     else:
         keys = sample_keys(build_root, args.n_degenerate, args.n_healthy, args.min_healthy_tokens, args.seed)
@@ -179,12 +193,14 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(build_config.model_name, dtype=dtype).to(device)
     model.eval()
     model.config.use_cache = False
-    slot = args.layer + 1  # hidden_states[0] is the embedding output
     out = args.out_dir / args.model
 
-    for condition in ("frozen", "adapted"):
-        if condition == "adapted":
-            model = PeftModel.from_pretrained(model, checkpoint)
+    for condition, layer, adapters in conditions:
+        slot = layer + 1  # hidden_states[0] is the embedding output
+        if adapters is not None:
+            if isinstance(model, PeftModel):
+                model = model.unload()
+            model = PeftModel.from_pretrained(model, adapters)
             model.eval()
             model.get_base_model().config.use_cache = False
         for index, row in enumerate(rollouts.itertuples()):
@@ -207,6 +223,8 @@ def main() -> None:
 
     manifest = rollouts[["prompt_id", "rollout_idx", "domain", "split", "is_positive", "onset_position", "num_tokens"]].copy()
     manifest["layer"], manifest["adapter_checkpoint"] = args.layer, str(checkpoint)
+    if args.extra_adapted_layer is not None:
+        manifest["extra_adapted_layer"], manifest["extra_adapter_checkpoint"] = args.extra_adapted_layer, str(conditions[-1][2])
     manifest.to_parquet(out / "manifest.parquet", index=False)
     print(f"-> {out}")
 
