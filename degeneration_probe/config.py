@@ -487,6 +487,9 @@ class SamplingConfig:
     # Left unset so that one seed drives weight init, batch order and sampling
     # alike; a seed repeat is then a single override.
     seed: Optional[int] = None
+    # A parquet of (prompt_id, rollout_idx) keys. When set, only those rollouts
+    # are loaded, which lets a scorer add a few rollouts to an existing table.
+    restrict_to: Optional[str] = None
 
     def __post_init__(self) -> None:
         for name in ("train_negative_rollouts_per_positive", "evaluation_negative_rollouts_per_positive"):

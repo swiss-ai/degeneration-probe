@@ -78,11 +78,21 @@ def select_rollouts(
     negative_rollouts_per_positive: Optional[float],
     domain_stratified: bool,
     seed: int,
+    include_capped_healthy: bool = False,
 ) -> pd.DataFrame:
-    """Keep defined-onset rollouts and a deterministic sample of EOS rollouts."""
+    """Keep defined-onset rollouts and a deterministic sample of healthy rollouts.
+
+    Healthy rollouts are the EOS ones, plus, when ``include_capped_healthy`` is
+    set, the capped rollouts the judge ruled not degenerating. Those carry no
+    onset, so no onset-based target can be derived for them and training leaves
+    them out; an evaluation keeps them, since they are healthy answers a monitor
+    must not alarm on.
+    """
     split_rows = onset_labels[onset_labels["split"] == split].copy()
     positive_mask = split_rows["is_positive"].astype(bool) & split_rows["onset_position"].notna()
     negative_mask = split_rows["stop_reason"].eq("eos")
+    if include_capped_healthy and "onset_resolution" in split_rows:
+        negative_mask |= ~split_rows["stop_reason"].eq("eos") & split_rows["onset_resolution"].eq("not_degenerating")
     positives = split_rows[positive_mask]
     negatives = split_rows[negative_mask]
 
@@ -221,7 +231,11 @@ def load_degeneration_records(
         negative_rollouts_per_positive=ratio,
         domain_stratified=config.sampling.domain_stratified,
         seed=config.sampling.seed if training else EVALUATION_SEED,
+        include_capped_healthy=not training,
     )
+    if config.sampling.restrict_to:
+        keys = pd.read_parquet(config.sampling.restrict_to, columns=["prompt_id", "rollout_idx"])
+        selected = selected.merge(keys, on=["prompt_id", "rollout_idx"], how="inner")
     if selected.empty:
         raise ValueError(f"No usable rollouts found for split {split!r}")
 
@@ -266,13 +280,18 @@ def load_degeneration_records(
     records: List[DegenerationRecord] = []
     for row in merged.itertuples(index=False):
         token_ids = np.asarray(row.generated_token_ids, dtype=np.int64)
-        targets = derive_targets(
-            label_config,
-            num_tokens=len(token_ids),
-            stop_reason=row.stop_reason,
-            onset_position=row.onset_position,
-            signal=getattr(row, signal_column) if signal_column else None,
-        )
+        capped_healthy = row.stop_reason != "eos" and getattr(row, "onset_resolution", None) == "not_degenerating"
+        if capped_healthy and not training:
+            # Healthy throughout: every position is a negative.
+            targets = [0.0] * len(token_ids)
+        else:
+            targets = derive_targets(
+                label_config,
+                num_tokens=len(token_ids),
+                stop_reason=row.stop_reason,
+                onset_position=row.onset_position,
+                signal=getattr(row, signal_column) if signal_column else None,
+            )
         if targets is None:  # A rollout the family cannot label is dropped, not invented.
             continue
         targets = np.asarray(targets, dtype=np.float32)

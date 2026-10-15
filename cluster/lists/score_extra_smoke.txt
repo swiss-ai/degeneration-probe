@@ -1,0 +1,2 @@
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L1-31_all_tokens_hard1024_bce_lora-none_s42_d4c8bb44/20261010T194155
+/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe/outputs/apertus-8b-instruct_L10_frontier512_hard256_bce_lora-all_s42_d37a180b/20261011T163359
