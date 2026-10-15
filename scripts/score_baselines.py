@@ -40,9 +40,10 @@ None of them needs a GPU, so this runs anywhere.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -121,7 +122,7 @@ def _trailing_mean(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def trailing_repetition_scores(
-    token_ids, num_tokens: int, window: int = REPETITION_WINDOW
+    token_ids, num_tokens: int, window: int = REPETITION_WINDOW, order: int = 2
 ) -> np.ndarray:
     """The windowed repetition score, over the window that has already happened.
 
@@ -130,31 +131,32 @@ def trailing_repetition_scores(
     annotating a finished answer, where no token is privileged, and an
     impossible one for a monitor running alongside generation, which at ``t``
     has only the tokens up to ``t``. This is the same statistic over
-    ``tokens[t - window + 1 : t + 1]``.
+    ``tokens[t - window + 1 : t + 1]``, for n-grams of any ``order``
+    (seq-rep-n of Welleck et al.; ``order=2`` is seq-rep-2).
 
-    Bigram counts are carried in a sliding multiset, so the whole signal costs
+    N-gram counts are carried in a sliding multiset, so the whole signal costs
     one pass rather than a rescan of the window at every position.
     """
     ids = np.asarray(list(token_ids)[:num_tokens], dtype=np.int64)
     length = ids.size
     scores = np.zeros(num_tokens, dtype=np.float64)
-    if length < 2:
+    if length < order or window < order:
         return scores
 
     counts: Dict[tuple, int] = {}
     distinct = 0
-    for position in range(1, length):
-        entering = (int(ids[position - 1]), int(ids[position]))
+    for position in range(order - 1, length):
+        entering = tuple(ids[position - order + 1 : position + 1].tolist())
         previous = counts.get(entering, 0)
         counts[entering] = previous + 1
         if previous == 0:
             distinct += 1
 
-        # The window holds the bigrams starting at [position - window + 1,
-        # position - 1], so one leaves as soon as the span is full.
-        leaving_index = position - window
-        if leaving_index >= 0:
-            leaving = (int(ids[leaving_index]), int(ids[leaving_index + 1]))
+        # The window holds the n-grams ending at [position - window + order,
+        # position], so one leaves as soon as the span is full.
+        leaving_end = position - window + order - 1
+        if leaving_end >= order - 1:
+            leaving = tuple(ids[leaving_end - order + 1 : leaving_end + 1].tolist())
             remaining = counts[leaving] - 1
             if remaining:
                 counts[leaving] = remaining
@@ -162,12 +164,11 @@ def trailing_repetition_scores(
                 del counts[leaving]
                 distinct -= 1
 
-        total = min(position, window - 1)
-        scores[position] = 1.0 - distinct / total if total else 0.0
+        total = min(position - order + 2, window - order + 1)
+        scores[position] = 1.0 - distinct / total
 
-    # Position 0 carries no bigram; it borrows the first defined value rather
-    # than reading as maximally diverse text.
-    scores[0] = scores[1]
+    # The first positions carry no full n-gram and keep a score of zero, so no
+    # position reads a token generated after it.
     return np.clip(scores, 0.0, 1.0)
 
 
@@ -288,6 +289,37 @@ def _fill_gaps(scores: np.ndarray) -> np.ndarray:
     return filled
 
 
+# Hyperparameters each windowed baseline accepts as name suffixes, so that
+# ``entropy_w32`` or ``rep_l_l64_w32`` names one setting of a sweep and gets its
+# own output directory. The bare name keeps the defaults above.
+SWEEPABLE = {
+    "entropy": {"w": ENTROPY_WINDOW},
+    "neglogp": {"w": ENTROPY_WINDOW},
+    "repetition_trailing": {"n": 2, "w": REPETITION_WINDOW},
+    "rep_l": {"l": REP_L_LOOKBACK, "w": REP_L_WINDOW},
+}
+
+
+def parse_baseline(name: str) -> Tuple[str, Dict[str, int]]:
+    """Split a baseline name into its kind and hyperparameters."""
+    ngram = re.fullmatch(r"ngram_(\d+)", name)
+    if ngram:
+        return "ngram", {"n": int(ngram.group(1))}
+    if name in ("repetition", "lrs"):
+        return name, {}
+    for kind, defaults in SWEEPABLE.items():
+        match = re.fullmatch(re.escape(kind) + r"((?:_[a-z]\d+)*)", name)
+        if not match:
+            continue
+        params = dict(defaults)
+        for key, value in re.findall(r"_([a-z])(\d+)", match.group(1)):
+            if key not in defaults:
+                raise ValueError(f"{kind} takes {sorted(defaults)}, not {key!r} (in {name!r})")
+            params[key] = int(value)
+        return kind, params
+    raise ValueError(f"Unknown baseline {name!r}")
+
+
 def build_baseline_scores(
     build_root: Path, baseline: str, split: str
 ) -> pd.DataFrame:
@@ -296,20 +328,21 @@ def build_baseline_scores(
     if onset.empty:
         raise ValueError(f"No rollouts in split {split!r}")
 
+    kind, params = parse_baseline(baseline)
     # Three baselines are precomputed columns of the label store. rep/l is not:
     # it is a function of the generated ids themselves, which live beside the
     # text rather than beside the labels.
-    token_sourced = {"rep_l", "repetition_trailing"} | {f"ngram_{n}" for n in NGRAM_SIZES}
-    source = "generations" if baseline in token_sourced else "labels"
+    token_sourced = {"rep_l", "repetition_trailing", "ngram"}
+    source = "generations" if kind in token_sourced else "labels"
     columns = ["prompt_id", "rollout_idx"]
-    if baseline == "neglogp":
+    if kind == "neglogp":
         source = "token_logprobs"
         columns += ["token_logprob"]
-    elif baseline in token_sourced:
+    elif kind in token_sourced:
         columns += ["generated_token_ids"]
-    elif baseline == "repetition":
+    elif kind == "repetition":
         columns += ["repetition_score"]
-    elif baseline == "entropy":
+    elif kind == "entropy":
         columns += ["entropy"]
     else:
         columns += [
@@ -330,18 +363,20 @@ def build_baseline_scores(
         )
         for row in merged.itertuples(index=False):
             tokens = int(row.num_tokens)
-            if baseline == "rep_l":
-                scores = rep_l_scores(row.generated_token_ids, tokens)
-            elif baseline == "repetition_trailing":
-                scores = trailing_repetition_scores(row.generated_token_ids, tokens)
-            elif baseline == "repetition":
+            if kind == "rep_l":
+                scores = rep_l_scores(row.generated_token_ids, tokens, params["l"], params["w"])
+            elif kind == "repetition_trailing":
+                scores = trailing_repetition_scores(
+                    row.generated_token_ids, tokens, params["w"], params["n"]
+                )
+            elif kind == "repetition":
                 scores = repetition_scores(row.repetition_score, tokens)
-            elif baseline == "entropy":
-                scores = entropy_scores(row.entropy, tokens)
-            elif baseline == "neglogp":
-                scores = neglogp_scores(row.token_logprob, tokens)
-            elif baseline.startswith("ngram_"):
-                scores = ngram_repeat_scores(row.generated_token_ids, tokens, int(baseline.split("_")[1]))
+            elif kind == "entropy":
+                scores = entropy_scores(row.entropy, tokens, params["w"])
+            elif kind == "neglogp":
+                scores = neglogp_scores(row.token_logprob, tokens, params["w"])
+            elif kind == "ngram":
+                scores = ngram_repeat_scores(row.generated_token_ids, tokens, params["n"])
             else:
                 scores = lrs_scores(
                     row.lrs_first_start_normalized_growing,
@@ -378,8 +413,10 @@ def main() -> None:
     args = parser.parse_args()
 
     for baseline in args.baselines:
-        if baseline not in BASELINES:
-            raise SystemExit(f"Unknown baseline {baseline!r}; expected one of {list(BASELINES)}")
+        try:
+            parse_baseline(baseline)
+        except ValueError as error:
+            raise SystemExit(f"{error}; expected one of {list(BASELINES)} or a swept variant")
         for split in args.splits:
             frame = build_baseline_scores(args.build_root, baseline, split)
             path = write_scores(frame, args.out_dir / baseline / "scores" / f"{split}.parquet")
