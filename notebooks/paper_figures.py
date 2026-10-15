@@ -41,8 +41,12 @@ def _():
     # The probe layer every main-text figure reads, and the probes it reads there.
     LAYER = 15
     S4_RECIPE = dict(selection="frontier_window", window=512, anchor="centered", label="frontier_hard", horizon=256, loss="bce")
-    DEPTH_RECIPE = dict(selection="all_tokens", label="frontier_hard", horizon=1024, loss="bce")
+    # The depth panel reads the frozen S4 probe, the frozen twin of the adapted probe.
+    DEPTH_RECIPE = S4_RECIPE
     DEPTH_LAYERS = [4, 8, 12, 15, 20, 30]
+    # The budget and split of the metrics figure (response-level against onset-aligned).
+    METRICS_BUDGET = 0.05
+    METRICS_SPLIT = "test_indomain"
     BUDGETS = (0.01, 0.05, 0.10)
     PERSISTENCE_GRID = (1, 2, 4, 8, 16, 32, 64, 128)
     # The rollout drawn by both the PCA and the parallel-coordinates figures.
@@ -65,6 +69,8 @@ def _():
         LAYER,
         LineCollection,
         Line2D,
+        METRICS_BUDGET,
+        METRICS_SPLIT,
         PAPER_DATA,
         PERSISTENCE_GRID,
         Patch,
@@ -336,7 +342,7 @@ def _(
         return {"auc": float(roc_auc_score(labels, peaks)), "acc": float(best_accuracy(labels.astype(int), peaks))}
 
     def onset_metrics(val, test, persistence):
-        """Post-onset coverage, Warn_256, median lead and early share at each budget.
+        """Detection rate, post-onset coverage, Warn_256, median lead and early share at each budget.
 
         Thresholds are calibrated on validation for runs of `persistence` tokens, the
         alarm is the token that completes the first such run, and coverage counts the
@@ -360,13 +366,14 @@ def _(
                 warn_total += band.size
                 k = int(np.searchsorted(levels, threshold.tau, side="left"))
                 if k < levels.size:
-                    offsets.append(int(positions[k]) + persistence - 1 - onset)
+                    offsets.append(int(positions[k]) - onset)
             offsets = np.asarray(offsets, float)
             rows.append({
                 "budget": threshold.target_negative_fpr, "m": persistence,
                 "post_onset": post_hits / post_total, "warning_256": warn_hits / warn_total,
                 "lead": float(np.median(offsets)) if offsets.size else float("nan"),
                 "early": float((offsets < 0).mean()) if offsets.size else float("nan"),
+                "detection": offsets.size / len(scores) if scores else float("nan"),
             })
         return rows
 
@@ -387,6 +394,9 @@ def _(
         labels_path = DATASET_BUILD[model] / "onset_labels" / "onset_labels.parquet"
         def compute():
             labels = pd.read_parquet(labels_path)
+            # The probes' own population: unjudged responses are dropped, and capped responses
+            # the judge rules healthy stay in as healthy answers, so the rule raises a false
+            # alarm on each of them.
             labels = labels[~labels["onset_resolution"].isin(["judge_failed", "not_found"])]
             def frame(split):
                 part = labels[labels["split"] == split].copy()
@@ -398,7 +408,7 @@ def _(
                 return part
             val, test = frame("val"), frame("test_indomain")
             return {"test": response_metrics(test), "onset": onset_metrics(val, test, 1)}
-        return cached("token_cap", str(labels_path.parent), [], compute)
+        return cached("token_cap_capped_healthy_kept", str(labels_path.parent), [], compute)
 
     return (
         discover_runs,
@@ -415,7 +425,10 @@ def _(
     DEPTH_LAYERS,
     DEPTH_RECIPE,
     LAYER,
+    METRICS_BUDGET,
+    METRICS_SPLIT,
     PERSISTENCE_GRID,
+    RUNS_ROOT,
     S4_RECIPE,
     discover_runs,
     np,
@@ -467,59 +480,83 @@ def _(
             [s.assign(model=m, regime=r) for (m, r), s in S4_LIVE.items()], ignore_index=True
         )
 
-    # The four scorers of the metrics figure: the frozen probes ranked first and last by
-    # validation AUC at the read layer, the adapted S4 probe, and the token-cap baseline.
+    # The four scorers of the metrics figure and its depth panel, read from the
+    # aggregated evaluations, which hold every depth under the protocol's own alarm
+    # convention: the frozen probes ranked first and last by validation AUROC at
+    # the read layer, the adapted S4 probe, and the token-cap baseline. The depth
+    # panel follows the frozen S4 probe across layers.
     METRICS_LIVE = None
-    _adapted = runs_of(RUNS, "apertus", "adapted", LAYER, S4_RECIPE)
-    _depth = {layer: runs_of(RUNS, "apertus", "frozen", layer, DEPTH_RECIPE) for layer in DEPTH_LAYERS}
-    if len(_adapted) < 2:
-        MISSING.setdefault("metrics", []).append(f"adapted S4 probe at layer {LAYER}: {len(_adapted)} seed(s)")
-    _thin = [layer for layer, rows in _depth.items() if len(rows) < 2]
-    if _thin:
-        MISSING.setdefault("metrics", []).append(f"all_tokens h1024 frozen at layers {_thin}")
-    _pool = []
-    if "metrics" not in MISSING:
-        _frozen = RUNS[(RUNS["model"] == "apertus") & (RUNS["regime"] == "frozen") & (RUNS["layer"] == LAYER) & RUNS["selectable"]]
-        _recipe_cols = ["selection", "window", "anchor", "label", "horizon", "decay", "loss", "pos_weight"]
-        for _recipe, _rows in _frozen.groupby(_recipe_cols, dropna=False):
-            _rows = _rows.drop_duplicates("seed")
-            if len(_rows) >= 2:
-                _pool.append((float(np.mean([val_response(r)["auc"] for _, r in _rows.iterrows()])), _rows))
-        if len(_pool) < 2:
-            MISSING.setdefault("metrics", []).append(f"{len(_pool)} frozen recipe(s) with two or more seeds at layer {LAYER}")
-    if "metrics" not in MISSING:
-        _pool.sort(key=lambda item: item[0], reverse=True)
+    _table_path = RUNS_ROOT / "analysis" / "selected_metrics.csv"
+    _cols = {"auc": "rollout_auc", "acc": "best_accuracy", "det": "detection_rate", "post": "in_pattern_recall",
+             "warn": "warning_recall_256", "early": "fired_before_frontier"}
+    if not _table_path.is_file():
+        MISSING.setdefault("metrics", []).append(f"no {_table_path}")
+    else:
+        _table = pd.read_csv(_table_path)
+        _table = _table[_table["model"] == "apertus"]
+        _table["detection_rate"] = _table["detected_positives"] / (_table["detected_positives"] + _table["never_fired_positives"])
+        _table["scorer_dir"] = [f"{RUNS_ROOT}/{r}/{a}/selected/layer_{int(l):02d}"
+                                for r, a, l in zip(_table["run_name"], _table["attempt"], _table["layer"])]
+        _pool_path = RUNS_ROOT / "analysis" / "response_metrics_pool.csv"
+        if _pool_path.is_file():
+            _table = _table.merge(pd.read_csv(_pool_path)[["scorer_dir", "split", "best_accuracy"]],
+                                  on=["scorer_dir", "split"], how="left")
+        else:
+            _table["best_accuracy"] = np.nan
+            MISSING.setdefault("metrics", []).append("no response_metrics_pool.csv (best accuracy)")
+        _at_budget = _table[np.isclose(_table["target_negative_fpr"], METRICS_BUDGET)]
+        _val = _at_budget[(_at_budget["split"] == "val") & (_at_budget["layer"] == LAYER) & _at_budget["lora"].eq("none")]
+        _rank = _val.groupby("recipe").agg(auc=("rollout_auc", "mean"), seeds=("seed", "nunique"), ok=("selectable", "all"))
+        _rank = _rank[(_rank["seeds"] >= 2) & _rank["ok"]].sort_values("auc", ascending=False)
+        _test = _at_budget[_at_budget["split"] == METRICS_SPLIT]
 
-        def _scorer(rows):
-            table = seed_table(rows, (1,))
-            table = table[np.isclose(table["budget"], 0.01)]
-            return {k: (table[c].mean(), table[c].std(ddof=1)) for k, c in (
-                ("auc", "test_auc"), ("acc", "test_acc"), ("post", "post_onset"), ("warn", "warning_256"), ("early", "early"))}
+        def _stats(rows):
+            return {k: (rows[c].mean(), rows[c].std(ddof=1)) for k, c in _cols.items()}
 
-        _cap = token_cap_metrics("apertus")
-        _cap_onset = [r for r in _cap["onset"] if np.isclose(r["budget"], 0.01)][0]
-        _scorers = [
-            ("best\nAUC", False, _scorer(_pool[0][1])),
-            ("adapted", True, _scorer(_adapted)),
-            ("token\ncap", False, {"auc": (_cap["test"]["auc"], 0.0), "acc": (_cap["test"]["acc"], 0.0),
-                                   "post": (_cap_onset["post_onset"], 0.0), "warn": (_cap_onset["warning_256"], 0.0),
-                                   "early": (_cap_onset["early"], 0.0)}),
-            ("worst\nAUC", False, _scorer(_pool[-1][1])),
-        ]
-        _scorers.sort(key=lambda s: s[2]["auc"][0], reverse=True)
-        _depth_stats = {k: ([], []) for k in ("auc", "acc", "post", "warn", "early")}
-        for layer in DEPTH_LAYERS:
-            stats = _scorer(_depth[layer])
-            for k in _depth_stats:
-                _depth_stats[k][0].append(stats[k][0])
-                _depth_stats[k][1].append(stats[k][1])
-        METRICS_LIVE = {
-            "scorers": [s[0] for s in _scorers],
-            "hatched": [s[1] for s in _scorers],
-            **{k: (np.array([s[2][k][0] for s in _scorers]), np.array([s[2][k][1] for s in _scorers]))
-               for k in ("auc", "acc", "post", "warn", "early")},
-            "depth": {k: (np.array(v[0]), np.array(v[1])) for k, v in _depth_stats.items()},
-        }
+        def _chance_early():
+            """Early-warning rate of random alarms at the same budget (scripts/random_alarm_reference.py)."""
+            labels = pd.read_parquet(RUNS_ROOT.parent / "degeneration-dataset-apertus-8b-instruct" / "onset_labels" / "onset_labels.parquet")
+            labels = labels[~labels["onset_resolution"].isin(["judge_failed", "not_found"])]
+            healthy = labels[(labels["split"] == "val") & ~labels["is_positive"].astype(bool)]["num_tokens"].to_numpy(float)
+            positives = labels[(labels["split"] == METRICS_SPLIT) & labels["is_positive"].astype(bool)]
+            low, high = 0.0, 1.0
+            for _ in range(100):
+                q = (low + high) / 2
+                low, high = (low, q) if np.mean(1 - (1 - q) ** healthy) > METRICS_BUDGET else (q, high)
+            alarm = 1 - (1 - low) ** positives["num_tokens"].to_numpy(float)
+            return float((1 - (1 - low) ** positives["onset_position"].to_numpy(float)).sum() / alarm.sum())
+
+        _adapted = _test[(_test["layer"] == LAYER) & (_test["recipe"] == "frontier_window W=512 centered K=256 +LoRA")]
+        _depth_rows = _test[_test["lora"].eq("none") & (_test["recipe"] == "frontier_window W=512 centered K=256")]
+        if len(_rank) < 2 or len(_adapted) < 2 or _depth_rows.empty:
+            MISSING.setdefault("metrics", []).append("too few scored seeds for the four scorers or the depth sweep")
+        else:
+            _cap = token_cap_metrics("apertus")
+            _cap_onset = [r for r in _cap["onset"] if np.isclose(r["budget"], METRICS_BUDGET)][0]
+            _scorers = [
+                ("best\nAUROC", False, _stats(_test[(_test["layer"] == LAYER) & (_test["recipe"] == _rank.index[0])])),
+                ("adapted", True, _stats(_adapted)),
+                ("token\ncap", False, {"auc": (_cap["test"]["auc"], 0.0), "acc": (_cap["test"]["acc"], 0.0),
+                                       "det": (_cap_onset["detection"], 0.0),
+                                       "post": (_cap_onset["post_onset"], 0.0), "warn": (_cap_onset["warning_256"], 0.0),
+                                       "early": (_cap_onset["early"], 0.0)}),
+                ("worst\nAUROC", False, _stats(_test[(_test["layer"] == LAYER) & (_test["recipe"] == _rank.index[-1])])),
+            ]
+            _scorers.sort(key=lambda item: item[2]["auc"][0], reverse=True)
+            # One point every five layers, plus the first and the last, keeps the panel readable.
+            _layers = [layer for layer in (1, 5, 10, 15, 20, 25, 31) if layer in set(_depth_rows["layer"])]
+            _by_layer = _depth_rows.groupby("layer")
+            METRICS_LIVE = {
+                "scorers": [item[0] for item in _scorers],
+                "hatched": [item[1] for item in _scorers],
+                **{k: (np.array([item[2][k][0] for item in _scorers]), np.array([item[2][k][1] for item in _scorers]))
+                   for k in _cols},
+                "layers": _layers,
+                "depth": {k: (_by_layer[c].mean().reindex(_layers).to_numpy(), _by_layer[c].std(ddof=1).reindex(_layers).to_numpy())
+                          for k, c in _cols.items()},
+                "chance_early": _chance_early(),
+                "source": f"best {_rank.index[0]}, worst {_rank.index[-1]}, {METRICS_SPLIT} at {METRICS_BUDGET:.0%}",
+            }
     return BUDGETED_LIVE, METRICS_LIVE, MISSING, SWEEP_LIVE
 
 
@@ -826,7 +863,7 @@ def _(
     save,
     style,
 ):
-    COLORS = {"auc": "#c4c4c4", "acc": "#8a8a8a", "post": "#2c6fa8", "warn": "#c0392b", "early": "#2e7d52"}
+    COLORS = {"auc": "#c4c4c4", "acc": "#8a8a8a", "det": "#9cc3e4", "post": "#2c6fa8", "warn": "#c0392b", "early": "#2e7d52"}
     LABEL_INK, ORDER_INK = "#2f3437", "#8a8a8a"
     LINE_STYLE = {
         "auc": dict(lw=1.7, marker="s", ms=4.6),
@@ -836,130 +873,141 @@ def _(
         "warn": dict(lw=1.9, marker="o", ms=5.5),
     }
 
+    # Flat caps keep the shortest range bar (early-warning rate, about 1.5x) readable.
+    ARROW = dict(arrowstyle="|-|,widthA=0.35,widthB=0.35", lw=1.3, mutation_scale=8, shrinkA=0, shrinkB=0)
+
     def ratio_label(values):
         r = max(values) / min(values)
-        return f"{r:.0f}$\\times$" if r >= 10 else f"{r:.1f}$\\times$"
+        return f"{r:.0f}$\\times$" if r >= 9.95 else f"{r:.1f}$\\times$"
 
-    def depth_lines(ax, depth, keys):
+    def depth_lines(ax, layers, depth, keys):
         for key in keys:
             m, s = (np.asarray(v, float) for v in depth[key])
-            ax.fill_between(DEPTH_LAYERS, m - s, m + s, color=COLORS[key], alpha=0.18, lw=0)
+            ax.fill_between(layers, m - s, m + s, color=COLORS[key], alpha=0.18, lw=0)
         for key in keys:
-            ax.plot(DEPTH_LAYERS, depth[key][0], color=COLORS[key], **LINE_STYLE[key])
+            line = dict(LINE_STYLE[key])
+            ax.plot(layers, depth[key][0], color=COLORS[key], **line)
 
     def metrics_figure(data, variant):
         scorers, hatched = data["scorers"], data["hatched"]
         depth = data["depth"]
+        layers = list(data.get("layers", DEPTH_LAYERS))
+        # Every layer is drawn with small markers; ticks stay at a few readable depths.
+        ticks = layers if len(layers) <= 8 else [layer for layer in (1, 5, 10, 15, 20, 25, 31) if layer in layers]
         x = np.arange(len(scorers))
         with style(**STYLE_METRICS):
             if variant == "zoom":
-                fig = page_figure(604.8, 259.2)
+                fig = page_figure(604.8, 271.2)
                 y0, h = 51.84, 163.296
             else:
                 fig = page_figure(604.8, 230.4)
                 y0, h = 50.688, 135.936
-            axa = axes_at(fig, 30.24, y0, 136.9320926966, h)
-            axb = axes_at(fig, 210.2216207865, y0, 180.1738061798, h)
+            # Three task panels of equal width, then the layer panel.
+            axa = axes_at(fig, 30.24, y0, 112.0, h)
+            axb = axes_at(fig, 168.0, y0, 112.0, h)
+            axt = axes_at(fig, 298.0, y0, 112.0, h, sharey=axb)
             if variant == "zoom":
-                axu = axes_at(fig, 433.4449550562, 180.1239931389, 144.1390449438, 35.0120068611)
-                axc = axes_at(fig, 433.4449550562, 51.84, 144.1390449438, 119.0408233276)
+                axu = axes_at(fig, 446.0, 180.1239931389, 131.58, 35.0120068611)
+                axc = axes_at(fig, 446.0, 51.84, 131.58, 119.0408233276)
             else:
-                axc = axes_at(fig, 433.4449550562, y0, 144.1390449438, h)
-            # (a) response level
-            for k, key in enumerate(["auc", "acc"]):
-                axa.bar(x + (k - 0.5) * 0.36, data[key][0], 0.36, color=COLORS[key], edgecolor="white", linewidth=1.0,
-                        hatch=["//" if hh else "" for hh in hatched])
-            axa.annotate("", xy=(3.45, -0.265), xytext=(-0.45, -0.265), xycoords=("data", "axes fraction"),
-                         arrowprops=dict(arrowstyle="->", color=ORDER_INK, lw=1.0, mutation_scale=9), annotation_clip=False)
-            for k, key in enumerate(["auc", "acc"]):
-                axa.errorbar(x + (k - 0.5) * 0.36, data[key][0], yerr=data[key][1], fmt="none", ecolor=LABEL_INK,
-                             elinewidth=1.1, capsize=3, zorder=4)
-            for i in range(len(scorers)):
-                for k, key in enumerate(["auc", "acc"]):
-                    axa.text(x[i] + (k - 0.5) * 0.36, 0.52, f"{data[key][0][i]:.4f}", rotation=90, ha="center", va="center",
-                             fontsize=7.8, color=LABEL_INK, zorder=4,
-                             bbox=dict(boxstyle="round,pad=0.16", fc="white", ec="none", alpha=0.93))
-            axa.set_xticks(x, scorers, fontsize=8.5)
-            axa.set_yticks([0, 0.5, 1.0])
-            axa.tick_params(axis="y", labelsize=9)
-            axa.set_ylim(0, 1.08)
-            axa.grid(alpha=0.25)
-            axa.set_axisbelow(True)
-            axa.set_title("(a) response level", loc="left", fontsize=10.5)
-            axa.text(0.5, -0.25, "ordered by AUC [desc]", transform=axa.transAxes, ha="center", va="bottom", fontsize=8.2, color=ORDER_INK)
-            # (b) token level
-            keys = ["post", "warn", "early"]
-            for k, key in enumerate(keys):
-                axb.bar(x + (k - 1) * 0.27, data[key][0], 0.27, color=COLORS[key], edgecolor="white", linewidth=1.0,
-                        hatch=["//" if hh else "" for hh in hatched])
-            axb.annotate("", xy=(3.45, -0.265), xytext=(-0.45, -0.265), xycoords=("data", "axes fraction"),
-                         arrowprops=dict(arrowstyle="->", color=ORDER_INK, lw=1.0, mutation_scale=9), annotation_clip=False)
-            for k, key in enumerate(keys):
-                axb.errorbar(x + (k - 1) * 0.27, data[key][0], yerr=data[key][1], fmt="none", ecolor=LABEL_INK,
-                             elinewidth=1.1, capsize=3, zorder=4)
-            for k, key in enumerate(keys):
-                mean, sd = data[key]
+                axc = axes_at(fig, 446.0, y0, 131.58, h)
+            width = 0.36
+
+            def task_panel(ax, keys, title, digits, ylim):
+                for k, key in enumerate(keys):
+                    ax.bar(x + (k - 0.5) * width, data[key][0], width, color=COLORS[key], edgecolor="white", linewidth=1.0,
+                           hatch=["//" if hh else "" for hh in hatched])
+                    ax.errorbar(x + (k - 0.5) * width, data[key][0], yerr=data[key][1], fmt="none", ecolor=LABEL_INK,
+                                elinewidth=1.1, capsize=3, zorder=4)
+                for k, key in enumerate(keys):
+                    mean, sd = data[key]
+                    for i in range(len(scorers)):
+                        text = f"{mean[i]:.{digits[key]}f}"
+                        xi = x[i] + (k - 0.5) * width
+                        if mean[i] > 0.3:
+                            ax.text(xi, min(mean[i] / 2, 0.52), text, rotation=90, ha="center", va="center", fontsize=7.6,
+                                    color=COLORS[key] if key not in ("auc", "acc", "det") else LABEL_INK, zorder=4,
+                                    bbox=dict(boxstyle="round,pad=0.16", fc="white", ec="none", alpha=0.93))
+                        else:
+                            ax.text(xi, mean[i] + sd[i] + 0.03, text, rotation=90, ha="center", va="bottom",
+                                    fontsize=7.6, color=COLORS[key], zorder=4)
+                ax.annotate("", xy=(3.45, -0.265), xytext=(-0.45, -0.265), xycoords=("data", "axes fraction"),
+                            arrowprops=dict(arrowstyle="->", color=ORDER_INK, lw=1.0, mutation_scale=9), annotation_clip=False)
+                ax.text(0.5, -0.25, "ordered by AUROC [desc]", transform=ax.transAxes, ha="center", va="bottom", fontsize=7.6, color=ORDER_INK)
+                ax.set_xticks(x, scorers, fontsize=7.0)
+                ax.set_yticks([0, 0.5, 1.0])
+                ax.tick_params(axis="y", labelsize=9)
+                ax.set_ylim(*ylim)
+                ax.grid(alpha=0.25)
+                ax.set_axisbelow(True)
+                ax.set_title(title, loc="left", fontsize=9.6)
+
+            task_panel(axa, ["auc", "acc"], "(a) response classification", {"auc": 4, "acc": 4}, (0, 1.08))
+            fd_keys = ["det", "post"] if "det" in data else ["post"]
+            task_panel(axb, fd_keys, "(b) failure detection", {"det": 2, "post": 2}, (0, 1.08))
+            task_panel(axt, ["warn", "early"], "(c) early warning", {"warn": 3, "early": 2}, (0, 1.08))
+            axt.tick_params(axis="y", labelleft=False)
+            if "chance_early" in data:
                 for i in range(len(scorers)):
-                    text = f"{mean[i]:.3f}" if key == "warn" else f"{mean[i]:.2f}"
-                    if mean[i] > 0.25:
-                        axb.text(x[i] + (k - 1) * 0.27, mean[i] / 2, text, rotation=90, ha="center", va="center", fontsize=8,
-                                 color=COLORS[key], zorder=4, bbox=dict(boxstyle="round,pad=0.16", fc="white", ec="none", alpha=0.93))
-                    else:
-                        axb.text(x[i] + (k - 1) * 0.27, mean[i] + sd[i] + 0.03, text, rotation=90, ha="center", va="bottom",
-                                 fontsize=8, color=COLORS[key], zorder=4)
-            axb.set_xticks(x, scorers, fontsize=8.5)
-            axb.set_yticks([0, 0.5, 1.0])
-            axb.tick_params(axis="y", labelsize=9)
-            axb.set_ylim(0, 1.05)
-            axb.grid(alpha=0.25)
-            axb.set_axisbelow(True)
-            axb.set_title("(b) token level", loc="left", fontsize=10.5)
-            axb.text(0.5, -0.25, "ordered by AUC [desc]", transform=axb.transAxes, ha="center", va="bottom", fontsize=8.2, color=ORDER_INK)
-            # (c) across layers
-            low = min(1.2e-3, 0.8 * float(np.min(np.asarray(depth["warn"][0]) - np.asarray(depth["warn"][1]))))
+                    xi = x[i] + 0.5 * width
+                    axt.plot([xi - 0.24, xi + 0.24], [data["chance_early"]] * 2, color=LABEL_INK, lw=1.1, ls=(0, (2, 1.5)), zorder=5)
+            # (c) across layers. The ratio arrows sit in a narrow strip right of the last layer.
+            low = 0.5 * float(np.min(np.asarray(depth["warn"][0]) - np.asarray(depth["warn"][1])))
+            gap = 0.085 * (layers[-1] - layers[0])
+            arrow_x = {"warn": layers[-1] + 1.3 * gap, "early": layers[-1] + 2.5 * gap, "post": layers[-1] + 3.7 * gap}
+            xlim = (layers[0] - 2, layers[-1] + 4.9 * gap)
             if variant == "zoom":
-                depth_lines(axu, depth, ["auc", "acc"])
-                lowest = float(np.min(np.asarray(depth["acc"][0]) - np.asarray(depth["acc"][1])))
+                depth_lines(axu, layers, depth, ["auc", "acc"])
+                lowest = min(float(np.min(np.asarray(depth[k][0]) - np.asarray(depth[k][1]))) for k in ("auc", "acc"))
                 axu.set_ylim(min(0.988, lowest - 0.002), 1.0016)
-                axu.set_xlim(2, 48)
-                axu.set_xticks(DEPTH_LAYERS)
+                axu.set_xlim(*xlim)
+                axu.set_xticks(ticks)
                 axu.tick_params(axis="x", labelbottom=False)
-                axu.set_yticks([0.99, 1.0])
+                axu.set_yticks([1.0 - (0.01 if axu.get_ylim()[0] > 0.985 else 0.03), 1.0])
                 axu.tick_params(axis="y", labelsize=8)
                 axu.grid(alpha=0.25)
                 axu.set_axisbelow(True)
-                axu.text(31.0, depth["auc"][0][-1], "AUC", fontsize=8, color=LABEL_INK, va="center")
-                axu.text(31.0, depth["acc"][0][-1], "accuracy", fontsize=8, color=LABEL_INK, va="center")
-                axu.set_title("(c) across layers", loc="left", fontsize=10.5)
-            depth_lines(axc, depth, ["auc", "acc", "post", "early", "warn"])
+                # Response-level ratios: arrows in the same strip as below, values in the empty band under the curves.
+                for key, xa in (("auc", arrow_x["early"]), ("acc", arrow_x["post"])):
+                    m = depth[key][0]
+                    axu.annotate("", xy=(xa, min(m)), xytext=(xa, max(m)), arrowprops=dict(ARROW, color=COLORS[key]))
+                for row, (key, name) in enumerate((("auc", "AUROC"), ("acc", "accuracy"))):
+                    m = depth[key][0]
+                    axu.text(layers[-1], 0.40 - 0.24 * row, f"{name} {max(m) / min(m):.3f}$\\times$", transform=axu.get_xaxis_transform(),
+                             fontsize=6.8, color=LABEL_INK if key == "acc" else ORDER_INK, ha="right", va="center")
+                axu.set_title("(d) across layers", loc="left", fontsize=9.6)
+            depth_lines(axc, layers, depth, ["auc", "acc", "post", "early", "warn"])
             axc.set_yscale("log")
             axc.set_ylim(low, 1.9 if variant == "zoom" else 2.8)
-            axc.set_xlim(2, 48)
-            axc.set_xticks(DEPTH_LAYERS, [str(layer) for layer in DEPTH_LAYERS], fontsize=7)
+            axc.set_xlim(*xlim)
+            axc.set_xticks(ticks, [str(layer) for layer in ticks], fontsize=7)
             axc.tick_params(axis="y", labelsize=8.5)
             axc.grid(alpha=0.25)
             axc.set_axisbelow(True)
             axc.set_xlabel("layer", fontsize=9)
             axc.set_ylabel("log scale", fontsize=8.5)
-            for key, xa in (("warn", 33.0), ("early", 36.5), ("post", 40.0)):
+            for key, xa in arrow_x.items():
                 m = depth[key][0]
                 hi, lo = max(m), min(m)
-                axc.annotate("", xy=(xa, lo), xytext=(xa, hi), arrowprops=dict(arrowstyle="<->", color=COLORS[key], lw=1.3, mutation_scale=9))
-                axc.text(xa + 0.8, (hi * lo) ** 0.5, ratio_label(m), fontsize=8.2, color=COLORS[key], va="center")
+                axc.annotate("", xy=(xa, lo), xytext=(xa, hi), arrowprops=dict(ARROW, color=COLORS[key]))
+                axc.text(xa, lo / 1.12, ratio_label(m), fontsize=7.4, color=COLORS[key], ha="center", va="top")
             if variant != "zoom":
                 a, c = depth["auc"][0], depth["acc"][0]
-                axc.text(0.02, 0.985, f"AUC {max(a) / min(a):.3f}$\\times$,  accuracy {max(c) / min(c):.3f}$\\times$",
+                axc.text(0.02, 0.985, f"AUROC {max(a) / min(a):.3f}$\\times$,  accuracy {max(c) / min(c):.3f}$\\times$",
                          transform=axc.transAxes, fontsize=7.6, color=LABEL_INK, va="top")
-                axc.set_title("(c) across layers", loc="left", fontsize=10.5)
+                axc.set_title("(d) across layers", loc="left", fontsize=9.6)
             handles = [
                 (Patch(facecolor=COLORS["auc"], edgecolor="none"), Line2D([], [], color=COLORS["auc"], **LINE_STYLE["auc"])),
                 (Patch(facecolor=COLORS["acc"], edgecolor="none"), Line2D([], [], color=COLORS["acc"], **LINE_STYLE["acc"])),
+                Patch(facecolor=COLORS["det"], edgecolor="none"),
                 Patch(facecolor=COLORS["post"], edgecolor="none"), Patch(facecolor=COLORS["warn"], edgecolor="none"),
                 Patch(facecolor=COLORS["early"], edgecolor="none"),
+                Line2D([], [], color=LABEL_INK, lw=1.1, ls=(0, (2, 1.5))),
                 Patch(facecolor="white", edgecolor=LABEL_INK, hatch="//"),
             ]
-            labels = ["AUC", "accuracy", "post-onset coverage", "warning coverage", "early-warning rate", "adapted (LoRA)"]
-            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.005), ncol=6, frameon=False, fontsize=8.3,
+            labels = ["AUROC", "accuracy", "detection rate", "post-onset coverage", "warning coverage", "early-warning rate",
+                      "random alarms", "adapted (LoRA)"]
+            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.005), ncol=4, frameon=False, fontsize=8.0,
                        handlelength=2.4, handletextpad=0.6, columnspacing=1.0, handler_map={tuple: HandlerTuple(ndivide=None)})
             name = "fig_metrics_zoom" if variant == "zoom" else "fig_metrics_inline"
             save(fig, FIG_DIR / f"{name}.pdf")
@@ -1190,6 +1238,377 @@ def _(
 
     sweep_figure(DATA["sweep"][0], DATA["sweep"][1] == "paper")
     return
+
+
+@app.cell
+def _(FIG_DIR, GRID, INK, INK_MUTED, INK_SOFT, Line2D, Patch, RUNS_ROOT, STYLE_BARS, axes_at, np, page_figure, pd, save, style):
+    # Figures of the revised paper's Q2 (early warning per model) and Q4 (where the
+    # flags fall), read from the aggregated evaluations and the onset profile.
+    REB_PROBES = {
+        "apertus": [("frozen", 15), ("adapted", 15), ("adapted", 30)],
+        "llama3p1": [("frozen", 15), ("adapted", 15), ("adapted", 6)],
+        "mistral": [("frozen", 5), ("adapted", 5), ("adapted", 11)],
+    }
+    REB_DATASET = {"apertus": "apertus-8b-instruct", "llama3p1": "llama3p1-8b-instruct", "mistral": "mistral-7b-instruct-v0p1"}
+    REB_LABEL = {"apertus": "Apertus", "llama3p1": "Llama", "mistral": "Mistral"}
+    REB_COLOR = {"apertus": "#d62728", "llama3p1": "#1f77b4", "mistral": "#e69f00"}
+    REB_SPLIT, REB_BUDGET = "test_indomain", 0.05
+
+    _table = pd.read_csv(RUNS_ROOT / "analysis" / "selected_metrics.csv")
+    _s4 = _table[_table["recipe"].str.startswith("frontier_window W=512 centered K=256")].copy()
+    _s4["regime"] = np.where(_s4["lora"].eq("none"), "frozen", "adapted")
+    _keys = {"post": "in_pattern_recall", "warn": "warning_recall_256", "early": "fired_before_frontier", "lead": "median_offset"}
+
+    def reb_stats(model, regime, layer, split=REB_SPLIT, budget=REB_BUDGET):
+        rows = _s4[(_s4["model"] == model) & (_s4["regime"] == regime) & (_s4["layer"] == layer)
+                   & (_s4["split"] == split) & np.isclose(_s4["target_negative_fpr"], budget)]
+        return {k: (rows[c].mean(), rows[c].std()) for k, c in _keys.items()}
+
+    def chance_early(model, split=REB_SPLIT, budget=REB_BUDGET):
+        """Early-warning rate of alarms placed at random under the same budget (scripts/random_alarm_reference.py)."""
+        labels = pd.read_parquet(RUNS_ROOT.parent / f"degeneration-dataset-{REB_DATASET[model]}" / "onset_labels" / "onset_labels.parquet")
+        labels = labels[~labels["onset_resolution"].isin(["judge_failed", "not_found"])]
+        healthy = labels[(labels["split"] == "val") & ~labels["is_positive"].astype(bool)]["num_tokens"].to_numpy(float)
+        test = labels[(labels["split"] == split) & labels["is_positive"].astype(bool)]
+        low, high = 0.0, 1.0
+        for _ in range(100):
+            q = (low + high) / 2
+            low, high = (low, q) if np.mean(1 - (1 - q) ** healthy) > budget else (q, high)
+        alarm = 1 - (1 - low) ** test["num_tokens"].to_numpy(float)
+        return float((1 - (1 - low) ** test["onset_position"].to_numpy(float)).sum() / alarm.sum())
+
+    def q2_figure():
+        models = list(REB_PROBES)
+        probes = {m: [REB_PROBES[m][0], REB_PROBES[m][2]] for m in models}
+        panels = [("post", r"(a) post-onset coverage ($\uparrow$)"), ("warn", r"(b) warning coverage ($\uparrow$)"),
+                  ("early", r"(c) early-warning rate ($\uparrow$)"), ("lead", r"(d) median lead ($\downarrow$)")]
+        with style(**STYLE_BARS):
+            fig = page_figure(666.72, 182.0)
+            axes = [axes_at(fig, 39.65, 40.0, 131.79, 117.0)]
+            axes += [axes_at(fig, x, 40.0, 131.79, 117.0, sharey=axes[0]) for x in (177.82, 315.99)]
+            axes += [axes_at(fig, 521.14, 40.0, 138.38, 117.0)]
+            width = 0.34
+            for ax, (key, title) in zip(axes, panels):
+                for mi, model in enumerate(models):
+                    for pi, (regime, layer) in enumerate(probes[model]):
+                        mean, sd = reb_stats(model, regime, layer)[key]
+                        x = mi + (pi - 0.5) * 0.39
+                        ax.bar(x, mean, width, color=REB_COLOR[model], edgecolor=INK, linewidth=0.7, zorder=3,
+                               hatch="//" if regime == "adapted" else "", alpha=1.0 if regime == "adapted" else 0.9)
+                        ax.errorbar(x, mean, yerr=sd, fmt="none", ecolor=INK, elinewidth=0.9, capsize=2.5, zorder=4)
+                        offset = -10 if (key == "lead" and mean < 0) else 3
+                        ax.annotate(f"{mean:.0f}" if key == "lead" else f"{mean:.2f}",
+                                    (x, mean + (sd if offset > 0 else -sd)), xytext=(0, offset), textcoords="offset points",
+                                    ha="center", va="baseline", fontsize=6.5, color=INK_SOFT)
+                    if key == "early":
+                        chance = chance_early(model)
+                        ax.plot([mi - 0.42, mi + 0.42], [chance, chance], color=INK, lw=1.1, ls=(0, (2, 1.5)), zorder=5)
+                ax.set_title(title, loc="center", pad=4)
+                ax.set_xticks(range(len(models)), [REB_LABEL[m] for m in models])
+                ax.tick_params(axis="x", length=0)
+                ax.set_xlim(-0.6, len(models) - 0.4)
+                ax.grid(axis="y")
+                ax.set_axisbelow(True)
+            axes[3].axhline(0, color=INK_SOFT, lw=0.9)
+            axes[3].set_ylabel("first alarm minus onset (tokens)")
+            _lo, _hi = axes[3].get_ylim()
+            axes[3].set_ylim(_lo * 1.25, _hi * 1.45)
+            axes[0].set_ylim(0, 1.08)
+            axes[0].set_ylabel("share")
+            for ax in axes[1:3]:
+                ax.tick_params(axis="y", labelleft=False)
+            handles = [Patch(facecolor=REB_COLOR[m], edgecolor=INK, linewidth=0.7, label=REB_LABEL[m]) for m in models]
+            handles += [Patch(facecolor="white", edgecolor=INK, linewidth=0.7, label="frozen"),
+                        Patch(facecolor="white", edgecolor=INK, linewidth=0.7, hatch="//", label="adapted"),
+                        Line2D([], [], color=INK, lw=1.1, ls=(0, (2, 1.5)), label="random alarms")]
+            fig.legend(handles=handles, loc="lower center", ncol=6, frameon=True, edgecolor=GRID, handlelength=1.6, columnspacing=1.6)
+            save(fig, FIG_DIR / "fig_q2_warning_per_model.pdf")
+            save(fig, FIG_DIR / "fig_q2_warning_per_model.png", dpi=300)
+        return fig
+
+    POSITION_TABLES = RUNS_ROOT / "analysis" / "position_analysis"
+
+    def q4_figure():
+        """Onset profile with leave-one-prompt-out bands and the healthy rate at the same absolute positions."""
+        profile = pd.read_csv(POSITION_TABLES / "onset_profile.csv")
+        styles = [dict(ls="-", lw=1.5), dict(ls=(0, (4, 1.6)), lw=1.4), dict(ls=(0, (1, 1.3)), lw=1.6)]
+        reference = dict(lw=0.8, alpha=0.6)
+        far_span = (-1250, -1090)
+        with style(**STYLE_BARS):
+            fig = page_figure(666.72, 186.0)
+            axes = [axes_at(fig, 45.0 + i * 210.0, 42.0, 190.0, 105.0) for i in range(3)]
+            for ax, model in zip(axes, REB_PROBES):
+                ax.axvspan(-256, 0, color=GRID, alpha=0.7, lw=0, zorder=0)
+                ax.axvline(0, color=INK, lw=0.6, zorder=1)
+                ax.axvline(-1050, color=GRID, lw=0.8, zorder=1)
+                for (regime, layer), st in zip(REB_PROBES[model], styles):
+                    part = profile[profile["scorer"] == f"{model} {regime} L{layer}"]
+                    before = part[(part["side"] == "before") & (part["lo"] < 1024)].sort_values("lo", ascending=False)
+                    after = part[part["side"] == "after"].sort_values("lo")
+                    curve = pd.concat([before, after])
+                    x = np.concatenate([-(before["lo"].to_numpy() + 16), after["lo"].to_numpy() + 16])
+                    color = REB_COLOR[model]
+                    ax.fill_between(x, curve["ci_low"], curve["ci_high"], color=color, alpha=0.12, lw=0, zorder=2)
+                    ax.plot(x, curve["flag_rate"], color=color, label=f"{regime}, L{layer}", zorder=3, **st)
+                    ax.plot(x, curve["healthy_same_position"], color=color, zorder=3, **{**st, **reference})
+                    # Every position further than 1,024 tokens before the onset, pooled into one bin.
+                    far = part[(part["side"] == "before") & (part["lo"] == 1024)].iloc[0]
+                    ax.fill_between(far_span, far["ci_low"], far["ci_high"], color=color, alpha=0.12, lw=0, zorder=2)
+                    ax.plot(far_span, [far["flag_rate"]] * 2, color=color, zorder=3, **st)
+                    ax.plot(far_span, [far["healthy_same_position"]] * 2, color=color, zorder=3, **{**st, **reference})
+                ax.set_title(REB_LABEL[model], loc="center", pad=4)
+                ax.set_xlim(-1290, 290)
+                ax.set_xticks([-1170, -768, -512, -256, 0, 256], [">1024", "\u2212768", "\u2212512", "\u2212256", "0", "256"])
+                ax.set_xlabel("tokens from the onset")
+                ax.set_ylim(0, 1.0)
+                ax.grid(axis="y")
+                ax.set_axisbelow(True)
+                ax.legend(loc="upper left", handlelength=2.6)
+            # Line weight tells the two populations apart in every panel, so its key is shared.
+            key = [Line2D([], [], color=INK_SOFT, lw=1.5), Line2D([], [], color=INK_SOFT, **reference),
+                   Patch(facecolor=INK_SOFT, alpha=0.2, edgecolor="none")]
+            fig.legend(key, ["thick: degenerate answers", "thin: healthy answers at the same positions", "95% interval"],
+                       loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=3, handlelength=2.6, columnspacing=2.2)
+            axes[0].set_ylabel("share of tokens flagged")
+            for ax in axes[1:]:
+                ax.tick_params(axis="y", labelleft=False)
+            save(fig, FIG_DIR / "fig_q4_onset_profile.pdf")
+            save(fig, FIG_DIR / "fig_q4_onset_profile.png", dpi=300)
+        return fig
+
+    def false_alarm_figure():
+        """Share of healthy tokens flagged by absolute position, over the healthy answers still running there."""
+        profile = pd.read_csv(POSITION_TABLES / "healthy_position.csv")
+        profile = profile[profile["scope"] == "all"]
+        styles = [dict(ls="-", lw=1.5), dict(ls=(0, (4, 1.6)), lw=1.4), dict(ls=(0, (1, 1.3)), lw=1.6)]
+        width = int(np.diff(np.unique(profile["lo"])).min())
+        top = min(1.0, 1.08 * profile["ci_high"].max())
+        with style(**STYLE_BARS):
+            fig = page_figure(666.72, 196.0)
+            axes, strips = [], []
+            for i in range(3):
+                axes.append(axes_at(fig, 45.0 + i * 210.0, 76.0, 190.0, 92.0))
+                strips.append(axes_at(fig, 45.0 + i * 210.0, 38.0, 190.0, 26.0, sharex=axes[-1]))
+            for ax, strip, model in zip(axes, strips, REB_PROBES):
+                for (regime, layer), st in zip(REB_PROBES[model], styles):
+                    part = profile[profile["scorer"] == f"{model} {regime} L{layer}"].sort_values("lo")
+                    x = part["lo"].to_numpy() + width / 2
+                    ax.fill_between(x, part["ci_low"], part["ci_high"], color=REB_COLOR[model], alpha=0.13, lw=0, zorder=2)
+                    ax.plot(x, part["flag_rate"], color=REB_COLOR[model], label=f"{regime}, L{layer}", zorder=3, **st)
+                running = profile[profile["scorer"] == f"{model} {REB_PROBES[model][0][0]} L{REB_PROBES[model][0][1]}"].sort_values("lo")
+                strip.bar(running["lo"], running["responses"], width=width, align="edge", color=INK_MUTED, alpha=0.45,
+                          edgecolor="white", linewidth=0.5)
+                for (_, row), align in zip(running.iloc[[0, -1]].iterrows(), ("left", "center")):
+                    x = row["lo"] + (0.15 if align == "left" else 0.5) * width
+                    strip.text(x, row["responses"] * 1.25, f"{int(row['responses']):,}", ha=align, va="bottom", fontsize=6.3,
+                               color=INK_SOFT)
+                ax.set_title(REB_LABEL[model], loc="center", pad=4)
+                ax.set_ylim(0, top)
+                ax.grid(axis="y")
+                ax.set_axisbelow(True)
+                ax.tick_params(axis="x", labelbottom=False)
+                ax.legend(loc="upper left", handlelength=2.6)
+                strip.set_yscale("log")
+                strip.set_ylim(10, 2.5e4)
+                strip.set_yticks([100, 1000], ["100", "1k"])
+                strip.minorticks_off()
+                strip.set_xlim(0, running["lo"].max() + width)
+                strip.set_xticks(range(0, int(running["lo"].max() + width) + 1, 512))
+                strip.set_xlabel("token position in the healthy answer")
+            axes[0].set_ylabel("share of tokens flagged")
+            strips[0].set_ylabel("answers\nrunning", fontsize=7.5)
+            for ax in axes[1:] + strips[1:]:
+                ax.tick_params(axis="y", labelleft=False)
+            save(fig, FIG_DIR / "fig_false_alarm_profile.pdf")
+            save(fig, FIG_DIR / "fig_false_alarm_profile.png", dpi=300)
+        return fig
+
+    q2_figure()
+    q4_figure()
+    false_alarm_figure()
+    return
+
+
+
+@app.cell
+def _(FIG_DIR, RUNS_ROOT, STYLE_BARS, axes_at, np, page_figure, pd, save, style):
+    # PCA of the residual stream at the frozen probe's layer, frozen against adapted, on
+    # degenerate and long healthy test responses (scripts/extract_pca_states.py). One PCA
+    # per model and regime, fitted on an equal number of tokens from each group so the
+    # long post-onset stretches do not dominate it. Separation is measured in the plane of
+    # the first two components: the distance between two group centroids over the
+    # root-mean-square spread of the two groups around them. Tokens whose norm exceeds five
+    # times the median norm of their response are left out: a few such tokens (the large,
+    # nearly constant dimensions of early Mistral layers) otherwise take the first component.
+    from safetensors.torch import load_file as _load_file
+    from sklearn.decomposition import PCA as _PCA
+
+    _root = RUNS_ROOT / "paper_figures" / "pca_states"
+    _models = {"apertus": ("Apertus", 15), "llama3p1": ("Llama", 15), "mistral": ("Mistral", 5)}
+    _groups = {"healthy": "#9a9a9a", "pre": "#2ca02c", "warn": "#ff7f0e", "post": "#d62728"}
+    _names = {"healthy": "healthy", "pre": "degenerate, before the window", "warn": "warning window", "post": "after the onset"}
+    _stride, _per_group, _rng = 4, 3000, np.random.default_rng(0)
+
+    def _tokens(model, regime, dropped):
+        manifest = pd.read_parquet(_root / model / "manifest.parquet")
+        parts = {g: [] for g in _groups}
+        for row in manifest.itertuples():
+            path = _root / model / regime / row.domain / row.prompt_id / f"rollout_{row.rollout_idx}.safetensors"
+            hidden = _load_file(str(path))["hidden_states"].float().numpy()
+            position = np.arange(len(hidden))
+            norm = np.linalg.norm(hidden, axis=1)
+            typical = norm <= 5 * np.median(norm)
+            dropped[0] += int((~typical).sum())
+            dropped[1] += len(hidden)
+            if row.is_positive:
+                onset = int(row.onset_position)
+                masks = {"pre": position < onset - 256, "warn": (position >= onset - 256) & (position < onset), "post": position >= onset}
+            else:
+                masks = {"healthy": np.ones(len(hidden), bool)}
+            for group, mask in masks.items():
+                parts[group].append(hidden[mask & typical][::_stride])
+        return {g: np.concatenate(v) for g, v in parts.items() if v}
+
+    def _separation(a, b):
+        spread = np.sqrt((((a - a.mean(0)) ** 2).sum(1).mean() + ((b - b.mean(0)) ** 2).sum(1).mean()) / 2)
+        return float(np.linalg.norm(a.mean(0) - b.mean(0)) / spread)
+
+    _rows, _projected = [], {}
+    for _model in _models:
+        if not (_root / _model / "manifest.parquet").is_file():
+            continue
+        for _regime in ("frozen", "adapted"):
+            _dropped = [0, 0]
+            _tok = _tokens(_model, _regime, _dropped)
+            _fit = np.concatenate([g[_rng.choice(len(g), min(_per_group, len(g)), replace=False)] for g in _tok.values()])
+            _pca = _PCA(n_components=2, random_state=0).fit(_fit)
+            _proj = {g: _pca.transform(v) for g, v in _tok.items()}
+            _projected[_model, _regime] = _proj
+            _rows.append({"model": _model, "regime": _regime, "pc1_var": _pca.explained_variance_ratio_[0],
+                          "pc2_var": _pca.explained_variance_ratio_[1],
+                          "pre_vs_healthy": _separation(_proj["pre"], _proj["healthy"]),
+                          "warn_vs_pre": _separation(_proj["warn"], _proj["pre"]),
+                          "post_vs_healthy": _separation(_proj["post"], _proj["healthy"]),
+                          "dropped_share": _dropped[0] / _dropped[1]})
+    PCA_SUMMARY = pd.DataFrame(_rows)
+    if len(PCA_SUMMARY):
+        PCA_SUMMARY.to_csv(RUNS_ROOT / "analysis" / "pca_states_summary.csv", index=False)
+
+    if _projected:
+        _shown = [m for m in _models if (m, "frozen") in _projected]
+        with style(**STYLE_BARS):
+            _fig = page_figure(430.0, 40.0 + 150.0 * len(_shown))
+            for _i, _model in enumerate(_shown):
+                for _j, _regime in enumerate(("frozen", "adapted")):
+                    _ax = axes_at(_fig, 40.0 + _j * 200.0, 40.0 + (len(_shown) - 1 - _i) * 150.0, 170.0, 115.0)
+                    # Same number of points and size for every group, drawn so that the
+                    # groups compared with each other (healthy, before the window) stay visible.
+                    for _group in ("post", "warn", "pre", "healthy"):
+                        _pts = _projected[_model, _regime][_group]
+                        _keep = _rng.choice(len(_pts), min(800, len(_pts)), replace=False)
+                        _ax.scatter(_pts[_keep, 0], _pts[_keep, 1], s=3, c=_groups[_group], alpha=0.45, lw=0,
+                                    label=_names[_group], rasterized=True)
+                    _ax.set_xticks([])
+                    _ax.set_yticks([])
+                    _ax.set_title(f"{_models[_model][0]}, {_regime}, layer {_models[_model][1]}", loc="left", pad=3)
+            _fig.axes[0].legend(loc="lower left", bbox_to_anchor=(0.0, 1.12), ncol=4, markerscale=3, frameon=False,
+                                handletextpad=0.3, columnspacing=1.0)
+            save(_fig, FIG_DIR / "fig_pca_states.pdf")
+            save(_fig, FIG_DIR / "fig_pca_states.png", dpi=300)
+    PCA_SUMMARY.round(3)
+    return (PCA_SUMMARY,)
+
+
+@app.cell
+def _(FIG_DIR, GRID, RUNS_ROOT, STYLE_BARS, axes_at, np, page_figure, pd, save, style):
+    # How far a degenerate response's residual stream sits from healthy responses to the
+    # same prompt, at the same absolute positions, as the onset approaches. For each
+    # degenerate response and 64-token bin relative to its onset, the mean state over the
+    # bin is compared with the mean state of its healthy siblings over the same positions,
+    # in units of the siblings' spread there. The reference applies the same measure to
+    # one healthy sibling against the others, so it gives the distance expected between
+    # two healthy responses to one prompt. Both use leave-one-sibling-out means, so they
+    # average over the same number of sibling responses.
+    from safetensors.torch import load_file as _load_file
+
+    _root = RUNS_ROOT / "paper_figures" / "pca_states_paired"
+    _models = {"apertus": ("Apertus", 15), "llama3p1": ("Llama", 15), "mistral": ("Mistral", 5)}
+    _bins = list(range(-1024, 256, 64))
+    _colors = {"frozen": "#0072B2", "adapted": "#E69F00"}
+
+    def _distance(target, others, start, stop):
+        """Distance of target's mean over [start, stop) to the others' mean there, over their spread."""
+        pooled = np.concatenate([o[start:stop] for o in others])
+        centre = pooled.mean(0)
+        spread = np.sqrt(((pooled - centre) ** 2).sum(1).mean())
+        return float(np.linalg.norm(target[start:stop].mean(0) - centre) / spread)
+
+    def _profile(model, regime):
+        manifest = pd.read_parquet(_root / model / "manifest.parquet")
+        load = lambda r: _load_file(str(_root / model / regime / r.domain / r.prompt_id / f"rollout_{r.rollout_idx}.safetensors"))["hidden_states"].float().numpy()
+        rows = []
+        for prompt_id, group in manifest.groupby("prompt_id"):
+            healthy = [load(r) for r in group[~group["is_positive"]].itertuples()]
+            for degenerate in group[group["is_positive"]].itertuples():
+                states, onset = load(degenerate), int(degenerate.onset_position)
+                for lo in _bins:
+                    start, stop = onset + lo, onset + lo + 64
+                    if start < 0:
+                        continue
+                    covering = [h for h in healthy if len(h) >= stop]
+                    if len(covering) < 3:
+                        continue
+                    for left_out in range(len(covering)):
+                        rest = covering[:left_out] + covering[left_out + 1:]
+                        rows.append({"bin": lo, "prompt": prompt_id, "kind": "degenerate",
+                                     "distance": _distance(states, rest, start, stop)})
+                        rows.append({"bin": lo, "prompt": prompt_id, "kind": "healthy",
+                                     "distance": _distance(covering[left_out], rest, start, stop)})
+        return pd.DataFrame(rows)
+
+    _frames = []
+    for _model in _models:
+        if (_root / _model / "manifest.parquet").is_file():
+            for _regime in ("frozen", "adapted"):
+                _part = _profile(_model, _regime)
+                _part["model"], _part["regime"] = _model, _regime
+                _frames.append(_part)
+    SIBLING_PROFILE = pd.concat(_frames, ignore_index=True) if _frames else pd.DataFrame()
+
+    if len(SIBLING_PROFILE):
+        # Mean over prompts first, so a prompt with two degenerate responses or more siblings
+        # does not count more; the band is a 95% interval over prompts.
+        _per_prompt = SIBLING_PROFILE.groupby(["model", "regime", "kind", "bin", "prompt"])["distance"].mean().reset_index()
+        _summary = _per_prompt.groupby(["model", "regime", "kind", "bin"])["distance"].agg(["mean", "sem", "count"]).reset_index()
+        _summary.to_csv(RUNS_ROOT / "analysis" / "sibling_distance_profile.csv", index=False)
+        _shown = [m for m in _models if m in set(_summary["model"])]
+        with style(**STYLE_BARS):
+            _fig = page_figure(666.72, 175.0)
+            _axes = [axes_at(_fig, 45.0 + _i * 210.0, 42.0, 190.0, 105.0) for _i in range(len(_shown))]
+            for _ax, _model in zip(_axes, _shown):
+                _ax.axvspan(-256, 0, color=GRID, alpha=0.7, lw=0, zorder=0)
+                _ax.axvline(0, color="black", lw=0.6, zorder=1)
+                for _regime in ("frozen", "adapted"):
+                    for _kind, _ls, _lw in (("degenerate", "-", 1.5), ("healthy", ":", 1.1)):
+                        _row = _summary[(_summary["model"] == _model) & (_summary["regime"] == _regime)
+                                        & (_summary["kind"] == _kind) & (_summary["count"] >= 8)].sort_values("bin")
+                        _x = _row["bin"].to_numpy() + 32
+                        _ax.plot(_x, _row["mean"], color=_colors[_regime], ls=_ls, lw=_lw,
+                                 label=f"{_regime}, {'degenerate' if _kind == 'degenerate' else 'healthy sibling'}")
+                        _ax.fill_between(_x, _row["mean"] - 1.96 * _row["sem"], _row["mean"] + 1.96 * _row["sem"],
+                                         color=_colors[_regime], alpha=0.15, lw=0)
+                _ax.set_title(f"{_models[_model][0]}, layer {_models[_model][1]}", loc="center", pad=4)
+                _ax.set_xlim(-1024, 256)
+                _ax.set_xticks([-1024, -768, -512, -256, 0, 256], ["\u22121024", "\u2212768", "\u2212512", "\u2212256", "0", "256"])
+                _ax.set_xlabel("tokens from the onset")
+                _ax.grid(axis="y")
+                _ax.set_axisbelow(True)
+            _axes[0].set_ylabel("distance to healthy siblings")
+            _axes[0].legend(loc="upper left", fontsize=6.5, handlelength=2.2)
+            save(_fig, FIG_DIR / "fig_sibling_distance.pdf")
+            save(_fig, FIG_DIR / "fig_sibling_distance.png", dpi=300)
+    SIBLING_PROFILE.head()
+    return (SIBLING_PROFILE,)
 
 
 @app.cell

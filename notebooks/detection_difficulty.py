@@ -210,8 +210,14 @@ def _(
         return frame, float(wanted["tau"])
 
     def held(scores):
-        """The score after requiring the chosen run of consecutive tokens."""
-        return persistence_scores(np.asarray(scores, dtype=np.float32), persistence_pick.value)
+        """The score after requiring the chosen run of consecutive tokens.
+
+        Indexed by the token that closes each run, so it lines up with the
+        rollout and its onset; the first m-1 tokens cannot close a run.
+        """
+        m = persistence_pick.value
+        held_scores = persistence_scores(np.asarray(scores, dtype=np.float32), m)
+        return np.r_[np.full(min(m - 1, len(scores)), -np.inf), held_scores]
 
     LOADED = {}
     for _strategy, _ in RUNGS:
