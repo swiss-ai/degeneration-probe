@@ -163,11 +163,16 @@ def bold_name(name: str) -> str:
     return " ".join(parts)
 
 
-def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
-    apertus = table[table["model"] == "apertus"]
+def selected_layers(apertus: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The selection rule per strategy and seed: the selectable layer with the highest validation Warn_256 at 1%."""
     val_sel = apertus[(apertus["split"] == "val") & np.isclose(apertus["target_negative_fpr"], 0.01) & apertus["selectable"]]
     chosen = val_sel.sort_values("warning_recall_256", ascending=False).groupby(["recipe", "seed"]).head(1)
-    picked = chosen[["recipe", "seed", "layer"]]
+    return val_sel, chosen[["recipe", "seed", "layer"]]
+
+
+def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
+    apertus = table[table["model"] == "apertus"]
+    val_sel, picked = selected_layers(apertus)
     at = apertus[np.isclose(apertus["target_negative_fpr"], budget)]
     rows = []
     for recipe, seeds in picked.groupby("recipe"):
@@ -290,11 +295,13 @@ def positional_table(split: str) -> str:
 
 
 def rank_table(table: pd.DataFrame, split: str, budget: float) -> str:
-    apertus = table[(table["model"] == "apertus") & np.isclose(table["target_negative_fpr"], budget) & table["selectable"]]
+    # The probes of the strategies table: each seed read at the layer the selection rule picks for it.
+    apertus = table[table["model"] == "apertus"]
+    _, picked = selected_layers(apertus)
     cols = {"AUROC": "rollout_auc", "Best accuracy": "best_accuracy", r"$\mathrm{Warn}_{256}$": "warning_recall_256", "Post": "in_pattern_recall"}
-    means = apertus.groupby(["recipe", "layer", "split"])[list(cols.values())].mean().reset_index()
-    chosen = means[means["split"] == "val"].sort_values("warning_recall_256", ascending=False).groupby("recipe").head(1)[["recipe", "layer"]]
-    both = chosen.merge(means, on=["recipe", "layer"]).pivot_table(index=["recipe", "layer"], columns="split", values=list(cols.values()))
+    at = apertus[np.isclose(apertus["target_negative_fpr"], budget)].merge(picked, on=["recipe", "seed", "layer"])
+    means = at.groupby(["recipe", "split"])[list(cols.values())].mean().reset_index()
+    both = means.pivot_table(index="recipe", columns="split", values=list(cols.values()))
     rows, n = [], 0
     for name, c in cols.items():
         v, t, w = both[(c, "val")], both[(c, split)], both[("warning_recall_256", split)]
@@ -311,8 +318,8 @@ def rank_table(table: pd.DataFrame, split: str, budget: float) -> str:
     return rf"""\begin{{table}}[!htbp]
   \centering
   \caption{{Rank transfer from validation to the {test_split_name()}, Kendall's
-  $\tau$ over the ${n}$ \textsc{{Apertus}} training strategies, each read at its
-  validation-selected layer, at $\beta={budget * 100:.0f}\%$. Left: whether a metric
+  $\tau$ over the ${n}$ \textsc{{Apertus}} training strategies of \Cref{{tab:strategies}}, each read at
+  the layers selected there, at $\beta={budget * 100:.0f}\%$. Left: whether a metric
   reproduces its own ordering. Right: whether its validation ordering predicts
   the test ordering by warning coverage.}}
   \label{{tab:rank-transfer}}
