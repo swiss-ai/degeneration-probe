@@ -178,14 +178,17 @@ def _(Patch, mpl, plt):
     # the NeurIPS template, so one point of the canvas is one point on the page, and set in
     # Times like the body text (STIX is matplotlib's Times clone).
     TEXT_WIDTH = 397.5
-    # Regions of a degenerate response and the metrics that count them. The hues stay apart
-    # under protanopia, deuteranopia and tritanopia (Machado et al. 2009, CIEDE2000 >= 20).
+    # Regions of a degenerate response and the metrics that count them, from Paul Tol's high- and
+    # medium-contrast schemes: blue before the onset, gold for the warning window, red after it,
+    # as in the hand-drawn Figure 1. The three region hues stay apart under protanopia,
+    # deuteranopia and tritanopia (Machado et al. 2009, CIEDE2000 >= 20).
     PAPER_COLOR = {
-        "pre": "#56B4E9", "warn": "#E69F00", "post": "#882255", "early": "#0072B2", "det": "#cc8fb0",
+        "pre": "#6699CC", "warn": "#DDAA33", "post": "#BB5566", "early": "#004488", "det": "#EE99AA",
         "auc": "#c4c4c4", "acc": "#8a8a8a", "lead": "#6b6b6b",
     }
-    # One colour per model, for figures that give each model its own panel (Paul Tol's muted set).
-    PAPER_MODEL_COLOR = {"apertus": "#44AA99", "llama3p1": "#332288", "mistral": "#CC6677"}
+    # One colour per model, for figures that give each model its own panel or bar (Paul Tol's
+    # muted teal and purple, vibrant orange), at similar lightness so no model looks heavier.
+    PAPER_MODEL_COLOR = {"apertus": "#44AA99", "llama3p1": "#AA4499", "mistral": "#EE7733"}
     PAPER_SIZE = {"tick": 7.0, "label": 7.5, "legend": 7.5, "title": 8.0, "note": 6.5}
     STYLE_PAPER = {
         "font.family": "serif", "font.serif": ["STIXGeneral"], "mathtext.fontset": "stix", "pdf.fonttype": 42,
@@ -1440,7 +1443,7 @@ def _(
             for ax, low, strip, model in zip(top, bottom, strips, REB_PROBES):
                 probes = REB_PROBES[model]
                 color = PAPER_MODEL_COLOR[model]
-                ax.axvspan(-256, 0, color=PAPER_COLOR["warn"], alpha=0.25, lw=0, zorder=0)
+                ax.axvspan(-256, 0, color=PAPER_COLOR["warn"], alpha=0.22, lw=0, zorder=0)
                 ax.axvline(0, color=INK, lw=0.6, zorder=1)
                 ax.axvline(-1050, color=GRID, lw=0.8, zorder=1)
                 for (regime, layer), st in zip(probes, styles):
@@ -1494,7 +1497,7 @@ def _(
             for a in top[1:] + bottom[1:] + strips[1:]:
                 a.tick_params(axis="y", labelleft=False)
             handles = [Line2D([], [], color=INK_SOFT, **st) for st in styles]
-            handles += [Patch(color=PAPER_COLOR["warn"], alpha=0.25), Line2D([], [], color=INK, lw=0.6)]
+            handles += [Patch(color=PAPER_COLOR["warn"], alpha=0.22), Line2D([], [], color=INK, lw=0.6)]
             fig.legend(handles, ["frozen", "adapted, same layer", "adapted, own layer", "warning window", "onset"],
                        loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=5, handlelength=2.4)
             save(fig, FIG_DIR / "fig_q4_onset_profile.pdf")
