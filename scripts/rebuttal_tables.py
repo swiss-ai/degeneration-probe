@@ -142,7 +142,7 @@ def strategy_name(row) -> tuple[str, str]:
         return group, f"{kind}, decay ${str(row['decay']).removeprefix(kind)}$"
     text = r"\texttt{" + selection.replace("_", r"\_") + "}"
     if selection != "all_tokens":
-        text += f" $W{{=}}{int(window)}$"
+        text += f" ({int(window)})"
     if group in ("horizon", "adapted"):
         if isinstance(anchor, str):
             text += " centred" if anchor == "centered" else " trailing"
@@ -196,8 +196,8 @@ def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
     headers = {
         "selection": r"\textbf{Token selection} (frozen, hard target, $K{=}0$)",
         "horizon": r"\textbf{Target horizon} (frozen, hard target from $K$ tokens before the onset)",
-        "soft": r"\textbf{Soft targets} (frozen, \texttt{frontier\_window} $W{=}512$ centred)",
-        "adapted": r"\textbf{Adapted} (LoRA rank 16 on blocks $0$ to $\ell$)",
+        "soft": r"\textbf{Soft targets} (frozen, \texttt{frontier\_window} (512) centred)",
+        "adapted": r"\textbf{Adapted} (LoRA rank 16 on layers $0$ to $\ell$)",
     }
     lines = []
     for group, header in headers.items():
@@ -219,7 +219,7 @@ def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
   are measured on the {test_split_name()} at $\beta={budget * 100:.0f}\%$. Layer: median and
   range over seeds of the selected layer. Other columns: mean $\pm$ one standard deviation
   over three seeds. AUROC varies little between strategies, while warning coverage varies
-  several-fold.{dagger}}}
+  several-fold. The number after a window strategy is its window size in tokens.{dagger}}}
   \label{{tab:strategies}}
   \footnotesize
   \setlength{{\tabcolsep}}{{3pt}}

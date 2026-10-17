@@ -145,7 +145,7 @@ ALARMED_ONLY = {"fired_before_frontier", "median_offset"}
 
 
 def comparison_table(budget: float, split: str, label: str, caption: str, placeholder: bool = False,
-                     human: bool = False, pending: set = frozenset()) -> str:
+                     human: bool = False, pending: set = frozenset(), placement: str = "!htbp") -> str:
     """Every scorer with every metric as a column, one block per model. With ``placeholder`` every value is a red
     question mark, for a split whose labels are not in yet; ``pending`` does the same for the named models only.
     With ``human`` the rows come from the human-verified split."""
@@ -200,7 +200,7 @@ def comparison_table(budget: float, split: str, label: str, caption: str, placeh
                         text += r"$^\dagger$"
                     cells.append(text)
                 lines.append("    " + " & ".join(cells) + r" \\")
-    return rf"""\begin{{table}}[!htbp]
+    return rf"""\begin{{table}}[{placement}]
   \centering
   \caption{{{caption}}}
   \label{{{label}}}
@@ -273,11 +273,11 @@ def sweep_table(families: list[tuple[str, str]], params: list[tuple[str, str]], 
 
 
 COMPARISON_NOTE = (
-    r"Scorers are grouped, from top to bottom, by what they read: nothing, the emitted tokens, the generator's "
-    r"confidence in them, or the hidden states. Each baseline is read at the setting chosen on validation "
+    r"Scorers are grouped, from top to bottom, by what they read: only the length of the response, the emitted tokens, the generator's "
+    r"confidence in them, or the activations. Each baseline is read at the setting chosen on validation "
     r"(\Cref{app:baselines}). Probes are labelled with the layer they read. $n$: number of "
     r"degenerate responses. $^\dagger$: raises an alarm on fewer than $90\%$ of degenerate responses, so its Early "
-    r"and Lead cover a minority of them and are left out of the comparison. FA and Pre are not ranked. Best value in each "
+    r"and Lead describe only part of them and are left out of the comparison. FA and Pre are not ranked. Best value in each "
     r"other column and model in bold, values within one standard deviation of it underlined. Mean $\pm$ one standard deviation over "
     r"three seeds for probes; the baselines are deterministic, and random alarms are given in closed form.")
 
@@ -304,7 +304,7 @@ def main() -> None:
             args.budget, args.split, "tab:baselines",
             rf"Probes against the baselines on the {'human-verified ' if args.human else ''}in-domain test split at "
             rf"$\beta={args.budget * 100:.0f}\%$. " + COMPARISON_NOTE + pending_note(pending_in),
-            human=args.human, pending=pending_in),
+            human=args.human, pending=pending_in, placement="t"),
         "probes_judge.tex": comparison_table(
             args.budget, args.split, "tab:probes-judge", r"As \Cref{tab:baselines}, with judge labels."),
         "budget_1pct.tex": comparison_table(
