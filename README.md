@@ -1,13 +1,13 @@
-# ONWARD: early-warning probes for repetitive degeneration
+# PREWARN: early-warning probes for repetitive degeneration
 
 This repository holds the code behind *Degeneration Detection Is Not Early Warning: False-Alarm
-Evaluation with ONWARD*. It covers every step of the paper: building a corpus of sampled responses with
+Evaluation with PREWARN*. It covers every step of the paper: building a corpus of sampled responses with
 annotated degeneration onsets, training linear probes on a generator's hidden states, selecting and scoring
-them, evaluating them with the onset-aligned ONWARD metrics, scoring the untrained baselines, reading the
+them, evaluating them with the onset-aligned PREWARN metrics, scoring the untrained baselines, reading the
 results on human-verified labels, and drawing the paper's tables and figures.
 
 The trained probes and their calibrated thresholds are released on Hugging Face:
-[huggingface.co/collections/marcodene/onward-degeneration-probes](https://huggingface.co/collections/marcodene/onward-degeneration-probes).
+[huggingface.co/collections/marcodene/prewarn-degeneration-probes](https://huggingface.co/collections/marcodene/prewarn-degeneration-probes).
 
 ## Contents
 
@@ -33,7 +33,7 @@ The trained probes and their calibrated thresholds are released on Hugging Face:
 | Dataset | Prompts, sampled responses, structural labels, judge verdicts, onset labels, cached activations | `degeneration_probe/dataset_gen/`, `cluster/utils/dataset/` |
 | Training | One probe per depth (frozen) or one adapted probe per layer, with a checkpoint every 100 steps | `scripts/train_probe.py`, `cluster/train.sbatch`, `cluster/launch_*.sh` |
 | Selection | The checkpoint chosen for each depth on validation | `scripts/replay_checkpoints.py`, `scripts/select_checkpoints.py` |
-| Scoring and evaluation | One score per token on every split; thresholds calibrated on validation; the ONWARD metrics | `scripts/score_selected_depths.py`, `scripts/score_rollouts.py`, `scripts/evaluate_scores.py` |
+| Scoring and evaluation | One score per token on every split; thresholds calibrated on validation; the PREWARN metrics | `scripts/score_selected_depths.py`, `scripts/score_rollouts.py`, `scripts/evaluate_scores.py` |
 | Baselines | Rule-based and confidence-based scorers evaluated the same way | `scripts/score_baselines.py`, `scripts/select_baseline_sweep.py` |
 | Human labels | Every test result re-read on human-verified onsets | `scripts/evaluate_human_labels.py`, `cluster/human_*.sbatch` |
 | Paper | LaTeX tables and PDF figures | `scripts/rebuttal_tables.py`, `scripts/baseline_sweep_tables.py`, `notebooks/paper_figures.py` |
@@ -637,13 +637,13 @@ Hugging Face repository holds, per probe, `probe.safetensors`, `config.json` (ba
 and layer), `thresholds.json` (thresholds at 1%, 5% and 10%), `seeds.json` (all three seeds' metrics) and,
 for adapted probes, the PEFT adapter. The model cards contain a self-contained loading example.
 
-`release/onward_probe.py` is a standalone loader that depends only on torch, transformers, peft,
+`release/prewarn_probe.py` is a standalone loader that depends only on torch, transformers, peft,
 safetensors and huggingface_hub:
 
 ```python
-from onward_probe import DegenerationMonitor
+from prewarn_probe import DegenerationMonitor
 
-monitor = DegenerationMonitor.from_pretrained("marcodene/onward-probes-llama-3.1-8b-instruct", subfolder="frozen-L15")
+monitor = DegenerationMonitor.from_pretrained("marcodene/prewarn-probes-llama-3.1-8b-instruct", subfolder="frozen-L15")
 prompt_ids = monitor.build_prompt_ids("Prove that ...")
 scores = monitor.score(prompt_ids, generated_ids)   # one probability per generated token
 first = monitor.first_alarm(scores, budget=0.05)     # index of the first alarm, or None

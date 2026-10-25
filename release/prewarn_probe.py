@@ -13,7 +13,7 @@ trained: the prompt is the model's chat template with the beginning-of-sequence
 token removed, tokenized without special tokens, followed by the generated
 tokens. ``build_prompt_ids`` builds it.
 
-    monitor = DegenerationMonitor.from_pretrained("marcodene/onward-probes-llama-3.1-8b-instruct",
+    monitor = DegenerationMonitor.from_pretrained("marcodene/prewarn-probes-llama-3.1-8b-instruct",
                                                   subfolder="frozen-L15")
     prompt_ids = monitor.build_prompt_ids("Prove that ...")
     scores = monitor.score(prompt_ids, generated_ids)      # one probability per generated token

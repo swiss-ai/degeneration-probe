@@ -6,7 +6,7 @@ at its own selected layer. Of the three seeds of each, the one with the highest
 validation warning coverage at the 1% budget (the selection rule's own figure)
 is released, and the metrics of all three seeds are written next to it.
 
-    <out>/onward-probes-<generator>/<frozen|adapted>-L<layer>/
+    <out>/prewarn-probes-<generator>/<frozen|adapted>-L<layer>/
         probe.safetensors   layer norm and linear head (norm.*, linear.*)
         config.json         base model and revision, layer, hidden size, source run
         thresholds.json     thresholds at 1%, 5% and 10%, persistence 1, calibrated on validation
@@ -74,7 +74,7 @@ def main() -> None:
     table = pd.read_csv(OUTPUTS / "analysis" / "selected_metrics.csv")
     table = table[table["recipe"].str.startswith(RECIPE) & (table["persistence"] == 1)]
     for model, (slug, base, revision, probes) in GENERATORS.items():
-        repo = args.out / f"onward-probes-{slug}"
+        repo = args.out / f"prewarn-probes-{slug}"
         for lora, layer in probes:
             rows = table[(table["model"] == model) & (table["lora"] == lora) & (table["layer"] == layer)]
             val = rows[(rows["split"] == "val") & np.isclose(rows["target_negative_fpr"], 0.01)]

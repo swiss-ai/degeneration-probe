@@ -1,7 +1,7 @@
 """Check that the released probes reproduce the scores the paper evaluated.
 
 Every probe folder written by scripts/export_release.py is loaded with the
-standalone loader in release/onward_probe.py, which shares no code with
+standalone loader in release/prewarn_probe.py, which shares no code with
 training, and scores a sample of validation responses of its generator. The
 scores are compared token by token with the ones stored by the evaluation of the
 probe's source run, and the first alarm at each released threshold is compared
@@ -24,7 +24,7 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "release"))
 
-from onward_probe import DegenerationMonitor  # noqa: E402
+from prewarn_probe import DegenerationMonitor  # noqa: E402
 
 STORE = Path("/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe")
 DATASETS = {"swiss-ai/Apertus-8B-Instruct-2509": "apertus-8b-instruct",
@@ -59,7 +59,7 @@ def main() -> None:
     parser.add_argument("--per-class", type=int, default=8)
     args = parser.parse_args()
     report = []
-    for repo in sorted(args.release.glob("onward-probes-*")):
+    for repo in sorted(args.release.glob("prewarn-probes-*")):
         model = tokenizer = None
         for folder in sorted(p for p in repo.iterdir() if (p / "config.json").is_file()):
             config = json.loads((folder / "config.json").read_text())

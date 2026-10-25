@@ -16,7 +16,7 @@ from pathlib import Path
 
 STORE = Path("/capstor/store/cscs/swissai/infra01/users/mdenegri/degeneration-probe")
 HF_USER = "marcodene"
-PAPER_TITLE = "Degeneration Detection Is Not Early Warning: False-Alarm Evaluation with ONWARD"
+PAPER_TITLE = "Degeneration Detection Is Not Early Warning: False-Alarm Evaluation with PREWARN"
 AUTHORS = ("De Negri, Marco and Sartori, Luca and Baggi, Lorenzo and Reihs, Moritz and "
            "Durech, Eduard Frank and El-Assady, Mennatallah and Pyatkin, Valentina and Hedström, Anna")
 GENERATORS = {
@@ -42,7 +42,7 @@ def probe_rows(repo: Path):
 
 
 def card(repo: Path, labels: str) -> str:
-    slug = repo.name.removeprefix("onward-probes-")
+    slug = repo.name.removeprefix("prewarn-probes-")
     info = GENERATORS[slug]
     probes = list(probe_rows(repo))
     base = probes[0][1]["base_model"]
@@ -89,7 +89,7 @@ tags:
 - monitoring
 ---
 
-# ONWARD degeneration probes for {info['name']}
+# PREWARN degeneration probes for {info['name']}
 
 Linear probes that read the residual stream of [{base}](https://huggingface.co/{base}) while it generates
 and score every generated token for **repetitive degeneration**, a loop that keeps repeating until the
@@ -213,7 +213,7 @@ def main() -> None:
     parser.add_argument("--release", type=Path, default=STORE / "release")
     parser.add_argument("--labels", choices=["judge", "human"], default="judge")
     args = parser.parse_args()
-    for repo in sorted(args.release.glob("onward-probes-*")):
+    for repo in sorted(args.release.glob("prewarn-probes-*")):
         (repo / "README.md").write_text(card(repo, args.labels))
         print(f"-> {repo / 'README.md'}")
 

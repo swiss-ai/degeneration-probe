@@ -220,7 +220,7 @@ def strategies_table(table: pd.DataFrame, split: str, budget: float) -> str:
   \centering
   \caption{{Training strategies compared on \textsc{{Apertus}}. Strategies are ordered by
   validation $\mathrm{{Warn}}_{{256}}$ at $\beta=1\%$, the score the selection rule of
-  \Cref{{sec:onward}} uses, and the selected strategy is in bold. The other metric columns
+  \Cref{{sec:prewarn}} uses, and the selected strategy is in bold. The other metric columns
   are measured on the {test_split_name()} at $\beta={budget * 100:.0f}\%$. Layer: median and
   range over seeds of the selected layer. Other columns: mean $\pm$ one standard deviation
   over three seeds. AUROC varies little between strategies, while warning coverage varies
